@@ -57,3 +57,115 @@ Every choice the spec left open, and every simplification, in one place.
   looks alive, but `start()` puts every agent back on its spawn position and
   reseeds the PRNG. The outcome then depends only on seed + placements, not
   on how long the player spent in setup. Agents visibly snap back at Start.
+
+## Simulation
+
+- **Tick phases are exactly the spec's order.** No change. The game ends
+  (win / loss / timeout) after the stats of the tick that caused it.
+- **Infection timing:** a bite sets `timer = infection_delay_ticks + 1`
+  because the Infected phase of the same tick decrements it once. So a
+  civilian bitten at tick t is Infected from t and a Zombie exactly at t + 20
+  (tested).
+- **Field schedule:** chase is recomputed when `tick % 5 == 0`, threat + flee
+  when `tick % 5 == 2` ("alternating ticks"), plus both at Start and both,
+  immediately, in the fence phase of any tick where a fence cell breaks.
+- **Field units:** 10 per straight step = 5 cost units per meter. The wake
+  radius (60 m) is therefore a threat value of 300.
+- **Flee field:** threat is capped at `flee_threat_cap_m` (200 m) before
+  multiplying by −1.2, so far-away regions are flat instead of infinite. The
+  "one more Dijkstra pass" runs Dial's algorithm seeded with every walkable
+  cell at its scaled value. The seeds come pre-sorted for free: capped cells
+  first, then the threat field's finalization order reversed.
+- **Corner cutting:** a diagonal step is allowed only if neither orthogonal
+  neighbour blocks (building, wall, and for civilians also fences). The same
+  rule is used to build the fields and to steer.
+- **Steering detail:** a zombie that has a civilian within
+  `zombie_seek_radius_m` (3 m) in its own cell or an open neighbour cell
+  steers straight at it instead of at the cell centre. Without this, zombies
+  hover a cell away from targets (bite radius 0.8 m < cell size 2 m).
+  Otherwise agents steer to the lowest of their 8 neighbours, as specified.
+- **Dormant civilians** (threat > wake radius) update on 1 tick in 4 and then
+  move 4 ticks' worth, so their average speed is unchanged. They are skipped by
+  separation on their off ticks but still push others.
+- **Random walk:** a dormant civilian keeps its heading and turns to one of
+  16 fixed directions with probability `wander_turn_chance` per update. The
+  table is literal constants (no sin/cos).
+- **Separation:** pushes by half the overlap per neighbour, stops after 8
+  overlapping neighbours or 48 scanned candidates, and is clamped to one
+  radius per tick. It reads the hash-time state, so a civilian bitten this
+  tick still pushes during this tick.
+- **Spatial hash:** besides `bucket_start` / `agent_ids`, the counting sort
+  stores civilians first inside each bucket, plus bucket-ordered copies of x,
+  y and state. Bites scan only civilians and towers only non-civilians. This
+  cut the late-game zombie phase from 13 ms to under 1 ms at 20k agents.
+- **Outbreak:** cluster seeds are drawn uniformly among civilians and
+  rejected if closer than 150 m to an earlier seed (after 5,000 failed tries,
+  any distinct civilian is accepted so tiny maps still start). Every civilian
+  within 8 m becomes a zombie; if fewer than 5, the 5 nearest do.
+- **Fence damage** accumulates as floats (10 hp/s = 0.5 hp per tick per
+  zombie) and is applied in the fence phase. Several zombies on one cell
+  stack.
+- **Towers fire immediately** when a target first appears, then every 10
+  ticks (2 shots/s), so a zombie at 30 m dies on ticks 0, 10, 20 (1 s).
+- **Dead zombies** keep their slot with state Dead and a 60-tick timer used
+  only for rendering (grey for 3 s, then hidden).
+- **Determinism** relies on f32 arithmetic with no FMA contraction, no
+  trig, sqrt only, PCG32, and index-order iteration. The fixture run (Paris,
+  5k agents, seed 2026, one tower, one fence, 400 ticks) hashes identically
+  native and in WASM under Node (tested).
+
+## Player tools
+
+- **Fences are clipped at buildings.** Cells of the drawn line that fall on
+  buildings or the map edge are simply not placed, so a line dragged from
+  wall to wall seals a street. (Refusing the whole fence made sealing streets
+  in Paris nearly impossible.) A line entirely on buildings is refused.
+- **Fence cost** is the polyline's geometric length (min one cell) times the
+  share of its cells actually placed. Cells that are already fences are
+  reused.
+- **Undo** is a placement history in the core (towers and fences in one
+  stack). Clear undoes everything.
+- **Garrison targeting** uses the building's polygon centroid. There is no
+  line-of-sight check (spec: known simplification, listed in the report).
+
+## Headless harness
+
+- **S2 towers:** "the 8 largest buildings nearest the centre" is read as the
+  8 largest by footprint among the 24 buildings whose centroids are nearest
+  the level centre.
+- **S3 population:** 20k agents can't fit in a 40 × 40 m compound, so S3 uses
+  400 civilians on random interior cells and 100 zombies on random cells at
+  least 8 m outside the ring. Outbreak clusters are not used.
+- **Time to 50% / 90% lost** counts Infected as lost (civilians remaining ≤
+  50% / 10% of the initial count).
+- **Scenario runs execute in parallel** (one sim per thread). Benchmarks
+  are single-threaded and run one at a time.
+- **WASM benchmark:** `tools/wasm-bench.mjs` loads the Node build of
+  `sim-wasm` and runs the same level, seed and tick count. Phase timing in
+  WASM uses `performance.now()`.
+- **Test results in the report** come from running `cargo test --release
+  --workspace` and `wasm-pack test --node` and parsing libtest's output.
+- **Report charts** are hand-written SVG with an inline hover tooltip, using
+  the game's own colours for civilians, infected and zombies. The phase chart
+  shows 5-tick means; the tables keep the exact max.
+- **Environment:** the report names the host CPU (passed in by `dev.sh` as
+  `HOST_CPU`) and what the container sees, because benchmarks run in Docker's
+  Linux VM.
+
+## Browser
+
+- **Triple buffering instead of double.** The main thread interpolates
+  between the two latest ticks, so it reads two slots while the worker writes
+  a third. With only two buffers the worker would overwrite the "previous"
+  slot mid-read.
+- **WASM memory is not shared** (that would need nightly `build-std` with
+  atomics). The worker copies positions and render states from WASM memory
+  into the SharedArrayBuffer after each step (about 1 MB at 100k agents).
+- **Setup ticks run at 1×** regardless of the speed setting. Speed applies
+  while running.
+- **Commands** are applied by the worker between ticks, as soon as they
+  arrive. The worker is single-threaded, so that is the start of the next
+  tick.
+- **Replay same seed** re-creates the sim with the same level, population and
+  seed, re-applies the placement history and starts immediately.
+- **Debug heatmaps** are refreshed once per second while enabled.

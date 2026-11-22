@@ -400,14 +400,19 @@ impl Sim {
                 (dx * dx + dy * dy).sqrt()
             })
             .sum();
-        let length = length.max(self.grid.cell);
+        let cells = self.grid.rasterize_polyline(pts);
+        // Cells on buildings or the map edge are clipped away: a fence drawn
+        // from wall to wall seals the street. The budget pays only for the
+        // share of the line that is actually placed.
+        let open: Vec<usize> = cells.iter().copied().filter(|&c| self.grid.kind[c] == WALK || self.grid.kind[c] == FENCE).collect();
+        if open.is_empty() {
+            return Err("fences cannot be placed on buildings or the map edge".into());
+        }
+        let length = (length * open.len() as f32 / cells.len() as f32).max(self.grid.cell);
         if length > self.fence_left_m() + 1e-3 {
             return Err(format!("fence is {:.0} m, only {:.0} m left", length, self.fence_left_m()));
         }
-        let cells = self.grid.rasterize_polyline(pts);
-        if cells.iter().any(|&c| self.grid.kind[c] != WALK && self.grid.kind[c] != FENCE) {
-            return Err("fences cannot overlap buildings or the map edge".into());
-        }
+        let cells = open;
         let mut new_cells = Vec::new();
         for c in cells {
             if self.grid.kind[c] == WALK {

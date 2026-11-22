@@ -216,9 +216,15 @@ fn placement_budgets_and_undo() {
     'search: for dy in (-300..300).step_by(4) {
         for dx in (-300..300).step_by(4) {
             let (x0, y0) = (cx + dx as f32, cy + dy as f32);
-            if sim.place_fence(&[[x0, y0], [x0 + 50.0, y0]]).is_ok() {
-                placed = Some((x0, y0));
-                break 'search;
+            match sim.place_fence(&[[x0, y0], [x0 + 50.0, y0]]) {
+                Ok(l) if (l - 50.0).abs() < 0.01 => {
+                    placed = Some((x0, y0));
+                    break 'search;
+                }
+                Ok(_) => {
+                    sim.undo(); // partly clipped by a building: keep looking
+                }
+                Err(_) => {}
             }
         }
     }
@@ -226,9 +232,12 @@ fn placement_budgets_and_undo() {
     assert!((sim.fence_used_m - 50.0).abs() < 0.01);
     let c = sim.grid.cell_of(x0 + 10.0, y0);
     assert_eq!(sim.grid.kind[c], FENCE);
-    // Budget: a 360 m fence no longer fits (50 + 360 > 400).
-    assert!(sim.place_fence(&[[x0, y0 + 4.0], [x0 + 360.0, y0 + 4.0]]).is_err());
-    // Over a building: refused.
+    // Budget on open ground (nothing to clip): 350 m fits, 60 m more does not.
+    let mut open = Sim::new(&level::open_field(500.0), common::cfg(), 1, 1);
+    assert!(open.place_fence(&[[30.0, 30.0], [380.0, 30.0]]).is_ok());
+    assert!(open.place_fence(&[[30.0, 60.0], [90.0, 60.0]]).is_err());
+    assert!(open.place_fence(&[[30.0, 60.0], [70.0, 60.0]]).is_ok());
+    // Entirely on a building: refused. (Lines that only cross buildings are clipped.)
     let b = &sim.grid.buildings[0];
     let [bx, by] = b.centroid;
     if sim.grid.kind[sim.grid.cell_of(bx, by)] == sim_core::grid::BUILDING {
@@ -253,4 +262,20 @@ fn rasterized_fences_have_no_diagonal_gaps() {
         let (ax, ay, bx, by) = (a % w, a / w, b % w, b / w);
         assert_eq!((ax - bx).abs() + (ay - by).abs(), 1, "cells {a} and {b} only touch diagonally");
     }
+}
+
+#[test]
+fn fences_are_clipped_at_buildings_and_charged_for_placed_part() {
+    let lvl = level::grid_city(2, 20.0, 10.0, 1);
+    let mut sim = Sim::new(&lvl, common::cfg(), 10, 1);
+    // A line across the middle street and through two buildings.
+    let [ax, ay] = sim.grid.buildings[0].centroid;
+    let [bx, _] = sim.grid.buildings[1].centroid;
+    let cells = sim.grid.rasterize_polyline(&[[ax, ay], [bx, ay]]);
+    let l = sim.place_fence(&[[ax, ay], [bx, ay]]).unwrap();
+    let placed = cells.iter().filter(|&&c| sim.grid.kind[c] == FENCE).count();
+    assert!(placed > 0 && placed < cells.len(), "only the street part is fenced");
+    let full = bx - ax;
+    assert!((l - full * placed as f32 / cells.len() as f32).abs() < 0.01);
+    assert!(cells.iter().all(|&c| sim.grid.kind[c] != WALK), "every open cell of the line is fenced");
 }

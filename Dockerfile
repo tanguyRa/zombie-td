@@ -26,7 +26,8 @@ RUN rustup target add wasm32-unknown-unknown \
 
 # Build outputs live in a container volume (fast, and Linux binaries
 # don't leak into the macOS checkout).
-ENV CARGO_TARGET_DIR=/cache/target
+ENV CARGO_TARGET_DIR=/cache/target \
+    IN_DEV_CONTAINER=1
 
 RUN git config --system --add safe.directory /work
 

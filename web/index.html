@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zombie TD</title>
+  </head>
+  <body>
+    <header id="topbar">
+      <div class="brand">Zombie&nbsp;TD <span id="phase" class="phase">Loading</span></div>
+      <label aria-label="Level"><select id="level"></select></label>
+      <label class="pop">Population <input id="pop" type="range" min="5000" max="100000" step="5000" value="20000" /> <span id="pop-label">20k</span></label>
+      <label>Seed <input id="seed" type="number" min="0" value="1" /></label>
+      <div class="group">
+        <button id="start" class="primary">Start</button>
+        <button id="pause">Pause</button>
+      </div>
+      <div class="group seg" aria-label="Speed">
+        <button id="speed-1">1×</button><button id="speed-2">2×</button><button id="speed-4">4×</button>
+      </div>
+      <button id="reset">Reset</button>
+      <span id="fallback" class="badge" hidden title="SharedArrayBuffer unavailable: positions are copied each tick">fallback mode</span>
+    </header>
+
+    <div id="map"></div>
+
+    <aside id="tools">
+      <h2>Setup</h2>
+      <button id="tool-pan" class="tool">Pan <kbd>Esc</kbd></button>
+      <button id="tool-tower" class="tool">Tower <span class="left" id="towers-left">–</span></button>
+      <button id="tool-fence" class="tool">Fence <span class="left" id="fence-left">–</span></button>
+      <div class="row"><button id="undo">Undo</button><button id="clear">Clear</button></div>
+      <p id="hint" class="hint"></p>
+      <h2>Debug</h2>
+      <div class="seg small">
+        <button id="field-none" class="on">No field</button><button id="field-chase">Chase</button><button id="field-flee">Flee</button>
+      </div>
+      <label class="check"><input id="hash-toggle" type="checkbox" /> Spatial-hash grid</label>
+      <button id="fit" class="small">Frame level</button>
+    </aside>
+
+    <aside id="hud">
+      <div class="big"><span id="h-time">0:00</span></div>
+      <dl>
+        <dt><i class="dot civ"></i>Civilians</dt><dd id="h-civ">–</dd>
+        <dt><i class="dot inf"></i>Infected</dt><dd id="h-inf">–</dd>
+        <dt><i class="dot zom"></i>Zombies</dt><dd id="h-zom">–</dd>
+        <dt><i class="dot dead"></i>Dead</dt><dd id="h-dead">–</dd>
+        <dt>Survival</dt><dd id="h-surv">–</dd>
+        <dt>Sim ms/tick <small>last / p95</small></dt><dd id="h-sim">–</dd>
+        <dt>Render fps</dt><dd id="h-fps">–</dd>
+        <dt>Dormant</dt><dd id="h-dorm">–</dd>
+      </dl>
+    </aside>
+
+    <div id="result" class="modal" hidden>
+      <div class="card">
+        <h2 id="r-title">Game over</h2>
+        <dl>
+          <dt>Outcome</dt><dd id="r-outcome"></dd>
+          <dt>Survival</dt><dd id="r-surv"></dd>
+          <dt>Zombies killed</dt><dd id="r-killed"></dd>
+          <dt>Time</dt><dd id="r-time"></dd>
+        </dl>
+        <div class="row">
+          <button id="replay" class="primary">Replay same seed</button>
+          <button id="r-close">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" hidden></div>
+    <div id="loading">Loading level…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

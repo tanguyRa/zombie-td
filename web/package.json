@@ -1,0 +1,20 @@
+{
+  "name": "zombie-td-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "wasm": "cd .. && wasm-pack build crates/sim-wasm --release --target web --out-dir ../../web/src/wasm/pkg",
+    "dev": "npm run wasm && vite --host 0.0.0.0 --port 5173 --strictPort",
+    "build": "npm run wasm && tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@deck.gl/core": "9.4.1",
+    "@deck.gl/layers": "9.4.1"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vite": "6.4.6"
+  }
+}
