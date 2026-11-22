@@ -1045,6 +1045,76 @@ fn pulling_down_a_fence_gives_taken_over_cells_back() {
     assert_eq!(back, &cells);
 }
 
+/// Break cell `c` (open ground, 0 hp), as a lost fight would.
+fn break_cell(m: &mut Match, c: u32) {
+    let s = m.debug_sim_mut();
+    s.grid.fence_hp[c as usize] = 0.0;
+    s.grid.set_kind(c as usize, WALK);
+}
+
+#[test]
+fn a_cell_taken_over_twice_goes_back_whatever_the_pull_down_order() {
+    for b_first in [true, false] {
+        let mut m = mono("light_fence", 40);
+        let [cx, cy] = m.center();
+        let line = vec![[cx - 20.0, cy - 50.0], [cx + 20.0, cy - 50.0]];
+        // Wave 1: fence A; its first cell X breaks.
+        m.apply(Action::PlayCard { hand_index: 0, target: Target::Polyline(line.clone()) }).unwrap();
+        let a = m.structures()[0].clone();
+        let StructureKind::Fence { cells, .. } = a.kind.clone() else { panic!() };
+        let x = cells[0];
+        fast_win(&mut m, 5);
+        break_cell(&mut m, x);
+        m.apply(Action::NextWave).unwrap();
+        // Wave 2: B over X, and X breaks again.
+        m.apply(Action::PlayCard { hand_index: 0, target: Target::Polyline(line.clone()) }).unwrap();
+        let b = m.structures()[1].id;
+        assert_eq!(m.structure_at_cell(x).map(|s| s.id), Some(b));
+        fast_win(&mut m, 5);
+        break_cell(&mut m, x);
+        m.apply(Action::NextWave).unwrap();
+        // Wave 3: C over X.
+        m.apply(Action::PlayCard { hand_index: 0, target: Target::Polyline(line.clone()) }).unwrap();
+        let c = m.structures()[2].id;
+        assert_eq!(m.structure_at_cell(x).map(|s| s.id), Some(c));
+        let order = if b_first { [b, c] } else { [c, b] };
+        m.apply(Action::PullDown { placement_id: order[0] }).unwrap();
+        m.apply(Action::PullDown { placement_id: order[1] }).unwrap();
+        // X is A's again, broken, in its place, and A can repair it.
+        assert_eq!(m.structures().len(), 1);
+        assert_eq!(m.structure_at_cell(x).map(|s| s.id), Some(a.id), "b_first {b_first}");
+        let StructureKind::Fence { cells: back, .. } = &m.structures()[0].kind else { panic!() };
+        assert_eq!(back, &cells, "b_first {b_first}");
+        assert_eq!((m.sim().grid.kind[x as usize], m.sim().grid.fence_hp[x as usize]), (WALK, 0.0));
+        assert!(m.repair_cost(a.id).is_some(), "b_first {b_first}");
+        m.apply(Action::Repair { fence_id: a.id }).unwrap();
+        assert_eq!(m.sim().grid.kind[x as usize], FENCE);
+    }
+}
+
+#[test]
+fn a_mulligan_drops_an_earlier_keep_choice() {
+    // The keep marks pointed into the old hand: after a mulligan the default
+    // (first two stay) applies again.
+    let mut m = starter(5);
+    m.apply(Action::KeepCards { hand_indices: vec![0, 1] }).unwrap();
+    m.apply(Action::Mulligan).unwrap();
+    assert!(m.hand().iter().all(|c| !c.keep));
+    let mut plain = starter(5);
+    plain.apply(Action::Mulligan).unwrap();
+    assert_eq!(m.state_hash(), plain.state_hash(), "no trace of the old choice");
+    fast_win(&mut m, 10);
+    m.apply(Action::NextWave).unwrap();
+    assert_eq!(m.hand_ids().len(), 7);
+    // A choice made after the mulligan still counts.
+    let mut k = starter(5);
+    k.apply(Action::Mulligan).unwrap();
+    k.apply(Action::KeepCards { hand_indices: vec![] }).unwrap();
+    fast_win(&mut k, 10);
+    k.apply(Action::NextWave).unwrap();
+    assert_eq!(k.hand_ids().len(), 5);
+}
+
 #[test]
 fn huge_fence_coordinates_are_refused_quickly() {
     let mut m = mono("light_fence", 41);

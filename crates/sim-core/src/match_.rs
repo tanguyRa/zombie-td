@@ -1047,6 +1047,9 @@ impl Match {
         }
         cs.supply -= cost;
         cs.mulligan_used = true;
+        // The keep marks pointed into the old hand: a choice made before the
+        // mulligan no longer counts (T3 review).
+        cs.keep_chosen = false;
         let n = cs.hand.len() as u32;
         // Draw the new hand first, the old one set aside: if the deck runs
         // short the discard is reshuffled into it (`draw`), so an old card
@@ -1180,6 +1183,32 @@ impl Match {
                     if let Some(Structure { kind: StructureKind::Fence { cells: old, .. }, .. }) = owner {
                         let at = (t.index as usize).min(old.len());
                         old.insert(at, t.cell);
+                    }
+                }
+                // Cells newer fences took over from this one are re-pointed to
+                // where this fence got them from (its own `TakenCell`), or no
+                // longer go back anywhere if it built them. Without this a
+                // cell taken over twice was lost once both newer fences were
+                // pulled down (T3 review).
+                for other in self.state.cards.structures.iter_mut() {
+                    if let StructureKind::Fence { taken_over: theirs, .. } = &mut other.kind {
+                        if !theirs.iter().any(|t| t.from == id) {
+                            continue;
+                        }
+                        theirs.retain_mut(|t| {
+                            if t.from != id {
+                                return true;
+                            }
+                            match taken_over.iter().find(|o| o.cell == t.cell) {
+                                Some(o) => {
+                                    *t = *o;
+                                    true
+                                }
+                                None => false,
+                            }
+                        });
+                        // Give-back inserts in ascending index (stable sort).
+                        theirs.sort_by_key(|t| t.index);
                     }
                 }
             }

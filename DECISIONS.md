@@ -436,7 +436,9 @@ Every choice the spec left open, and every simplification, in one place.
   1. gets its supply income;
   2. keeps up to `hand_keep` (2) unplayed cards and discards the rest in
      hand order. If `KeepCards` was applied since the last prep opened
-     (`keep_chosen`, reset at every prep), the marked cards stay: an empty
+     (`keep_chosen`, reset at every prep and by a mulligan, whose new hand
+     carries no marks; before that fix a keep choice survived the mulligan
+     and kept nothing, T3 review), the marked cards stay: an empty
      list is a choice and keeps nothing, and the last choice counts.
      Without a choice, the first two in hand order stay;
   3. draws `hand_draw` (5) on top, so a hand holds up to 7.
@@ -502,7 +504,14 @@ Every choice the spec left open, and every simplification, in one place.
   back to its old owner, if that fence still stands, at its old position
   and broken as it was (open ground, 0 hp), so the gap can be repaired
   again. Before this fix a same-prep undo left a permanent gap with no
-  owner (T3 review).
+  owner (T3 review). A cell can be taken over more than once (A, then B,
+  then C): pulling a fence down re-points the other fences' `TakenCell`s
+  that name it to its own `TakenCell` for that cell (the older owner and
+  index), or drops them if it built the cell, then sorts that list by
+  index so give-back stays in ascending order. So the cell always goes
+  back to the newest fence still standing, whatever the pull-down order.
+  Before this, pulling down B then C lost the cell for good (second T3
+  review).
 - **Repair:** costs `max(1, ceil(card cost × repair_cost_factor (0.5) ×
   damaged share))`. The damaged share is missing hp over full hp, and a
   broken cell counts as fully missing. Every cell goes back to full hp,
