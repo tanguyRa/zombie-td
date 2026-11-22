@@ -2,7 +2,7 @@
 // background closest ring first, served from the block cache when present.
 //
 // Usage:
-//   const loader = new MapLoader({ center, ringRadii, cache: await IdbBlockCache.open() });
+//   const loader = new MapLoader({ center, ringRadii, cache: await openBlockCache() });
 //   loader.on("chunk", (c) => match.add_buildings(c));   // background chunks only
 //   const first = await loader.start();                  // waves 1–2, for Match::new_streaming
 //   if (!loader.ringReady(3)) await loader.whenRingReady(3);
@@ -10,10 +10,12 @@
 // Subscribe before `start()`: background chunks served from the cache are
 // emitted right after `start()` resolves. `start()`'s chunks are not emitted
 // as events (they go to `new_streaming`), so every block is delivered once.
+// `start()` may be called again after it rejects: it only fetches the
+// initial blocks still missing.
 
 import { blocksForDisc, blocksForRing, type BlockId, type LatLon } from "./blocks";
 import { MemoryBlockCache, makeCachedBlock, type BlockStore, type CachedBlock } from "./cache";
-import { BLOCK_MARGIN_M, projectBlock, snapshotHash, type BuildingChunk } from "./chunks";
+import { BLOCK_MARGIN_M, CELL_SIZE_M, projectBlock, snapshotHash, type BuildingChunk } from "./chunks";
 import type { FetchFn } from "./osm";
 import { fetchBlocks } from "./overpass";
 
@@ -34,12 +36,21 @@ export function matchRingRadii(ringRadiusM: number[], wave8RadiusM: number, leve
   });
 }
 
+/// Default `coverageSlackM`: one cell diagonal (`cell_size_m × √2`, 2.83 m).
+export const DEFAULT_COVERAGE_SLACK_M = CELL_SIZE_M * Math.SQRT2;
+
 export interface MapLoaderOptions {
   center: LatLon;
   /// Each wave's radius in meters (`Match::ring_radii` / `matchRingRadii`).
   ringRadii: number[];
   /// `match.block_margin_m`: a ring needs its blocks out to radius + margin.
   marginM?: number;
+  /// Extra radius on top of radius + margin (default `cell_size_m × √2`).
+  /// sim-core's `ring_ready` checks the cells within radius + margin; a
+  /// widened rule (+ one cell diagonal, for cells straddling the disc) is
+  /// planned. Loading the larger disc is a superset of both, so it is safe
+  /// with either.
+  coverageSlackM?: number;
   cache?: BlockStore;
   fetch?: FetchFn;
   /// Overpass endpoints (default: `OVERPASS_URLS`).
@@ -54,7 +65,10 @@ export interface MapLoaderOptions {
   maxAttempts?: number;
   /// Delay before the first retry, doubled after each failure (default 1000 ms).
   backoffMs?: number;
-  sleep?: (ms: number) => Promise<void>;
+  /// Cached blocks older than this are fetched again (default: no expiry).
+  maxAgeMs?: number;
+  /// Backoff sleep. `abort()` cuts it short whether or not it honours `signal`.
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => Date;
 }
 
@@ -78,29 +92,71 @@ export interface MapLoaderStats {
 
 type Listener<T> = (v: T) => void;
 
+interface Waiter {
+  wave: number;
+  res: () => void;
+  rej: (e: Error) => void;
+}
+
+export function abortError(): Error {
+  const e = new Error("map loading aborted");
+  e.name = "AbortError";
+  return e;
+}
+
+const defaultSleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((res) => {
+    const t = setTimeout(res, ms);
+    signal?.addEventListener("abort", () => (clearTimeout(t), res()), { once: true });
+  });
+
+/// `sleep(ms)`, rejected with `abortError()` as soon as `signal` aborts.
+function abortableSleep(sleep: (ms: number, signal?: AbortSignal) => Promise<void>, ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((res, rej) => {
+    const onAbort = () => rej(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    sleep(ms, signal).then(
+      () => (signal.removeEventListener("abort", onAbort), res()),
+      (e) => (signal.removeEventListener("abort", onAbort), rej(e)),
+    );
+  });
+}
+
 export class MapLoader {
   readonly center: LatLon;
   readonly marginM: number;
+  readonly coverageSlackM: number;
   /// Blocks first needed by each wave (index 0 = wave 1), closest first.
-  /// Wave w's blocks touch the disc of ringRadii[w-1] + margin but not the
-  /// previous wave's disc; the union over waves 1..w covers disc w.
+  /// Wave w's blocks touch the disc of ringRadii[w-1] + margin + slack but
+  /// not the previous wave's disc; the union over waves 1..w covers disc w.
   readonly waveBlocks: BlockId[][];
   readonly stats: MapLoaderStats = { queries: 0, cacheHits: 0, fetched: 0 };
 
-  private opts: Required<Omit<MapLoaderOptions, "fetch" | "urls" | "center" | "ringRadii" | "marginM">> & Pick<MapLoaderOptions, "fetch" | "urls">;
+  private opts: Required<Omit<MapLoaderOptions, "fetch" | "urls" | "center" | "ringRadii" | "marginM" | "coverageSlackM">> & Pick<MapLoaderOptions, "fetch" | "urls">;
   private loaded = new Map<BlockId, BuildingChunk>();
   private hashes = new Map<BlockId, string>();
+  /// Blocks claimed by a running `load` (cache read or network).
   private pending = new Set<BlockId>();
+  /// Background blocks that failed, for `retryFailed()`.
   private failed: BlockId[] = [];
+  /// Blocks that failed for good (until `retryFailed()` or `start()` again).
+  private unavailable = new Map<BlockId, unknown>();
+  /// Wave index (0-based) of each block.
+  private waveOf = new Map<BlockId, number>();
+  private waiters = new Set<Waiter>();
   private listeners: { [K in keyof MapLoaderEvents]: Set<Listener<MapLoaderEvents[K]>> } = { chunk: new Set(), ring: new Set(), error: new Set() };
   private readyWaves = 0;
   private abortCtl = new AbortController();
+  private starting: Promise<BuildingChunk[]> | null = null;
   private background: Promise<void> | null = null;
   private emitChunks = false;
 
   constructor(o: MapLoaderOptions) {
     this.center = o.center;
     this.marginM = o.marginM ?? BLOCK_MARGIN_M;
+    this.coverageSlackM = o.coverageSlackM ?? DEFAULT_COVERAGE_SLACK_M;
+    if (!(this.coverageSlackM >= 0)) throw new Error(`coverageSlackM must be >= 0 (${this.coverageSlackM})`);
     this.opts = {
       cache: o.cache ?? new MemoryBlockCache(),
       fetch: o.fetch,
@@ -110,13 +166,15 @@ export class MapLoader {
       batchSize: o.batchSize ?? 6,
       maxAttempts: o.maxAttempts ?? 5,
       backoffMs: o.backoffMs ?? 1000,
-      sleep: o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+      maxAgeMs: o.maxAgeMs ?? Infinity,
+      sleep: o.sleep ?? defaultSleep,
       now: o.now ?? (() => new Date()),
     };
-    const discs = o.ringRadii.map((r) => r + this.marginM);
+    const discs = o.ringRadii.map((r) => r + this.marginM + this.coverageSlackM);
     this.waveBlocks = discs.map((r, w) =>
       w === 0 ? blocksForDisc(this.center.lat, this.center.lon, r) : blocksForRing(this.center, discs[w - 1], r),
     );
+    this.waveBlocks.forEach((ids, w) => ids.forEach((id) => this.waveOf.set(id, w)));
   }
 
   on<K extends keyof MapLoaderEvents>(ev: K, fn: Listener<MapLoaderEvents[K]>): () => void {
@@ -129,11 +187,28 @@ export class MapLoader {
   }
 
   /// Load waves 1..initialWaves (cache, then network) and resolve with their
-  /// chunks in block id order. Then starts the background load.
-  async start(): Promise<BuildingChunk[]> {
+  /// chunks in block id order. Then starts the background load. Concurrent
+  /// calls share one load; after a success it resolves with the same chunks;
+  /// after a rejection it can be called again (only the missing blocks are
+  /// fetched).
+  start(): Promise<BuildingChunk[]> {
+    if (!this.starting) {
+      const p = this.runStart();
+      this.starting = p;
+      p.catch(() => {
+        if (this.starting === p) this.starting = null;
+      });
+    }
+    return this.starting;
+  }
+
+  private async runStart(): Promise<BuildingChunk[]> {
     const n = Math.min(this.opts.initialWaves, this.waveBlocks.length);
     const first = this.waveBlocks.slice(0, n).flat();
+    for (const id of first) this.unavailable.delete(id);
     await this.load(first, true);
+    const missing = first.filter((id) => !this.loaded.has(id));
+    if (missing.length) throw new Error(`${missing.length} map blocks of the first waves are not loaded`);
     const chunks = first.map((id) => this.loaded.get(id)!).sort((a, b) => a.block_id - b.block_id);
     this.emitChunks = true;
     this.background = this.load(this.waveBlocks.slice(n).flat(), false);
@@ -149,33 +224,65 @@ export class MapLoader {
   retryFailed(): Promise<void> {
     const ids = this.failed;
     this.failed = [];
+    for (const id of ids) this.unavailable.delete(id);
     const p = this.load(ids, false);
     this.background = Promise.all([this.background, p]).then(() => undefined);
     return p;
   }
 
+  /// Stop loading: requests and backoff sleeps are cut short, `start()`
+  /// rejects and pending `whenRingReady` promises reject with an AbortError.
   abort() {
     this.abortCtl.abort();
+    const e = abortError();
+    for (const w of this.waiters) w.rej(e);
+    this.waiters.clear();
   }
 
-  /// Same rule as sim-core `ring_ready`: every block touching the disc of
-  /// wave `wave`'s radius + margin is loaded (waves <= 0 are always ready).
+  /// Every block touching the disc of wave `wave`'s radius + margin + slack
+  /// is loaded (waves <= 0 are always ready). With slack >= 0 this implies
+  /// sim-core's `ring_ready` (cells within radius + margin covered, or
+  /// within radius + margin + one cell diagonal once that rule lands).
   ringReady(wave: number): boolean {
     const w = Math.min(wave, this.waveBlocks.length);
     for (let k = 0; k < w; k++) for (const id of this.waveBlocks[k]) if (!this.loaded.has(id)) return false;
     return true;
   }
 
+  /// Resolves when `ringReady(wave)`. Rejects after `abort()`, or when a
+  /// block the wave needs failed for good (all attempts used; a later
+  /// `retryFailed()` can still load it, call `whenRingReady` again then).
   whenRingReady(wave: number): Promise<void> {
     if (this.ringReady(wave)) return Promise.resolve();
-    return new Promise((res) => {
-      const off = this.on("ring", () => {
-        if (this.ringReady(wave)) {
-          off();
-          res();
-        }
-      });
-    });
+    const err = this.ringError(wave);
+    if (err) return Promise.reject(err);
+    return new Promise((res, rej) => this.waiters.add({ wave, res, rej }));
+  }
+
+  /// Why wave `wave` can't become ready without outside help, or null.
+  private ringError(wave: number): Error | null {
+    if (this.abortCtl.signal.aborted) return abortError();
+    let n = 0;
+    let cause: unknown;
+    for (const [id, e] of this.unavailable) {
+      if (this.waveOf.get(id)! < wave) {
+        n++;
+        cause ??= e;
+      }
+    }
+    if (!n) return null;
+    return new Error(`map ring ${wave} can't be loaded: ${n} block${n > 1 ? "s" : ""} failed (${String((cause as Error)?.message ?? cause)})`, { cause });
+  }
+
+  private markUnavailable(ids: BlockId[], error: unknown) {
+    for (const id of ids) this.unavailable.set(id, error);
+    for (const w of [...this.waiters]) {
+      const e = this.ringError(w.wave);
+      if (e) {
+        this.waiters.delete(w);
+        w.rej(e);
+      }
+    }
   }
 
   /// Every loaded chunk, in block id order.
@@ -203,60 +310,87 @@ export class MapLoader {
       this.readyWaves++;
       this.emit("ring", this.readyWaves);
     }
+    for (const w of [...this.waiters]) {
+      if (this.ringReady(w.wave)) {
+        this.waiters.delete(w);
+        w.res();
+      }
+    }
+  }
+
+  private fresh(b: CachedBlock): boolean {
+    const max = this.opts.maxAgeMs;
+    if (max === Infinity) return true;
+    const age = this.opts.now().getTime() - Date.parse(b.fetchedAt);
+    return age <= max;
   }
 
   /// Load `ids` in order: cached ones first, then the rest in batches.
   /// `initial`: failures reject instead of being reported as events.
+  /// Whatever happens, the blocks it claimed and didn't load are released.
   private async load(ids: BlockId[], initial: boolean): Promise<void> {
     const todo = ids.filter((id) => !this.loaded.has(id) && !this.pending.has(id));
     if (!todo.length) return;
-    const cached = await this.opts.cache.getMany(todo);
-    for (const id of todo) {
-      const b = cached.get(id);
-      if (b) {
-        this.stats.cacheHits++;
-        this.add(b);
+    for (const id of todo) this.pending.add(id);
+    try {
+      let cached: Map<BlockId, CachedBlock>;
+      try {
+        cached = await this.opts.cache.getMany(todo);
+      } catch {
+        // Like writes, reads are best effort (closed connection, quota, ...).
+        cached = new Map();
       }
-    }
-    const missing = todo.filter((id) => !cached.has(id));
-    missing.forEach((id) => this.pending.add(id));
-    const batches: BlockId[][] = [];
-    for (let i = 0; i < missing.length; i += this.opts.batchSize) batches.push(missing.slice(i, i + this.opts.batchSize));
-    let next = 0;
-    let firstError: unknown = null;
-    const worker = async () => {
-      while (next < batches.length && firstError === null) {
-        const batch = batches[next++];
-        try {
-          await this.fetchBatch(batch);
-        } catch (e) {
-          batch.forEach((id) => this.pending.delete(id));
-          if (this.abortCtl.signal.aborted) {
-            firstError = e;
-            return;
-          }
-          if (initial) {
-            firstError = e;
-            return;
-          }
-          this.failed.push(...batch);
-          this.emit("error", { blocks: batch, error: e });
+      for (const id of todo) {
+        const b = cached.get(id);
+        if (b && this.fresh(b)) {
+          this.stats.cacheHits++;
+          this.pending.delete(id);
+          this.add(b);
         }
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(this.opts.concurrency, batches.length) }, worker));
-    if (firstError !== null && (initial || !this.abortCtl.signal.aborted)) throw firstError;
+      const missing = todo.filter((id) => !this.loaded.has(id));
+      const batches: BlockId[][] = [];
+      for (let i = 0; i < missing.length; i += this.opts.batchSize) batches.push(missing.slice(i, i + this.opts.batchSize));
+      let next = 0;
+      let firstError: unknown = null;
+      const worker = async () => {
+        while (next < batches.length && firstError === null) {
+          const batch = batches[next++];
+          try {
+            await this.fetchBatch(batch);
+          } catch (e) {
+            batch.forEach((id) => this.pending.delete(id));
+            if (initial || this.abortCtl.signal.aborted) {
+              firstError = e;
+              return;
+            }
+            this.failed.push(...batch);
+            this.markUnavailable(batch, e);
+            this.emit("error", { blocks: batch, error: e });
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(this.opts.concurrency, batches.length) }, worker));
+      if (firstError !== null) {
+        if (!this.abortCtl.signal.aborted) this.markUnavailable(todo.filter((id) => !this.loaded.has(id)), firstError);
+        if (initial || !this.abortCtl.signal.aborted) throw firstError;
+      }
+    } finally {
+      for (const id of todo) if (!this.loaded.has(id)) this.pending.delete(id);
+    }
   }
 
   private async fetchBatch(batch: BlockId[]): Promise<void> {
     const { maxAttempts, backoffMs, sleep } = this.opts;
+    const signal = this.abortCtl.signal;
     let lastErr: unknown;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) await sleep(backoffMs * 2 ** (attempt - 1));
-      if (this.abortCtl.signal.aborted) throw new Error("aborted");
+      if (attempt > 0) await abortableSleep(sleep, backoffMs * 2 ** (attempt - 1), signal);
+      if (signal.aborted) throw abortError();
       this.stats.queries++;
       try {
-        const got = await fetchBlocks(batch, { fetch: this.opts.fetch, urls: this.opts.urls, signal: this.abortCtl.signal });
+        const got = await fetchBlocks(batch, { fetch: this.opts.fetch, urls: this.opts.urls, signal });
+        if (signal.aborted) throw abortError();
         const now = this.opts.now();
         for (const id of batch) {
           const block = makeCachedBlock(id, got.get(id) ?? [], now);
@@ -272,7 +406,7 @@ export class MapLoader {
         return;
       } catch (e) {
         lastErr = e;
-        if (this.abortCtl.signal.aborted) throw e;
+        if (signal.aborted) throw abortError();
       }
     }
     throw lastErr;

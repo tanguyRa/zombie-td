@@ -2,10 +2,14 @@
 //
 // Geometry is kept in lat/lon (as Overpass returns it), so a cached block is
 // reusable for any match centre. Each building belongs to exactly one block:
-// the block containing the mean of its ring vertices (lat/lon, closing vertex
-// excluded). A query for a block returns every way that touches its box; the
-// ways whose centroid falls in another block are dropped (that block's own
-// query returns them).
+// the block containing its anchor vertex, the lexicographically smallest
+// (lat, then lon) vertex of its ring. The anchor is a vertex, so it lies in
+// its block's (padded) query box and Overpass `way(bbox)` always returns the
+// way for that block's own query, whatever the batching; it does not depend
+// on the ring's starting vertex or direction. A query returns every way
+// touching any of its boxes; ways anchored in another block are dropped
+// (that block's own query returns them). A vertex mean or centroid would
+// not do: it can lie in a block that no vertex or segment of the way enters.
 
 import { blockAt, blockLatLonBounds, type BlockId } from "./blocks";
 import { floorsOf, kindOf, overpassQuery, type BuildingKind, type FetchFn, type OsmWay } from "./osm";
@@ -48,17 +52,15 @@ export function rawBuildingOf(w: OsmWay): { block: BlockId; building: RawBuildin
   const last = pts[pts.length - 1];
   if (first.lat === last.lat && first.lon === last.lon) pts.pop();
   if (pts.length < 3) return null;
-  let sLat = 0;
-  let sLon = 0;
+  let anchor = pts[0];
   const ring: number[] = [];
   for (const p of pts) {
-    sLat += p.lat;
-    sLon += p.lon;
+    if (p.lat < anchor.lat || (p.lat === anchor.lat && p.lon < anchor.lon)) anchor = p;
     ring.push(p.lat, p.lon);
   }
   const tags = w.tags ?? {};
   return {
-    block: blockAt(sLat / pts.length, sLon / pts.length),
+    block: blockAt(anchor.lat, anchor.lon),
     building: { id: w.id, kind: kindOf(tags), floors: floorsOf(tags), ring },
   };
 }

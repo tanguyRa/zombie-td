@@ -61,9 +61,15 @@ export function project(lat: number, lon: number, lat0: number, lon0: number): P
   return [(lon - lon0) * metersPerDegLon(lat0), (lat - lat0) * METERS_PER_DEG_LAT];
 }
 
-/// Round to centimetres (the precision of level packs).
+/// Round half up: `floor(v + 0.5)`, the rule every port must use (Rust's
+/// `f64::round` rounds negative halves away from zero, so it differs).
+export function roundHalfUp(v: number): number {
+  return Math.floor(v + 0.5);
+}
+
+/// Round to centimetres (the precision of level packs): `floor(v*100 + 0.5) / 100`.
 export function roundCm(v: number): number {
-  return Math.round(v * 100) / 100;
+  return roundHalfUp(v * 100) / 100;
 }
 
 export function floorsOf(tags: Record<string, string>): number {
@@ -71,7 +77,7 @@ export function floorsOf(tags: Record<string, string>): number {
     const v = tags[key];
     if (v === undefined) continue;
     const f = parseFloat(String(v).split(";")[0].replace("m", "").trim()) / div;
-    if (Number.isFinite(f) && f > 0) return Math.max(1, Math.round(f * 10) / 10);
+    if (Number.isFinite(f) && f > 0) return Math.max(1, roundHalfUp(f * 10) / 10);
   }
   return 2;
 }
@@ -123,15 +129,35 @@ export function clipConvex(subject: Pt[], clip: Pt[]): Pt[] {
   return out;
 }
 
-/// POST one Overpass QL query, trying each endpoint in turn. Throws with a
-/// player-readable message when all fail.
+/// Why an Overpass response body is unusable, or null when it is fine.
+/// Overpass answers a timeout or out-of-memory with HTTP 200, a `remark`
+/// like "runtime error: Query timed out ..." and partial or empty
+/// `elements`: that is a failure, never an empty area.
+export function overpassBodyError(body: unknown): string | null {
+  if (typeof body !== "object" || body === null) return "Overpass sent a malformed answer";
+  const b = body as { elements?: unknown; remark?: unknown };
+  if (typeof b.remark === "string" && /error/i.test(b.remark)) return `Overpass failed (${b.remark.slice(0, 120)})`;
+  if (!Array.isArray(b.elements)) return "Overpass sent a malformed answer";
+  return null;
+}
+
+/// POST one Overpass QL query, trying each endpoint in turn. An HTTP error,
+/// an unparsable body, a body without an `elements` array or one with an
+/// error `remark` (timeout, out of memory) is a failure of that endpoint.
+/// Throws with a player-readable message when all fail.
 export async function overpassQuery(query: string, opts: { fetch?: FetchFn; signal?: AbortSignal; urls?: string[] } = {}): Promise<OsmWay[]> {
   const f: FetchFn = opts.fetch ?? ((i, init) => fetch(i, init));
   let lastErr = "";
   for (const url of opts.urls ?? OVERPASS_URLS) {
     try {
       const r = await f(url, { method: "POST", body: new URLSearchParams({ data: query }), signal: opts.signal });
-      if (r.ok) return ((await r.json()) as { elements: OsmWay[] }).elements;
+      if (r.ok) {
+        const body: unknown = await r.json();
+        const bad = overpassBodyError(body);
+        if (bad === null) return (body as { elements: OsmWay[] }).elements;
+        lastErr = bad;
+        continue;
+      }
       lastErr = r.status === 429 || r.status === 504 ? `Overpass is busy (${r.status})` : `Overpass error ${r.status}`;
     } catch (e) {
       if (opts.signal?.aborted) throw e;

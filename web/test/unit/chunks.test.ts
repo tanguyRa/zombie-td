@@ -3,6 +3,7 @@ import { blockAt, blockBoundsLocal, blockId, blockRowCol, blocksForDisc } from "
 import { BLOCK_MARGIN_M, canonicalChunk, projectBlock, snapshotHash, type BuildingChunk } from "../../src/map/chunks";
 import { fnv1a64Hex, fnv1a64HexBigInt } from "../../src/map/hash";
 import { assignToBlocks } from "../../src/map/overpass";
+import { roundCm, roundHalfUp } from "../../src/map/osm";
 import { generateLevel } from "../../src/levelgen";
 import { fakeOverpass, loadLevel, waysFromLevel, wayFromPolygon } from "./fixtures";
 
@@ -82,8 +83,9 @@ describe("projection", () => {
     const [x0, y0, x1, y1] = blockBoundsLocal(id, CENTER);
     const cx = (x0 + x1) / 2;
     const cy = (y0 + y1) / 2;
-    // 600 m long building centred in the block: sticks out ~175 m each side.
-    const big = wayFromPolygon(1, [[cx - 300, cy - 5], [cx + 300, cy - 5], [cx + 300, cy + 5], [cx - 300, cy + 5]], CENTER.lat, CENTER.lon);
+    // 600 m long building centred in the block (a flat diamond, anchored by
+    // its southern vertex in this block): sticks out ~175 m each side.
+    const big = wayFromPolygon(1, [[cx, cy - 5], [cx + 300, cy], [cx, cy + 5], [cx - 300, cy]], CENTER.lat, CENTER.lon);
     const tiny = wayFromPolygon(2, [[cx, cy], [cx + 3, cy], [cx + 3, cy + 3], [cx, cy + 3]], CENTER.lat, CENTER.lon);
     const got = assignToBlocks([big, tiny], [id]).get(id)!;
     const chunk = projectBlock({ id, buildings: got }, CENTER);
@@ -99,6 +101,20 @@ describe("projection", () => {
           const m = BLOCK_MARGIN_M;
           expect(f(x) >= f(c.bounds[0]) - m && f(x) <= f(c.bounds[2]) + m && f(y) >= f(c.bounds[1]) - m && f(y) <= f(c.bounds[3]) + m).toBe(true);
         }
+  });
+});
+
+describe("rounding", () => {
+  it("is floor(v * 100 + 0.5) exactly (half up, also for negative halves)", () => {
+    expect(roundHalfUp(12.5)).toBe(13);
+    expect(roundHalfUp(-12.5)).toBe(-12); // Rust's f64::round gives -13
+    expect(roundHalfUp(-12.51)).toBe(-13);
+    // floor(v + 0.5), not "nearest": 0.49999999999999994 + 0.5 rounds to 1 in f64.
+    expect(roundHalfUp(0.49999999999999994)).toBe(1);
+    expect(roundCm(-0.125)).toBe(-0.12);
+    expect(roundCm(0.125)).toBe(0.13);
+    const chunk: BuildingChunk = { block_id: 1, bounds: [-0.125, 0.125, 1, 2], buildings: [{ id: 1, kind: "other", floors: 2.25, polygon: [[-0.125, 0], [1, 0], [1, 1]] }] };
+    expect(canonicalChunk(chunk)).toBe('[1,[-12,13,100,200],[[1,"other",23,[-12,0,100,0,100,100]]]]');
   });
 });
 

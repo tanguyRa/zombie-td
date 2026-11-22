@@ -3,7 +3,8 @@
 
 import { blockBoundsLocal, type BlockId, type LatLon } from "./blocks";
 import { fnv1a64Hex } from "./hash";
-import { MIN_AREA_M2, area, clipConvex, project, roundCm, type BuildingKind, type Pt } from "./osm";
+import config from "../../../config.default.json";
+import { MIN_AREA_M2, area, clipConvex, project, roundCm, roundHalfUp, type BuildingKind, type Pt } from "./osm";
 import type { RawBuilding } from "./overpass";
 
 /// Mirrors sim-core `level::Building` (level-local meters).
@@ -21,23 +22,25 @@ export interface BuildingChunk {
   buildings: ChunkBuilding[];
 }
 
-/// `match.block_margin_m` in config.default.json: how far a building may
-/// stick out of its block in sim-core.
-export const BLOCK_MARGIN_M = 50;
+/// `match.block_margin_m` in config.default.json (50 m): how far a building
+/// may stick out of its block in sim-core.
+export const BLOCK_MARGIN_M: number = config.match.block_margin_m;
+/// `cell_size_m` in config.default.json (2 m): the sim grid's cell size.
+export const CELL_SIZE_M: number = config.cell_size_m;
 /// Buildings are clipped to the block grown by this much: 0.1 m inside the
 /// sim-core limit, so cm rounding and f32 parsing can never trip its check.
 export const CLIP_MARGIN_M = BLOCK_MARGIN_M - 0.1;
 
 /// Project one cached block for a match centred on `center`.
 ///
-/// Rules (all deterministic, + - * / and Math.round only):
+/// Rules (all deterministic, + - * / and Math.floor only):
 /// - each ring is projected with the level projection (`osm.project`);
 /// - a ring with a vertex outside the block grown by `CLIP_MARGIN_M` is
 ///   clipped to that rectangle (Sutherland–Hodgman); if fewer than 3 vertices
 ///   remain the building is dropped;
 /// - a building whose (clipped, unrounded) area is below 15 m² is dropped,
 ///   like `levelgen.ts`;
-/// - coordinates are rounded to cm (`Math.round(v * 100) / 100`);
+/// - coordinates are rounded to cm, half up (`floor(v * 100 + 0.5) / 100`);
 /// - buildings are sorted by OSM id.
 export function projectBlock(block: { id: BlockId; buildings: RawBuilding[] }, center: LatLon): BuildingChunk {
   const bounds = blockBoundsLocal(block.id, center);
@@ -62,18 +65,18 @@ export function projectBlock(block: { id: BlockId; buildings: RawBuilding[] }, c
 /// Prefix of the snapshot hash input; bump the version if the format changes.
 export const SNAPSHOT_PREFIX = "zt-map-v1\n";
 
-const cm = (v: number) => Math.round(v * 100);
+const cm = (v: number) => roundHalfUp(v * 100);
 
 /// One chunk's canonical line (no trailing newline): the compact JSON
 /// `[block_id,[x0,y0,x1,y1],[[id,"kind",floors_dm,[x,y,x,y,...]],...]]`
-/// where coordinates are integer centimetres (`round(v × 100)`), floors are
-/// integer tenths (`round(floors × 10)`), and buildings are in id order.
+/// where coordinates are integer centimetres (`floor(v × 100 + 0.5)`), floors
+/// are integer tenths (`floor(floors × 10 + 0.5)`), and buildings are in id order.
 export function canonicalChunk(c: BuildingChunk): string {
   const bs = [...c.buildings].sort((a, b) => a.id - b.id);
   return JSON.stringify([
     c.block_id,
     c.bounds.map(cm),
-    bs.map((b) => [b.id, b.kind, Math.round(b.floors * 10), b.polygon.flatMap(([x, y]) => [cm(x), cm(y)])]),
+    bs.map((b) => [b.id, b.kind, roundHalfUp(b.floors * 10), b.polygon.flatMap(([x, y]) => [cm(x), cm(y)])]),
   ]);
 }
 

@@ -2,28 +2,32 @@
   "source": "levels/paris-marais.json via web/test/unit/fixture.test.ts",
   "center_lat": 48.858,
   "center_lon": 2.358,
-  "level_radius_m": 400,
+  "level_radius_m": 500,
+  "schema_version": 2,
+  "block_margin_m": 50,
+  "coverage_slack_m": 2.8284271247461903,
   "ring_radii_m": [
     150,
-    182.60870361328125,
-    215.21739196777344,
-    247.82608032226562,
-    285.86956787109375,
-    323.91302490234375,
-    361.9565124511719,
-    400
+    195.6521759033203,
+    241.30435180664062,
+    286.9565124511719,
+    340.2173767089844,
+    393.478271484375,
+    446.7391052246094,
+    500
   ],
   "initial_block_ids": [
     16016002988,
     16016002989,
     16016002990,
+    16016265129,
     16016265130,
     16016265131,
     16016527271,
     16016527272,
     16016527273
   ],
-  "initial_snapshot_hash": "dec0537d9d1deca2",
-  "snapshot_hash": "6fe7b586750f9ce7",
-  "first_canonical_line": "[16015740847,[-24983,-63309,137,-38187],[]]"
+  "initial_snapshot_hash": "b7430361342cfe0c",
+  "snapshot_hash": "bf7a96e9e3c2dd70",
+  "first_canonical_line": "[16015740846,[-50104,-63309,-24983,-38187],[]]"
 }

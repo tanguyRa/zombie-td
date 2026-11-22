@@ -1,6 +1,53 @@
 import { IDBFactory } from "fake-indexeddb";
-import { describe, expect, it } from "vitest";
-import { IdbBlockCache, MemoryBlockCache, SCHEMA_VERSION, blockContentHash, makeCachedBlock, type BlockStore } from "../../src/map/cache";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { IdbBlockCache, MemoryBlockCache, SCHEMA_VERSION, blockContentHash, makeCachedBlock, openBlockCache, type BlockStore } from "../../src/map/cache";
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("openBlockCache", () => {
+  it("uses IndexedDB when it is there", async () => {
+    const c = await openBlockCache({ indexedDB: new IDBFactory() });
+    expect(c).toBeInstanceOf(IdbBlockCache);
+    await roundTrip(c);
+    (c as IdbBlockCache).close();
+  });
+
+  it("falls back to memory when indexedDB is undefined", async () => {
+    vi.stubGlobal("indexedDB", undefined);
+    await expect(IdbBlockCache.open()).rejects.toThrow(/not available/);
+    const c = await openBlockCache();
+    expect(c).toBeInstanceOf(MemoryBlockCache);
+    await roundTrip(c);
+  });
+
+  it("falls back to memory when open throws or errors", async () => {
+    const throwing = { open: () => { throw new DOMException("denied", "SecurityError"); } } as unknown as IDBFactory;
+    expect(await openBlockCache({ indexedDB: throwing })).toBeInstanceOf(MemoryBlockCache);
+    const erroring = {
+      open: () => {
+        const r: { onerror?: () => void; error: DOMException } = { error: new DOMException("broken", "UnknownError") };
+        setTimeout(() => r.onerror?.());
+        return r;
+      },
+    } as unknown as IDBFactory;
+    expect(await openBlockCache({ indexedDB: erroring })).toBeInstanceOf(MemoryBlockCache);
+  });
+
+  it("falls back to memory when the upgrade is blocked by another tab", async () => {
+    const idb = new IDBFactory();
+    // A connection (another tab, older code) that never closes on versionchange.
+    const stubborn = await new Promise<IDBDatabase>((res, rej) => {
+      const r = idb.open("zt-map-blocks", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("blocks", { keyPath: "id" });
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    const c = await openBlockCache({ indexedDB: idb, schema: 2 });
+    expect(c).toBeInstanceOf(MemoryBlockCache);
+    expect((c as MemoryBlockCache).schema).toBe(2);
+    stubborn.close();
+  });
+});
 import type { RawBuilding } from "../../src/map/overpass";
 
 const B1: RawBuilding = { id: 11, kind: "residential", floors: 3, ring: [48.85, 2.35, 48.8501, 2.35, 48.8501, 2.3502] };
@@ -76,6 +123,25 @@ describe("IndexedDB cache", () => {
     const back = await IdbBlockCache.open({ indexedDB: idb, schema: 1 });
     expect(await back.has(4)).toBe(false);
     back.close();
+  });
+
+  it("closes itself when another tab opens a newer schema: empty reads, no-op writes", async () => {
+    const idb = new IDBFactory();
+    const old = await IdbBlockCache.open({ indexedDB: idb, schema: 1 });
+    await old.put(makeCachedBlock(3, [B1], new Date(), 1));
+    expect(await old.has(3)).toBe(true);
+    const newer = await IdbBlockCache.open({ indexedDB: idb, schema: 2 });
+    expect(old.isClosed).toBe(true);
+    expect(newer.isClosed).toBe(false);
+    expect(await old.getMany([3])).toEqual(new Map());
+    expect(await old.get(3)).toBeUndefined();
+    await old.put(makeCachedBlock(4, [B1], new Date(), 1)); // no throw
+    await old.clear();
+    await newer.put(makeCachedBlock(5, [B2], new Date(), 2));
+    expect(await newer.has(5)).toBe(true);
+    newer.close();
+    expect(newer.isClosed).toBe(true);
+    expect(await newer.has(5)).toBe(false);
   });
 
   it("ignores records written with another schema", async () => {

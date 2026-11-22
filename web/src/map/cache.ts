@@ -8,7 +8,10 @@ import type { RawBuilding } from "./overpass";
 
 /// Bump when the cached format or its derivation (kind/floors mapping,
 /// block assignment, grid) changes. Every block is then fetched again.
-export const SCHEMA_VERSION = 1;
+/// 2: buildings assigned by their smallest (lat, lon) vertex, not their
+///    vertex mean; Overpass error remarks no longer cached as empty blocks;
+///    floors rounded half up.
+export const SCHEMA_VERSION = 2;
 export const DB_NAME = "zt-map-blocks";
 const STORE = "blocks";
 
@@ -90,26 +93,62 @@ function txDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
+export interface OpenCacheOptions {
+  name?: string;
+  schema?: number;
+  indexedDB?: IDBFactory;
+}
+
+/// The IndexedDB cache, or an in-memory one when IndexedDB can't be opened
+/// (no `indexedDB`, private mode, a blocked upgrade, any open error).
+export async function openBlockCache(opts: OpenCacheOptions = {}): Promise<BlockStore> {
+  try {
+    return await IdbBlockCache.open(opts);
+  } catch {
+    return new MemoryBlockCache(opts.schema ?? SCHEMA_VERSION);
+  }
+}
+
+/// IndexedDB store. When another tab opens the database with a newer schema
+/// (or `close()` is called) the connection closes: from then on reads return
+/// nothing and writes are no-ops, so the loader just fetches from Overpass.
 export class IdbBlockCache implements BlockStore {
+  private closed = false;
   private constructor(private db: IDBDatabase, readonly schema: number) {}
+
+  /// Whether the connection is closed (version change or `close()`).
+  get isClosed(): boolean {
+    return this.closed;
+  }
 
   /// Open (or create) the cache. A database from another schema version is
   /// emptied (newer) or deleted and recreated (older code opening a newer DB).
-  static async open(opts: { name?: string; schema?: number; indexedDB?: IDBFactory } = {}): Promise<IdbBlockCache> {
+  /// Throws when IndexedDB is missing or the open fails or is blocked (see
+  /// `openBlockCache` for the fallback).
+  static async open(opts: OpenCacheOptions = {}): Promise<IdbBlockCache> {
     const name = opts.name ?? DB_NAME;
     const schema = opts.schema ?? SCHEMA_VERSION;
     const idb = opts.indexedDB ?? globalThis.indexedDB;
+    if (!idb) throw new Error("IndexedDB is not available");
     const openOnce = () =>
       new Promise<IDBDatabase>((res, rej) => {
+        let blocked = false;
         const r = idb.open(name, schema);
         r.onupgradeneeded = () => {
           const db = r.result;
           if (db.objectStoreNames.contains(STORE)) db.deleteObjectStore(STORE);
           db.createObjectStore(STORE, { keyPath: "id" });
         };
-        r.onsuccess = () => res(r.result);
+        r.onsuccess = () => {
+          // Opened after we gave up on a blocked upgrade: don't leak the connection.
+          if (blocked) r.result.close();
+          else res(r.result);
+        };
         r.onerror = () => rej(r.error);
-        r.onblocked = () => rej(new Error("block cache upgrade blocked by another tab"));
+        r.onblocked = () => {
+          blocked = true;
+          rej(new Error("block cache upgrade blocked by another tab"));
+        };
       });
     let db: IDBDatabase;
     try {
@@ -119,11 +158,18 @@ export class IdbBlockCache implements BlockStore {
       await req(idb.deleteDatabase(name) as IDBRequest<unknown>);
       db = await openOnce();
     }
-    db.onversionchange = () => db.close();
-    return new IdbBlockCache(db, schema);
+    const cache = new IdbBlockCache(db, schema);
+    // Another tab opens a newer schema: let it upgrade, stop using this one.
+    db.onversionchange = () => cache.close();
+    // The browser closed the connection (storage cleared, ...).
+    db.onclose = () => {
+      cache.closed = true;
+    };
+    return cache;
   }
 
   close() {
+    this.closed = true;
     this.db.close();
   }
 
@@ -132,6 +178,7 @@ export class IdbBlockCache implements BlockStore {
   }
 
   async getMany(ids: BlockId[]) {
+    if (this.closed) return new Map<BlockId, CachedBlock>();
     const tx = this.db.transaction(STORE, "readonly");
     const st = tx.objectStore(STORE);
     const rows = await Promise.all(ids.map((id) => req(st.get(id) as IDBRequest<CachedBlock | undefined>)));
@@ -147,12 +194,14 @@ export class IdbBlockCache implements BlockStore {
   }
 
   async put(block: CachedBlock) {
+    if (this.closed) return;
     const tx = this.db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put(block);
     await txDone(tx);
   }
 
   async clear() {
+    if (this.closed) return;
     const tx = this.db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).clear();
     await txDone(tx);

@@ -11,7 +11,7 @@
 // loader (`map/osm.ts`); the projection's cosine is `detCos` (pure
 // arithmetic, same bits in every engine) instead of `math.cos`.
 
-import { MIN_AREA_M2, area, clipConvex, floorsOf, kindOf, overpassQuery, project, type OsmWay, type Pt } from "./map/osm";
+import { MIN_AREA_M2, area, clipConvex, floorsOf, kindOf, overpassQuery, project, roundCm, type OsmWay, type Pt } from "./map/osm";
 
 export const QUERY_RADIUS_M = 600;
 export const MIN_BUILDINGS = 600;
@@ -86,7 +86,7 @@ function buildingsWithin(all: Projected[], radius: number): LevelPackJson["build
       id: b.id,
       kind: kindOf(b.tags),
       floors: floorsOf(b.tags),
-      polygon: ring.map(([x, y]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100]),
+      polygon: ring.map(([x, y]) => [roundCm(x), roundCm(y)]),
     });
   }
   return out;
