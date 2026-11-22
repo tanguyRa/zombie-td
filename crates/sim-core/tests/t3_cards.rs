@@ -877,7 +877,10 @@ fn scripted_match_with_the_starter_deck() {
     assert_eq!(m.phase(), Phase::MatchWon);
     assert_eq!(m.results().len(), 8);
     let played: Vec<u32> = m.results().iter().map(|r| r.cards_played).collect();
-    assert_eq!(played, vec![5, 5, 3, 4, 3, 4, 4, 3], "cards played per wave");
+    // Was [5, 5, 3, 4, 3, 4, 4, 3] before the match grid's margin grew to
+    // `ring_band_m` + one cell (second T2 review): the grid origin, so every
+    // sim coordinate, moved and the play diverges from wave 3.
+    assert_eq!(played, vec![5, 5, 4, 3, 3, 3, 4, 3], "cards played per wave");
     let total: u32 = m.deck_count() + m.discard_count() + m.hand_ids().len() as u32;
     assert_eq!(total, 20);
 }

@@ -728,8 +728,25 @@ impl Match {
             .collect()
     }
 
+    /// The match grid: the final disc (or the bounds) plus a margin of at
+    /// least `ring_band_m` + one cell, more than `grid_margin_m` if needed.
+    /// Every block a reveal applies (bounds within radius + `block_margin_m`)
+    /// then holds a grid cell centre inside the `ring_ready` band, so it is
+    /// awaited. With the 20 m `grid_margin_m` alone the grid ended inside
+    /// the band of the last rings: a block lying wholly beyond the grid edge
+    /// covered no cell, `ring_ready` did not wait for it, yet the reveal
+    /// applied it if present (its buildings may reach the margin into the
+    /// disc) and refused it if late, so the result depended on arrival
+    /// time (T2 review).
     fn shell_grid(shell: &LevelPack, cfg: &Config) -> Grid {
-        Grid::from_level(shell, cfg)
+        let mut gc = cfg.clone();
+        gc.grid_margin_m = cfg.grid_margin_m.max(Match::grid_margin_m(cfg));
+        Grid::from_level(shell, &gc)
+    }
+
+    /// The smallest grid margin a match needs (`ring_band_m` + one cell).
+    pub fn grid_margin_m(cfg: &Config) -> f32 {
+        ring_band_m(cfg) + cfg.cell_size_m
     }
 
     fn cell_local(grid: &Grid, c: usize) -> [f32; 2] {
@@ -1410,7 +1427,15 @@ impl Match {
             }
             for b in &sc.chunk.buildings {
                 let g = &mut st.sim.grid;
-                let (info, cells) = g.rasterize_building(b, &st.base);
+                let (mut info, mut cells) = g.rasterize_building(b, &st.base);
+                // Only the cells not revealed yet (this ring, later rings and
+                // cells beyond the last ring) take the building: the part of
+                // a late block's building reaching into rings revealed
+                // before stays open ground, and `building_at`, `base` and
+                // `cell_count` agree with that (T2 review).
+                let cr = &self.cell_ring;
+                cells.retain(|&c| cr[c] == 0 || cr[c] >= k);
+                info.cell_count = cells.len() as u32;
                 let bi = g.buildings.len() as u32;
                 for c in cells {
                     st.base[c] = BUILDING;
@@ -1421,8 +1446,13 @@ impl Match {
             st.applied.push(*id);
         }
         let g = &mut st.sim.grid;
-        // The area kept so far (open before this reveal): it is never walled.
-        let kept: Vec<bool> = g.kind.iter().map(|&kd| kd == WALK || kd == FENCE).collect();
+        // The area kept so far (walkable before this reveal): it is never
+        // walled. WALK cells only: walling turns WALK into WALL but leaves
+        // fences, so a level fence inside a walled pocket is still FENCE and
+        // as an anchor reopened the pocket at the next reveal (T2 review).
+        // Fences of the played area still join it through the flood (fences
+        // count as open there).
+        let kept: Vec<bool> = g.kind.iter().map(|&kd| kd == WALK).collect();
         for c in 0..g.kind.len() {
             let rc = self.cell_ring[c];
             if rc == 0 || rc > k {

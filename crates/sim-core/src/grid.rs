@@ -409,6 +409,56 @@ impl Grid {
         dedup_keep_first(out)
     }
 
+    /// The nearest `WALK` cell to `c` in the square rings `1..max_r` around
+    /// it (Chebyshev distance r): the first ring holding one, and in it the
+    /// smallest squared distance, then the lowest index. Walks only each
+    /// ring's perimeter, clipped to the grid, and stops once a ring lies
+    /// wholly outside, so a full-grid search is O(cells), also on a grid
+    /// with no walkable cell (None). The scan of the whole (2r+1)^2 square
+    /// per ring made it cubic (T2 review); same result, tie order included.
+    pub fn nearest_walk_within(&self, c: usize, max_r: i64) -> Option<usize> {
+        let (w, h) = (self.w as i64, self.h as i64);
+        let (cx, cy) = (c as i64 % w, c as i64 / w);
+        let mut best: Option<(i64, usize)> = None;
+        let visit = |x: i64, y: i64, best: &mut Option<(i64, usize)>| {
+            let i = (y * w + x) as usize;
+            if self.kind[i] == WALK {
+                let (dx, dy) = (x - cx, y - cy);
+                let d = dx * dx + dy * dy;
+                if best.map_or(true, |(bd, bi)| d < bd || (d == bd && i < bi)) {
+                    *best = Some((d, i));
+                }
+            }
+        };
+        for r in 1..max_r {
+            let (x0, x1) = ((cx - r).max(0), (cx + r).min(w - 1));
+            // Top and bottom rows (full width), when inside the grid.
+            for y in [cy - r, cy + r] {
+                if (0..h).contains(&y) {
+                    for x in x0..=x1 {
+                        visit(x, y, &mut best);
+                    }
+                }
+            }
+            // Left and right columns, without the corners.
+            let (y0, y1) = ((cy - r + 1).max(0), (cy + r - 1).min(h - 1));
+            for x in [cx - r, cx + r] {
+                if (0..w).contains(&x) {
+                    for y in y0..=y1 {
+                        visit(x, y, &mut best);
+                    }
+                }
+            }
+            if let Some((_, i)) = best {
+                return Some(i);
+            }
+            if cx - r <= 0 && cy - r <= 0 && cx + r >= w - 1 && cy + r >= h - 1 {
+                return None; // later rings lie wholly outside the grid
+            }
+        }
+        None
+    }
+
     pub fn walkable_count(&self) -> usize {
         self.kind.iter().filter(|&&k| k == WALK).count()
     }
@@ -424,4 +474,88 @@ fn dedup_keep_first(v: Vec<usize>) -> Vec<usize> {
         keep[k as usize] = n == 0 || v[order[n - 1] as usize] != v[k as usize];
     }
     v.iter().zip(&keep).filter(|(_, &k)| k).map(|(&c, _)| c).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rng::Pcg32;
+
+    /// The search before the T2 review: the whole (2r+1)^2 square per ring.
+    fn nearest_walk_reference(g: &Grid, c: usize, max_r: i64) -> Option<usize> {
+        let (cx, cy) = ((c % g.w) as i64, (c / g.w) as i64);
+        for r in 1..max_r {
+            let mut best: Option<(i64, usize)> = None;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs() != r && dy.abs() != r {
+                        continue;
+                    }
+                    let (x, y) = (cx + dx, cy + dy);
+                    if x < 0 || y < 0 || x >= g.w as i64 || y >= g.h as i64 {
+                        continue;
+                    }
+                    let i = y as usize * g.w + x as usize;
+                    if g.kind[i] == WALK {
+                        let d = dx * dx + dy * dy;
+                        if best.map_or(true, |(bd, bi)| d < bd || (d == bd && i < bi)) {
+                            best = Some((d, i));
+                        }
+                    }
+                }
+            }
+            if let Some((_, i)) = best {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    fn grid(w: usize, h: usize, kind: Vec<u8>) -> Grid {
+        let n = w * h;
+        Grid {
+            w,
+            h,
+            cell: 2.0,
+            origin: [0.0, 0.0],
+            kind,
+            building: vec![NO_BUILDING; n],
+            fence_hp: vec![0.0; n],
+            buildings: Vec::new(),
+            enclosed_cells_removed: 0,
+            step_chase: vec![0; n],
+            step_flee: vec![0; n],
+            version: 0,
+        }
+    }
+
+    #[test]
+    fn nearest_walk_matches_the_full_square_search() {
+        let mut rng = Pcg32::new(7, 1);
+        for t in 0..400 {
+            let w = 1 + (rng.next_u32() % 40) as usize;
+            let h = 1 + (rng.next_u32() % 40) as usize;
+            // From dense to nearly empty grids, some with no walkable cell.
+            let p = [0, 1, 5, 30, 200, 1000][t % 6];
+            let kind = (0..w * h).map(|_| if rng.next_u32() % 1000 < p { WALK } else { [BUILDING, WALL, FENCE][(rng.next_u32() % 3) as usize] }).collect();
+            let g = grid(w, h, kind);
+            for _ in 0..20 {
+                let c = (rng.next_u32() as usize) % (w * h);
+                for max_r in [0, 1, 2, 5, 32, w.max(h) as i64 + 1, 100] {
+                    assert_eq!(g.nearest_walk_within(c, max_r), nearest_walk_reference(&g, c, max_r), "{w}x{h} p={p} c={c} max_r={max_r}");
+                }
+            }
+        }
+        // Equal distances: the lowest index wins, as before.
+        let mut kind = vec![WALL; 25];
+        for i in [7, 11, 13, 17] {
+            kind[i] = WALK;
+        }
+        assert_eq!(grid(5, 5, kind).nearest_walk_within(12, 32), Some(7));
+        // No walkable cell at all: None, from anywhere, even with a huge range.
+        let g = grid(300, 200, vec![WALL; 60_000]);
+        for c in [0, 150, 59_999, 30_123] {
+            assert_eq!(g.nearest_walk_within(c, 1_000_000), None);
+        }
+    }
 }

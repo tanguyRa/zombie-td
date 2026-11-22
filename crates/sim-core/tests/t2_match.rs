@@ -1074,3 +1074,173 @@ fn an_empty_ring_still_plays() {
     m.apply(Action::NextWave).unwrap();
     assert!(m.newcomers() > 0, "ring 3 has a building");
 }
+
+// ------------------------------------------------------------ T2 review 2
+
+/// Win the current (empty) wave.
+fn win_empty_wave(m: &mut Match) {
+    m.apply(Action::StartWave).unwrap();
+    m.step(); // no civilians, no outbreak: won at once
+    assert_eq!(m.phase(), Phase::WaveWon);
+}
+
+/// Reviewer repro: rings 100-400 m, the grid used to end at x = 422 (20 m
+/// margin), and a block at [430, 680] held no grid cell, so `ring_ready(4)`
+/// did not wait for it. Reveal 4 applied it when present (its building
+/// reaches x = 381, inside ring 4) and refused it as `AreaRevealed(4)` when
+/// late: cell x = 390 was BUILDING or WALK by arrival time. The match grid
+/// now reaches `ring_band_m` + one cell past the last ring, so the block is
+/// awaited and both orders give the same match.
+#[test]
+fn a_block_beyond_the_old_grid_edge_is_awaited() {
+    let b = [430.0, -50.0, 680.0, 50.0];
+    let probe = BuildingChunk { block_id: 100, bounds: b, buildings: vec![rect_building(1, level::BuildingKind::Other, [381.0, -10.0, 440.0, 10.0])] };
+    let mut late = probe_match(None, b).unwrap();
+    let mut early = probe_match(Some(&probe), b).unwrap();
+    let band = sim_core::match_::ring_band_m(late.config());
+    let g = &late.sim().grid;
+    let reach = g.w as f32 * g.cell - late.center()[0];
+    assert!(reach >= 400.0 + band + late.config().cell_size_m, "grid reaches {reach} m");
+    assert!(!late.ring_ready(4), "ring 4 must wait for the block whose building reaches into it");
+    assert!(early.ring_ready(4));
+    for w in 1..=3u8 {
+        assert_eq!(late.state_hash(), early.state_hash(), "wave {w}");
+        win_empty_wave(&mut late);
+        win_empty_wave(&mut early);
+        if w < 3 {
+            late.apply(Action::NextWave).unwrap();
+            early.apply(Action::NextWave).unwrap();
+        }
+    }
+    assert_eq!(late.apply(Action::NextWave), Err(ActionError::RingNotLoaded { wave: 4 }));
+    late.add_buildings(probe.clone()).unwrap();
+    late.apply(Action::NextWave).unwrap();
+    early.apply(Action::NextWave).unwrap();
+    assert_eq!(late.wave(), 4);
+    for m in [&late, &early] {
+        assert!(m.applied_blocks().contains(&100));
+        let [cx, cy] = m.center();
+        let g = &m.sim().grid;
+        assert_eq!(g.kind[g.cell_of(cx + 390.0, cy)], sim_core::grid::BUILDING);
+    }
+    assert_eq!(late.state_hash(), early.state_hash());
+}
+
+/// Open (WALK) cells with centre inside the square `[lo, hi]²` around the centre.
+fn walk_in_square(m: &Match, lo: f32, hi: f32) -> usize {
+    let g = &m.sim().grid;
+    let [cx, cy] = m.center();
+    (0..g.kind.len())
+        .filter(|&c| {
+            let [x, y] = g.cell_center(c);
+            g.kind[c] == WALK && (lo..=hi).contains(&(x - cx)) && (lo..=hi).contains(&(y - cy))
+        })
+        .count()
+}
+
+/// Reviewer repro: a closed box of buildings at 30..70 m around an
+/// interior 34..66 holding a level fence. Wave 1 walls the pocket, but
+/// walling only turns WALK into WALL, so the fence stayed FENCE, anchored
+/// the next reveal and reopened the pocket for good. Anchors are WALK cells
+/// only now; the fence stays a fence inside the walled pocket.
+#[test]
+fn a_level_fence_never_reopens_a_walled_pocket() {
+    use level::BuildingKind::{Other, Residential};
+    let cfg = ring_cfg(&[100.0, 200.0, 300.0, 400.0]);
+    let bs = vec![
+        rect_building(1, Other, [30.0, 30.0, 70.0, 34.0]),
+        rect_building(2, Other, [30.0, 66.0, 70.0, 70.0]),
+        rect_building(3, Other, [30.0, 34.0, 34.0, 66.0]),
+        rect_building(4, Other, [66.0, 34.0, 70.0, 66.0]),
+        rect_building(5, Residential, [-40.0, -40.0, 0.0, 0.0]),
+    ];
+    let mut level = disc_level(400.0, bs);
+    level.fences = vec![vec![[40.0, 50.0], [60.0, 50.0]]];
+    let mut m = Match::new(&level, cfg.clone(), MatchSetup::new(5, &cfg)).unwrap();
+    let fence_cells = |m: &Match| m.sim().grid.kind.iter().filter(|&&k| k == FENCE).count();
+    assert!(fence_cells(&m) >= 10, "the level fence is in the pocket");
+    for w in 1..=3u8 {
+        assert_eq!(m.wave(), w);
+        assert_eq!(walk_in_square(&m, 35.0, 65.0), 0, "the pocket is open at wave {w}");
+        assert!(fence_cells(&m) >= 10);
+        assert_agents_on_walk(&m);
+        fast_win(&mut m, 30);
+        m.apply(Action::NextWave).unwrap();
+    }
+}
+
+/// Same with a closed core square (80-86 m) and a level fence in ring 2:
+/// ring 2 is walled at its reveal (not connected to the core), the fence
+/// stays, and it must not open rings 2 and 3 at the next reveal.
+#[test]
+fn a_level_fence_in_a_walled_ring_never_opens_it() {
+    use level::BuildingKind::{Other, Residential};
+    let cfg = ring_cfg(&[100.0, 200.0, 300.0, 400.0]);
+    let bs = vec![
+        rect_building(1, Other, [-86.0, -86.0, 86.0, -80.0]),
+        rect_building(2, Other, [-86.0, 80.0, 86.0, 86.0]),
+        rect_building(3, Other, [-86.0, -80.0, -80.0, 80.0]),
+        rect_building(4, Other, [80.0, -80.0, 86.0, 80.0]),
+        rect_building(5, Residential, [-20.0, -20.0, 20.0, 20.0]),
+        rect_building(6, Residential, [135.0, 135.0, 165.0, 165.0]),
+    ];
+    let mut level = disc_level(400.0, bs);
+    level.fences = vec![vec![[140.0, -10.0], [160.0, 10.0]]];
+    let mut m = Match::new(&level, cfg.clone(), MatchSetup::new(3, &cfg)).unwrap();
+    let outside_open = |m: &Match| {
+        let g = &m.sim().grid;
+        let [cx, cy] = m.center();
+        (0..g.kind.len())
+            .filter(|&c| {
+                let [x, y] = g.cell_center(c);
+                (x - cx).abs().max((y - cy).abs()) > 87.0 && g.kind[c] == WALK
+            })
+            .count()
+    };
+    // The square's corners lie beyond ring 1: the whole core is open from wave 2.
+    let mut core = 0;
+    for w in 1..=3u8 {
+        assert_eq!(m.wave(), w);
+        assert_eq!(outside_open(&m), 0, "area outside the core is open at wave {w}");
+        if w == 2 {
+            core = walk_in_square(&m, -79.0, 79.0);
+            assert!(core > 5_000);
+        }
+        if w >= 2 {
+            assert_eq!(walk_in_square(&m, -79.0, 79.0), core, "core at wave {w}");
+        }
+        assert_agents_on_walk(&m);
+        if w == 2 {
+            let g = &m.sim().grid;
+            let [cx, cy] = m.center();
+            assert_eq!(g.kind[g.cell_of(cx + 150.0, cy)], FENCE, "the ring-2 fence is there");
+        }
+        fast_win(&mut m, 30);
+        m.apply(Action::NextWave).unwrap();
+    }
+}
+
+/// A late block's building reaching into a ring revealed before its block
+/// is applied: the part on open ground is not the building's (no
+/// `grid.building` there, not in `cell_count`).
+#[test]
+fn a_half_applied_building_owns_only_its_new_cells() {
+    let a = 112.0;
+    let corner = BuildingChunk { block_id: 99, bounds: [a, a, a + 2.0, a + 2.0], buildings: vec![rect_building(5, level::BuildingKind::Other, [a - 45.0, a - 45.0, a + 1.0, a + 1.0])] };
+    let mut m = probe_match(Some(&corner), corner.bounds).unwrap();
+    win_empty_wave(&mut m);
+    m.apply(Action::NextWave).unwrap();
+    assert!(m.applied_blocks().contains(&99));
+    let [cx, cy] = m.center();
+    let g = &m.sim().grid;
+    let bi = g.buildings.iter().position(|b| b.id == 5).unwrap() as u32;
+    let open = g.cell_of(cx + 69.0, cy + 69.0);
+    assert_eq!(g.kind[open], WALK);
+    assert_eq!(g.building[open], sim_core::grid::NO_BUILDING, "open ground in wave 1 belongs to no building");
+    let owned: Vec<usize> = (0..g.kind.len()).filter(|&c| g.building[c] == bi).collect();
+    assert!(!owned.is_empty());
+    assert_eq!(g.buildings[bi as usize].cell_count as usize, owned.len());
+    for &c in &owned {
+        assert_eq!(g.kind[c], sim_core::grid::BUILDING, "cell {c} of the building is not a building cell");
+    }
+}
