@@ -753,35 +753,9 @@ impl Sim {
         self.nearest_walkable_within(c, 32)
     }
 
-    /// `nearest_walkable` searching rings `1..max_r`.
+    /// `nearest_walkable` searching rings `1..max_r` (`Grid::nearest_walk_within`).
     fn nearest_walkable_within(&self, c: usize, max_r: i64) -> Option<usize> {
-        let g = &self.grid;
-        let (cx, cy) = ((c % g.w) as i64, (c / g.w) as i64);
-        for r in 1..max_r {
-            let mut best: Option<(i64, usize)> = None;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    if dx.abs() != r && dy.abs() != r {
-                        continue;
-                    }
-                    let (x, y) = (cx + dx, cy + dy);
-                    if x < 0 || y < 0 || x >= g.w as i64 || y >= g.h as i64 {
-                        continue;
-                    }
-                    let i = y as usize * g.w + x as usize;
-                    if g.kind[i] == WALK {
-                        let d = dx * dx + dy * dy;
-                        if best.map_or(true, |(bd, bi)| d < bd || (d == bd && i < bi)) {
-                            best = Some((d, i));
-                        }
-                    }
-                }
-            }
-            if let Some((_, i)) = best {
-                return Some(i);
-            }
-        }
-        None
+        self.grid.nearest_walk_within(c, max_r)
     }
 
     /// Move every live agent standing on a cell that is not `WALK` to the

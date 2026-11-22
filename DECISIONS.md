@@ -314,7 +314,23 @@ Every choice the spec left open, and every simplification, in one place.
   judged by building centroid).
 - **The grid is sized from the final radius only**, never from the
   buildings, so its origin (and every sim coordinate) doesn't depend on
-  which blocks happened to be loaded.
+  which blocks happened to be loaded. Its margin past the final disc (or
+  bounds) is `max(grid_margin_m, ring_band_m + cell_size_m)`, 54.8 m with
+  the defaults (`Match::grid_margin_m`; second T2 review). With the 20 m
+  `grid_margin_m` the grid ended inside the `ring_ready` band of the last
+  rings: a block lying wholly past the grid edge covered no cell, so
+  `ring_ready` did not wait for it, yet the reveal applied it when present
+  (its buildings may reach the margin into the disc) and refused it with
+  `AreaRevealed` when late, so a cell of the last ring was building or
+  open ground depending on arrival time (tested: a block at x 430–680 m
+  with a building reaching x = 381 m on a 400 m disc). Now every block a
+  reveal applies holds a grid cell centre inside the band. Cost: the
+  Marais grid (400 m) grows from about 421² to 456² cells (+17%), the
+  wave-8 grid (1300 m) from 1.74M to 1.84M cells (+5%), the extra cells
+  all walls. The match fixture changed on purpose to
+  **`b0b7f9703b3cc1c0`** (grid size only: with the old margin the other
+  fixes of that review leave it at `524027b630e0338f`). Single-wave
+  `Sim` grids keep `grid_margin_m`.
 - **Reveal** happens when a wave's prep opens. The match keeps a `base`
   geometry per cell (walk / building / wall with all applied buildings);
   newly revealed cells take it (plus the level's own fences), older cells
@@ -322,7 +338,16 @@ Every choice the spec left open, and every simplification, in one place.
   off earlier are re-opened first, since a pocket cut by the ring edge may
   now connect; then every open region (fences counted as open) not
   connected to the cells open before this reveal is walled
-  (`Grid::keep_regions_touching`). Wave 1 keeps its largest region. Step
+  (`Grid::keep_regions_touching`). Wave 1 keeps its largest region. The
+  anchors are the cells WALK before the reveal, not fences: walling turns
+  WALK into WALL and leaves fences, so a level fence inside a walled pocket
+  stayed FENCE, anchored the next reveal and reopened the pocket for good
+  (second T2 review, tested with a fenced box pocket and a fence in a
+  walled ring 2 outside a closed core). Fences of the played area still
+  join it through the flood. Fences in a pocket are kept as fences, not
+  walled: they are unreachable behind the walled cells, and if the pocket
+  later connects to the played area the level fence is still there (a
+  walled cell reopens as its base, WALK, which would erase it). Step
   masks are rebuilt. (T2 review: the rule used to be "keep the largest
   region" every wave, and a new ring with a larger open area not connected
   to the old one walled the whole territory already played: 0 walkable
@@ -330,7 +355,12 @@ Every choice the spec left open, and every simplification, in one place.
   walled; an unconnected part of a new ring is. Agents left on a cell that
   is not walkable go to the nearest walkable cell anywhere on the grid, no
   longer only within 32 cells. The Marais sweep, seeds 1–16, is unchanged
-  row for row.)
+  row for row. The search, `Grid::nearest_walk_within`, walks only the
+  perimeter of each square ring, clipped to the grid, and stops once a
+  ring lies wholly outside it: O(cells) for a whole-grid search, also on
+  a grid with no walkable cell; it scanned the full square per ring, which
+  was cubic. Same result, tie order included: tested against the old scan
+  on random grids.)
 - **Buildings arrive in chunks** (`BuildingChunk { block_id, bounds,
   buildings }`, level-local meters). `add_buildings` works in any phase but
   refuses a chunk the revealed area already needed (below), a duplicate id,
@@ -347,7 +377,12 @@ Every choice the spec left open, and every simplification, in one place.
   so margin × √2 at a block corner, and could make a block due that
   `ring_ready` didn't wait for. The part of such a building that reaches
   into rings revealed before its block is applied stays open ground, the
-  same for any arrival order (tested). Building indices therefore depend only on the chunks and
+  same for any arrival order (tested), and is not the building's: only its
+  cells in the new ring, later rings or past the last ring get `base`
+  BUILDING, `grid.building` and count in `cell_count` (second T2 review:
+  the open part used to count as building, tested). `Sim::building_at`
+  still falls back to the polygon for points on no building cell, so it
+  can name such a building on its open part; the match does not use it. Building indices therefore depend only on the chunks and
   the rings, never on arrival order or timing (tested: sorted, reversed,
   and staged arrival give the same per-wave hashes). `Match::new(level)`
   wraps a whole level as one chunk (id 0, infinite bounds).

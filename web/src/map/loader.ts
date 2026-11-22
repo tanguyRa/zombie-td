@@ -53,10 +53,11 @@ export interface MapLoaderOptions {
   /// `match.block_margin_m`: a ring needs its blocks out to radius + margin.
   marginM?: number;
   /// Extra radius on top of radius + margin (default `cell_size_m × √2`).
-  /// sim-core's `ring_ready` checks the cells within radius + margin; a
-  /// widened rule (+ one cell diagonal, for cells straddling the disc) is
-  /// planned. Loading the larger disc is a superset of both, so it is safe
-  /// with either.
+  /// sim-core's `ring_ready` checks the cells within radius +
+  /// `match_::ring_band_m` (margin + one cell diagonal, DECISIONS.md
+  /// "Match"), so the default slack loads exactly that disc (blocks touching
+  /// it, with `TOUCH_EPS_M` to spare). A smaller slack may load less than
+  /// `ring_ready` needs.
   coverageSlackM?: number;
   cache?: BlockStore;
   fetch?: FetchFn;
@@ -278,9 +279,10 @@ export class MapLoader {
   }
 
   /// Every block touching the disc of wave `wave`'s radius + margin + slack
-  /// is loaded (waves <= 0 are always ready). With slack >= 0 this implies
-  /// sim-core's `ring_ready` (cells within radius + margin covered, or
-  /// within radius + margin + one cell diagonal once that rule lands).
+  /// is loaded (waves <= 0 are always ready). With slack >= one cell
+  /// diagonal (the default) this implies sim-core's `ring_ready`: every
+  /// cell within radius + `ring_band_m` (margin + one cell diagonal) is
+  /// covered.
   ringReady(wave: number): boolean {
     const w = Math.min(wave, this.waveBlocks.length);
     for (let k = 0; k < w; k++) for (const id of this.waveBlocks[k]) if (!this.loaded.has(id)) return false;
