@@ -2,10 +2,14 @@
 //! "Run records (T4)").
 //!
 //! The golden record `tests/fixtures/run_record_golden.json` is the scripted
-//! 8-wave Marais match below. Regenerate it (after bumping
-//! `SIM_RULES_VERSION`) with:
+//! 8-wave Marais match below; its hashes are pinned per rules version in
+//! `GOLDEN_HASHES`. When the sim changes a hash: bump `SIM_RULES_VERSION`,
+//! regenerate with
 //!
 //!   ZT_REGEN_GOLDEN=1 cargo test --release -p sim-core --test t4_records golden
+//!
+//! and add the `GOLDEN_HASHES` entry it prints. The regeneration refuses to
+//! write hashes that differ from the current version's entry.
 mod common;
 
 use std::sync::OnceLock;
@@ -14,12 +18,26 @@ use std::time::Instant;
 use common::bot::{play_prep, play_tactical, repair_fences, run_wave, steps};
 use sim_core::cards::CardKind;
 use sim_core::level::LevelPack;
-use sim_core::match_::{Action, ActionError, AttemptResult, BuildingChunk, Match, MatchSetup, Phase, StructureKind, Target};
-use sim_core::record::{replay_with, ReplayLimits, ReplayMap, ReplayProgress, RunRecord, SIM_RULES_VERSION};
+use sim_core::match_::{Action, ActionError, AttemptResult, BuildingChunk, Match, MatchError, MatchSetup, Phase, StructureKind, Target};
+use sim_core::record::{replay_with, ExpectedRun, ReplayLimits, ReplayMap, ReplayProgress, RunRecord, SIM_RULES_VERSION};
 use sim_core::{replay, CardDb, Config, VerifyError};
 
 const GOLDEN: &str = "run_record_golden.json";
 const REGEN: &str = "ZT_REGEN_GOLDEN=1 cargo test --release -p sim-core --test t4_records golden";
+
+/// The golden record's hashes per `SIM_RULES_VERSION`: (rules, final hash,
+/// config hash, cards hash, map snapshot hash). One entry per version, never
+/// edited: a hash change needs a new version (and a new entry).
+const GOLDEN_HASHES: &[(u32, &str, &str, &str, &str)] = &[(1, "b6f30157787dde36", "ceabf38252a0c4ba", "3e157f5ac2531906", "e9b1fbac85820411")];
+
+fn golden_hashes(r: &RunRecord) -> (u32, String, String, String, String) {
+    use sim_core::mapsnap::hex;
+    (r.sim.rules, hex(r.end.hash), hex(r.config_hash), hex(r.cards_hash), hex(r.map.snapshot_hash))
+}
+
+fn pinned(rules: u32) -> Option<(u32, String, String, String, String)> {
+    GOLDEN_HASHES.iter().find(|e| e.0 == rules).map(|e| (e.0, e.1.to_string(), e.2.to_string(), e.3.to_string(), e.4.to_string()))
+}
 
 fn fixture_path(name: &str) -> String {
     format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -165,25 +183,47 @@ fn back_ref() -> &'static RunRecord {
 #[test]
 fn golden_run_record() {
     let path = fixture_path(GOLDEN);
+    let bump = "bump SIM_RULES_VERSION (crates/sim-core/src/record.rs), regenerate the golden record with";
     if std::env::var_os("ZT_REGEN_GOLDEN").is_some() {
-        std::fs::write(&path, scripted().to_json_pretty() + "\n").unwrap();
+        let fresh = scripted();
+        let got = golden_hashes(fresh);
+        match pinned(SIM_RULES_VERSION) {
+            // Same hashes (a record format change only): rewriting is safe.
+            Some(p) if p == got => {}
+            Some(p) => panic!(
+                "refusing to regenerate {GOLDEN}: rules version {SIM_RULES_VERSION} is pinned to {p:?} in GOLDEN_HASHES, the sim now records {got:?}. \
+                 The sim rules changed: {bump} `{REGEN}` and add the GOLDEN_HASHES entry it prints. Never edit an existing entry."
+            ),
+            None => eprintln!("add to GOLDEN_HASHES (crates/sim-core/tests/t4_records.rs): ({}, {:?}, {:?}, {:?}, {:?})", got.0, got.1, got.2, got.3, got.4),
+        }
+        std::fs::write(&path, fresh.to_json_pretty() + "\n").unwrap();
         eprintln!("wrote {path}");
         return;
     }
     let s = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}; generate it with `{REGEN}`"));
     let g = RunRecord::from_json(&s).unwrap();
     assert_eq!(g.sim.rules, SIM_RULES_VERSION, "the golden record is for sim rules version {}, the sim is version {}: regenerate it with `{REGEN}`", g.sim.rules, SIM_RULES_VERSION);
-    let sum = replay(&g, level_map()).unwrap_or_else(|e| {
-        panic!("sim rules changed: bump SIM_RULES_VERSION (crates/sim-core/src/record.rs) and regenerate the golden record with `{REGEN}`. Replaying {GOLDEN}: {e}")
+    let p = pinned(SIM_RULES_VERSION).unwrap_or_else(|| {
+        panic!("no GOLDEN_HASHES entry for rules version {SIM_RULES_VERSION}: regenerate with `{REGEN}` and add the entry it prints")
     });
+    assert_eq!(
+        golden_hashes(&g),
+        p,
+        "{GOLDEN} differs from the GOLDEN_HASHES entry of rules version {SIM_RULES_VERSION} (rules, final, config, cards, map). \
+         The fixture was regenerated without a version bump: restore it (git checkout), then {bump} `{REGEN}` and add the new entry"
+    );
+    let sum = replay(&g, level_map()).unwrap_or_else(|e| panic!("sim rules changed: {bump} `{REGEN}` and add the GOLDEN_HASHES entry it prints. Replaying {GOLDEN}: {e}"));
     assert_eq!(sum.final_hash, g.end.hash);
     assert_eq!(sum.attempts, g.attempts.len());
     let mut fresh = scripted().clone();
     fresh.sim = g.sim.clone();
     assert!(
         fresh.to_json() == g.to_json(),
-        "the scripted match no longer records {GOLDEN} (the sim or the test script changed). If the sim changed, bump SIM_RULES_VERSION; then regenerate with `{REGEN}`"
+        "the scripted match no longer records {GOLDEN} (the sim or the test script changed). If the sim changed: {bump} `{REGEN}` and add the GOLDEN_HASHES entry it prints"
     );
+    // The summary echoes the setup and the map.
+    assert_eq!((sum.setup.clone(), sum.map_source, sum.snapshot_hash), (g.setup.clone(), sim_core::record::MapSource::Level, g.map.snapshot_hash));
+    assert_eq!(sum.shell_hash, sim_core::mapsnap::shell_hash(&g.map.shell));
 }
 
 /// The record's JSON layout (what T5 exports and T7 stores).
@@ -457,12 +497,12 @@ fn tamper_versions_config_cards() {
     let mut cfg = common::cfg();
     cfg.zombie_speed += 0.01;
     let lim = ReplayLimits::for_config(&cfg);
-    let e = replay_with(p, level_map(), cfg, CardDb::default_cards(), &lim, &mut |_| true).unwrap_err();
+    let e = replay_with(p, level_map(), None, cfg, CardDb::default_cards(), &lim, &mut |_| true).unwrap_err();
     assert!(matches!(e, VerifyError::ConfigHash { .. }), "{e:?}");
     let cfg = common::cfg();
     let mut cards = CardDb::default_cards();
     cards.cards[0].cost += 1;
-    let e = replay_with(p, level_map(), cfg.clone(), cards, &lim, &mut |_| true).unwrap_err();
+    let e = replay_with(p, level_map(), None, cfg.clone(), cards, &lim, &mut |_| true).unwrap_err();
     assert!(matches!(e, VerifyError::CardsHash { .. }), "{e:?}");
     // The record's own hash edited.
     let mut r = p.clone();
@@ -480,7 +520,7 @@ fn tamper_map() {
     let mut level = marais().clone();
     level.radius_m = Some(390.0);
     assert_eq!(rejected(p, ReplayMap::Level(&level)), VerifyError::MapShell);
-    assert_eq!(rejected(p, ReplayMap::Chunks(&[])), VerifyError::MapSource { record: sim_core::record::MapSource::Level });
+    assert_eq!(rejected(p, ReplayMap::Chunks { shell: &p.map.shell, chunks: &[] }), VerifyError::MapSource { record: sim_core::record::MapSource::Level });
 }
 
 #[test]
@@ -522,14 +562,14 @@ fn endless_waves_and_preps_stop_at_the_limit() {
     lim.max_wave_ticks = 300;
     lim.max_prep_ticks = 200;
     let t = Instant::now();
-    let e = replay_with(p, level_map(), cfg.clone(), CardDb::default_cards(), &lim, &mut |_| true).unwrap_err();
+    let e = replay_with(p, level_map(), None, cfg.clone(), CardDb::default_cards(), &lim, &mut |_| true).unwrap_err();
     assert!(matches!(e, VerifyError::TooLong { phase: Phase::Running, ticks: 301, .. }), "{e:?}");
     // No action at all: prep forever.
     let mut r = p.clone();
     r.actions.clear();
     r.attempts.clear();
     (r.end.wave, r.end.attempt_start_tick, r.end.prep_hash) = (1, 0, p.attempts[0].prep_hash);
-    let e = replay_with(&r, level_map(), cfg.clone(), CardDb::default_cards(), &lim, &mut |_| true).unwrap_err();
+    let e = replay_with(&r, level_map(), None, cfg.clone(), CardDb::default_cards(), &lim, &mut |_| true).unwrap_err();
     assert!(matches!(e, VerifyError::TooLong { attempt: 0, wave: 1, phase: Phase::Prep, ticks: 201, .. }), "{e:?}");
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
     // Default limits: 30 min per wave at 20 Hz.
@@ -546,7 +586,7 @@ fn the_progress_callback_can_cancel() {
         seen.push(pr.tick);
         pr.tick < 1000
     };
-    let e = replay_with(p, level_map(), cfg, CardDb::default_cards(), &lim, &mut cb).unwrap_err();
+    let e = replay_with(p, level_map(), None, cfg, CardDb::default_cards(), &lim, &mut cb).unwrap_err();
     assert_eq!(e, VerifyError::Cancelled { tick: 1024 });
     assert_eq!(seen, [256, 512, 768, 1024]);
 }
@@ -635,16 +675,190 @@ fn streamed_records_do_not_depend_on_chunk_order() {
 
     let mut rev = chunks.clone();
     rev.reverse();
-    let s = replay(&ra, ReplayMap::Chunks(&rev)).unwrap();
+    let s = replay(&ra, ReplayMap::Chunks { shell: &shell, chunks: &rev }).unwrap();
     assert_eq!(s.final_hash, ra.end.hash);
+    assert_eq!((s.map_source, s.snapshot_hash, s.shell_hash), (sim_core::record::MapSource::Chunks, ra.map.snapshot_hash, sim_core::mapsnap::shell_hash(&shell)));
     assert_eq!((s.wave, s.phase, s.abandoned), (2, Phase::Running, true));
     // One building moved by 1 cm; a missing block; a level for a chunks run.
     let mut moved = chunks.clone();
     let k = moved.iter().position(|c| !c.buildings.is_empty()).unwrap();
     moved[k].buildings[0].polygon[1][1] += 0.01;
-    assert!(matches!(rejected(&ra, ReplayMap::Chunks(&moved)), VerifyError::MapHash { .. }));
+    assert!(matches!(rejected(&ra, ReplayMap::Chunks { shell: &shell, chunks: &moved }), VerifyError::MapHash { .. }));
     let id = chunks[k].block_id;
     let fewer: Vec<BuildingChunk> = chunks.iter().filter(|c| c.block_id != id).cloned().collect();
-    assert_eq!(rejected(&ra, ReplayMap::Chunks(&fewer)), VerifyError::MissingBlock { block_id: id });
+    assert_eq!(rejected(&ra, ReplayMap::Chunks { shell: &shell, chunks: &fewer }), VerifyError::MissingBlock { block_id: id });
     assert!(matches!(rejected(&ra, ReplayMap::Level(marais())), VerifyError::MapSource { .. }));
+}
+
+/// A streamed record's shell is the server's, not the record's: a record
+/// whose shell was forged (smaller radius, other centre, a free fence ring)
+/// is refused against genuine chunks and the genuine shell, and a record
+/// played on the forged shell is refused too.
+#[test]
+fn a_forged_chunk_shell_is_refused() {
+    let (shell, _, chunks) = chunks_fixture();
+    let r = streamed_prefix();
+    let genuine = ReplayMap::Chunks { shell: &shell, chunks: &chunks };
+    replay(r, genuine).unwrap();
+    let ring: Vec<[f32; 2]> = (0..=64).map(|i| {
+        let a = i as f32 * std::f32::consts::TAU / 64.0;
+        [60.0 * a.cos(), 60.0 * a.sin()]
+    }).collect();
+    let forgeries: [(&str, fn(&mut LevelPack, &[[f32; 2]])); 4] = [
+        ("radius", |s, _| s.radius_m = Some(160.0)),
+        ("centre", |s, _| (s.center_lat, s.center_lon) = (0.0, 0.0)),
+        ("fences", |s, ring| s.fences.push(ring.to_vec())),
+        ("bounds", |s, _| s.bounds = Some([-100.0, -100.0, 100.0, 100.0])),
+    ];
+    for (what, forge) in forgeries {
+        let mut f = r.clone();
+        forge(&mut f.map.shell, &ring);
+        assert_eq!(rejected(&f, genuine), VerifyError::MapShell, "forged {what}");
+        // The forged shell given by the verifier: refused too (the record
+        // was played on the genuine one).
+        let mut forged_shell = shell.clone();
+        forge(&mut forged_shell, &ring);
+        assert_eq!(rejected(r, ReplayMap::Chunks { shell: &forged_shell, chunks: &chunks }), VerifyError::MapShell, "server shell {what}");
+    }
+}
+
+/// Wave 1's prep and a few ticks of the streamed match (cheap).
+fn streamed_prefix() -> &'static RunRecord {
+    static R: OnceLock<RunRecord> = OnceLock::new();
+    R.get_or_init(|| {
+        let (shell, _, chunks) = chunks_fixture();
+        let cfg = common::cfg();
+        let mut m = Match::new_streaming(&shell, cfg.clone(), MatchSetup::new(7, &cfg), chunks).unwrap();
+        let mut arc = 0;
+        play_prep(&mut m, &mut arc, false);
+        steps(&mut m, 10);
+        m.apply(Action::StartWave).unwrap();
+        steps(&mut m, 20);
+        RunRecord::from_match(&m)
+    })
+}
+
+/// A huge or far shell (bounds +-8 km, a fence with 100k points, 10k
+/// fences, a 10^7 m fence, a NaN radius) is refused before any grid is
+/// allocated, by the verifier (`bad_shell`) and by `Match::new_streaming`
+/// itself (`BadShell`).
+#[test]
+fn oversized_shells_and_fences_are_refused_quickly() {
+    let (shell, _, chunks) = chunks_fixture();
+    let r = streamed_prefix();
+    let cfg = common::cfg();
+    let t = Instant::now();
+    let big: [(&str, Box<dyn Fn(&mut LevelPack)>); 6] = [
+        ("bounds", Box::new(|s| s.bounds = Some([-8000.0, -8000.0, 8000.0, 8000.0]))),
+        ("far bounds", Box::new(|s| s.bounds = Some([1.0e6, 1.0e6, 1.0e6 + 100.0, 1.0e6 + 100.0]))),
+        ("points", Box::new(|s| s.fences.push((0..100_000).map(|i| [(i % 100) as f32, (i / 100) as f32 * 0.1]).collect()))),
+        ("fences", Box::new(|s| s.fences = vec![vec![[0.0, 0.0], [1.0, 1.0]]; 10_000])),
+        ("length", Box::new(|s| s.fences = (0..200).map(|_| vec![[-2500.0, -2500.0], [2500.0, 2500.0], [-2500.0, 2500.0], [2500.0, -2500.0]]).collect())),
+        ("radius", Box::new(|s| s.radius_m = Some(f32::NAN))),
+    ];
+    for (what, grow) in &big {
+        let mut s = shell.clone();
+        grow(&mut s);
+        let mut f = r.clone();
+        f.map.shell = s.clone();
+        assert!(matches!(rejected(&f, ReplayMap::Chunks { shell: &s, chunks: &chunks }), VerifyError::BadShell { .. }), "{what}");
+        match Match::new_streaming(&s, cfg.clone(), MatchSetup::new(7, &cfg), Vec::new()) {
+            Err(MatchError::BadShell(_)) => {}
+            Err(e) => panic!("{what}: {e:?}"),
+            Ok(_) => panic!("{what}: built"),
+        }
+    }
+    assert!(t.elapsed().as_millis() < 500, "{:?}", t.elapsed());
+    // The defaults: 2.6 km extent, 256 fences of 1,024 points, ~131 km.
+    let lim = sim_core::match_::ShellLimits::for_config(&cfg);
+    assert_eq!((lim.max_extent_m, lim.max_fences, lim.max_fence_points, lim.max_fence_length_m.round()), (2600.0, 256, 1024, 130690.0));
+}
+
+/// The server's seed, deck and multiplier: a record with another one is
+/// refused before any tick, even when it replays.
+#[test]
+fn the_issued_seed_deck_and_multiplier_are_enforced() {
+    let p = prefix();
+    let cfg = common::cfg();
+    let lim = ReplayLimits::for_config(&cfg);
+    let run = |x: &ExpectedRun| replay_with(p, level_map(), Some(x), cfg.clone(), CardDb::default_cards(), &lim, &mut |_| true);
+    let issued = ExpectedRun { seed: Some(p.setup.seed), deck: Some(p.setup.deck.clone()), population_multiplier: Some(p.setup.population_multiplier) };
+    let s = run(&issued).unwrap();
+    assert_eq!(s.setup, p.setup);
+    let t = Instant::now();
+    let e = run(&ExpectedRun { seed: Some(p.setup.seed + 1), ..issued.clone() }).unwrap_err();
+    assert!(matches!(&e, VerifyError::Unexpected { what, .. } if what == "seed"), "{e:?}");
+    let mut deck = p.setup.deck.clone();
+    deck.rotate_left(1);
+    assert_ne!(deck, p.setup.deck);
+    let e = run(&ExpectedRun { deck: Some(deck), ..issued.clone() }).unwrap_err();
+    assert!(matches!(&e, VerifyError::Unexpected { what, .. } if what == "deck"), "{e:?}");
+    let e = run(&ExpectedRun { population_multiplier: Some(p.setup.population_multiplier * 1.25), ..issued.clone() }).unwrap_err();
+    assert!(matches!(&e, VerifyError::Unexpected { what, .. } if what == "population_multiplier"), "{e:?}");
+    assert!(t.elapsed().as_millis() < 500, "{:?}", t.elapsed());
+    // Only the seed given: the rest unchecked.
+    run(&ExpectedRun { seed: Some(p.setup.seed), ..Default::default() }).unwrap();
+    // JSON: the seed as a string or a number, unknown keys refused.
+    let x = ExpectedRun::from_json(r#"{"seed": "18446744073709551615", "population_multiplier": 0.3}"#).unwrap();
+    assert_eq!((x.seed, x.deck, x.population_multiplier), (Some(u64::MAX), None, Some(0.3)));
+    assert_eq!(ExpectedRun::from_json(r#"{"seed": 3}"#).unwrap().seed, Some(3));
+    assert!(ExpectedRun::from_json(r#"{"sede": 3}"#).is_err());
+}
+
+/// `population_multiplier` must be finite and within a quarter to four
+/// times the config's: `Match::new` refuses others, and so does a replay.
+#[test]
+fn the_population_multiplier_is_range_checked() {
+    let cfg = common::cfg();
+    let (lo, hi) = sim_core::match_::population_multiplier_range(&cfg);
+    assert_eq!((lo, hi), (cfg.match_.population_multiplier * 0.25, cfg.match_.population_multiplier * 4.0));
+    for k in [0.0, -0.3, lo * 0.99, hi * 1.01, f32::NAN, f32::INFINITY, 0.05] {
+        let mut setup = MatchSetup::new(1, &cfg);
+        setup.population_multiplier = k;
+        assert!(matches!(Match::new(marais(), cfg.clone(), setup), Err(MatchError::InvalidSetup(_))), "{k}");
+    }
+    for k in [lo, hi, cfg.match_.population_multiplier * 2.0] {
+        let mut setup = MatchSetup::new(1, &cfg);
+        setup.population_multiplier = k;
+        Match::new(marais(), cfg.clone(), setup).unwrap();
+    }
+    let mut r = prefix().clone();
+    r.setup.population_multiplier = 0.05;
+    assert!(matches!(rejected(&r, level_map()), VerifyError::Setup { reason } if reason.contains("population_multiplier")));
+}
+
+/// A record that ends on a result screen: the open attempt's start tick and
+/// prep hash in `end` are checked too.
+#[test]
+fn the_end_prep_hash_and_start_tick_are_checked_on_a_result_screen() {
+    let r0 = record_until(scripted().attempts[4].end_tick);
+    assert_eq!((r0.end.phase, r0.end.wave), (Phase::WaveWon, 2));
+    replay(&r0, level_map()).unwrap();
+    let mut r = r0.clone();
+    r.end.prep_hash ^= 1;
+    assert!(matches!(rejected(&r, level_map()), VerifyError::Diverged { attempt: 5, wave: 2, what, .. } if what == "prep_hash"));
+    let mut r = r0.clone();
+    r.end.attempt_start_tick += 1;
+    assert!(matches!(rejected(&r, level_map()), VerifyError::Diverged { attempt: 5, wave: 2, what, .. } if what == "start_tick"));
+    // And in prep (checked when the prep opened).
+    let mut r = prefix().clone();
+    r.end.prep_hash ^= 1;
+    assert!(matches!(rejected(&r, level_map()), VerifyError::Diverged { what, .. } if what == "prep_hash"));
+    let mut r = prefix().clone();
+    r.end.attempt_start_tick += 1;
+    assert!(matches!(rejected(&r, level_map()), VerifyError::Diverged { what, .. } if what == "start_tick"));
+}
+
+/// An extra field anywhere in the record is refused when parsing.
+#[test]
+fn unknown_record_fields_are_refused() {
+    let json = prefix().to_json();
+    RunRecord::from_json(&json).unwrap();
+    let base: serde_json::Value = serde_json::from_str(&json).unwrap();
+    for path in ["", "/sim", "/map", "/setup", "/end", "/end/waves/0", "/attempts/0", "/actions/0"] {
+        let mut v = base.clone();
+        v.pointer_mut(path).unwrap_or_else(|| panic!("{path}")).as_object_mut().unwrap().insert("extra".into(), serde_json::json!(1));
+        let e = RunRecord::from_json(&v.to_string()).unwrap_err();
+        assert!(e.contains("unknown field"), "{path}: {e}");
+    }
 }

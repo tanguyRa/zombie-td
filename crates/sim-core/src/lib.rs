@@ -17,5 +17,5 @@ pub use cards::{validate_deck, CardDb, DeckError};
 pub use config::Config;
 pub use level::LevelPack;
 pub use match_::{Action, ActionError, BuildingChunk, Match, MatchSetup, Phase, Target};
-pub use record::{replay, ReplayMap, ReplaySummary, RunRecord, VerifyError};
+pub use record::{replay, ExpectedRun, ReplayMap, ReplaySummary, RunRecord, VerifyError};
 pub use sim::{GamePhase, Outcome, Sim};

@@ -9,7 +9,8 @@
 //!   cargo run --release -p sim-headless -- scenarios
 //!   cargo run --release -p sim-headless -- match --level paris-marais --seed 1 [--retries 2] [--max-wave-s 1800]
 //!        [--multiplier 0.3] [--fast-forward-to 8] [--record run.json]   # level may also be marais-tiled:1300
-//!   cargo run --release -p sim-headless -- verify run.json (--level paris-marais | --chunks chunks.json)
+//!   cargo run --release -p sim-headless -- verify run.json (--level paris-marais | --chunks chunks.json --shell shell.json)
+//!        [--expect-seed 3] [--expect-deck a,b,...] [--expect-multiplier 0.3]
 
 mod bench;
 mod charts;
