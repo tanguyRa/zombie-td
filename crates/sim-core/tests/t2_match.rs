@@ -3,7 +3,7 @@
 mod common;
 use sim_core::grid::{FENCE, WALK, WALL};
 use sim_core::level::{self, Building, LevelPack};
-use sim_core::match_::{Action, ActionError, BuildingChunk, LoggedAction, Match, MatchError, MatchSetup, Phase};
+use sim_core::match_::{Action, ActionError, BuildingChunk, LoggedAction, Match, MatchError, MatchSetup, Phase, Target};
 use sim_core::sim::{ABSENT, CIVILIAN, INFECTED, ZOMBIE};
 use sim_core::Config;
 
@@ -43,23 +43,19 @@ fn dist_from_center(m: &Match, x: f32, y: f32) -> f64 {
     (((x - cx) as f64).powi(2) + ((y - cy) as f64).powi(2)).sqrt()
 }
 
-/// Largest revealed buildings without a tower (a simple scripted defence).
+/// A simple scripted defence: every playable prep card of the hand (since
+/// T3 the T2 tower budget is gone; see `fixture::fixture_prep_plays`).
 fn script_towers(m: &mut Match) {
-    let sim = m.sim();
-    let taken: Vec<u32> = sim.towers.iter().map(|t| t.building).collect();
-    let mut c: Vec<(f32, u32)> = sim
-        .grid
-        .buildings
-        .iter()
-        .enumerate()
-        .filter(|(b, i)| i.cell_count > 0 && !taken.contains(&(*b as u32)) && m.wave_of_point(i.centroid[0], i.centroid[1]) <= m.wave())
-        .map(|(b, i)| (i.area_m2 * i.floors, b as u32))
-        .collect();
-    c.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
-    let n = m.towers_left() as usize;
-    for &(_, b) in c.iter().take(n) {
-        m.apply(Action::PlaceTower { building: b }).unwrap();
-    }
+    sim_core::fixture::fixture_prep_plays(m);
+}
+
+/// A match whose deck is 20 Rifles (deck rules relaxed for the test).
+fn rifles_match(seed: u64) -> Match {
+    let mut cards = sim_core::CardDb::default_cards();
+    cards.deck_rules.max_copies.common = 20;
+    let cfg = common::cfg();
+    let setup = MatchSetup::new(seed, &cfg).with_deck(vec!["rifles".to_string(); 20]);
+    Match::new_with_cards(&marais(), cfg, cards, setup).unwrap()
 }
 
 #[test]
@@ -81,7 +77,7 @@ fn config_is_valid_and_rings_fit_the_level() {
 
 #[test]
 fn ring_reveal_walls_cells_outside_the_current_radius() {
-    let mut m = new_match(common::cfg(), 3);
+    let mut m = rifles_match(3);
     let check = |m: &Match| {
         let g = &m.sim().grid;
         let r = m.radius_m() as f64;
@@ -120,11 +116,11 @@ fn ring_reveal_walls_cells_outside_the_current_radius() {
     // A building outside the revealed area can't be garrisoned.
     let g = &m.sim().grid;
     let outside = (0..g.buildings.len()).find(|&b| m.wave_of_point(g.buildings[b].centroid[0], g.buildings[b].centroid[1]) > 2).unwrap();
-    assert_eq!(m.apply(Action::PlaceTower { building: outside as u32 }), Err(ActionError::NotRevealed { building: outside as u32 }));
+    assert_eq!(m.apply(Action::PlayCard { hand_index: 0, target: Target::Buildings(vec![outside as u32]) }), Err(ActionError::NotRevealed { building: outside as u32 }));
     // A fence entirely outside is refused (every cell is a wall).
     let [cx, cy] = m.center();
     let far = m.radius_m() + 50.0;
-    assert!(matches!(m.apply(Action::PlaceFence { points: vec![[cx + far, cy], [cx + far, cy + 20.0]] }), Err(ActionError::Placement { .. })));
+    assert!(matches!(m.fence_length_m(&[[cx + far, cy], [cx + far, cy + 20.0]]), Err(_)));
 }
 
 #[test]
@@ -288,7 +284,9 @@ fn outbreaks_follow_the_per_wave_placement_rules() {
         let w = wave as usize - 1;
         m.apply(Action::StartWave).unwrap();
         let sites = m.outbreak_sites().to_vec();
-        assert_eq!(sites.len(), cfg.match_.outbreak_clusters[w] as usize, "wave {wave}");
+        let (clusters, inner_expected) = m.outbreak_count(wave);
+        assert_eq!(sites.len(), clusters as usize, "wave {wave}");
+        assert!(clusters >= 1 && clusters <= cfg.match_.outbreak_clusters[w]);
         let r = m.ring_radius_m(wave) as f64;
         let r_prev = if wave > 1 { m.ring_radius_m(wave - 1) as f64 } else { 0.0 };
         let mut inner = 0;
@@ -300,7 +298,7 @@ fn outbreaks_follow_the_per_wave_placement_rules() {
             }
         }
         if wave > 1 {
-            assert_eq!(inner, cfg.match_.inner_outbreaks[w] as usize, "wave {wave}: inner sites");
+            assert_eq!(inner, inner_expected as usize, "wave {wave}: inner sites");
         }
         if (2..=4).contains(&wave) {
             assert_eq!(inner, 0);
@@ -323,15 +321,15 @@ fn outbreaks_follow_the_per_wave_placement_rules() {
 
 #[test]
 fn placements_persist_and_broken_fences_stay_broken() {
-    let cfg = common::cfg();
-    let mut m = new_match(cfg.clone(), 9);
+    let mut m = new_match(common::cfg(), 9);
     script_towers(&mut m);
-    assert_eq!(m.towers_left(), 0);
     let [cx, cy] = m.center();
-    m.apply(Action::PlaceFence { points: vec![[cx - 40.0, cy - 60.0], [cx + 40.0, cy - 60.0]] }).unwrap();
     let fence: Vec<usize> = (0..m.sim().grid.kind.len()).filter(|&c| m.sim().grid.kind[c] == FENCE).collect();
-    assert!(fence.len() > 5);
+    assert!(fence.len() > 5, "the starter hand of seed 9 has a fence card");
+    let _ = (cx, cy);
     let towers: Vec<u32> = m.sim().towers.iter().map(|t| t.building).collect();
+    assert!(!towers.is_empty());
+    let structures = m.structures().to_vec();
     m.apply(Action::StartWave).unwrap();
     m.step();
     // Break one fence cell the way the fence phase does.
@@ -348,14 +346,7 @@ fn placements_persist_and_broken_fences_stay_broken() {
     assert_eq!(s.towers.iter().map(|t| t.building).collect::<Vec<_>>(), towers);
     assert_eq!(s.grid.kind[broken], WALK, "broken fence stays broken");
     assert!(fence[1..].iter().all(|&c| s.grid.kind[c] == FENCE));
-    // A fresh budget per wave; earlier waves' placements can't be undone.
-    assert_eq!(m.towers_left(), cfg.tower_budget);
-    assert!((m.fence_left_m() - cfg.fence_budget_m).abs() < 1e-3);
-    assert_eq!(m.apply(Action::Undo), Err(ActionError::NothingToUndo));
-    script_towers(&mut m);
-    m.apply(Action::Undo).unwrap();
-    assert_eq!(m.towers_left(), 1);
-    assert_eq!(m.sim().towers.len(), 2 * cfg.tower_budget as usize - 1);
+    assert_eq!(m.structures(), &structures[..], "structures persist");
 }
 
 #[test]
@@ -417,12 +408,10 @@ fn restart_rebuilds_the_initial_match() {
     assert_eq!(new_match(common::cfg(), 11).state_hash(), h0);
 }
 
-/// A short scripted match with real waves: towers every prep, prep lengths
-/// varying, until wave `last` ends or a wave is lost.
+/// A short scripted match with real waves: card plays every prep, prep
+/// lengths varying, until wave `last` ends or a wave is lost.
 fn scripted(seed: u64, last: u8) -> Match {
-    let mut cfg = common::cfg();
-    cfg.tower_budget = 32;
-    let mut m = new_match(cfg, seed);
+    let mut m = new_match(common::cfg(), seed);
     loop {
         for _ in 0..(m.wave() as u32 * 3) {
             m.step();
@@ -454,9 +443,7 @@ fn same_seed_and_actions_give_the_same_hashes() {
     let json = serde_json::to_string(a.log()).unwrap();
     let log: Vec<LoggedAction> = serde_json::from_str(&json).unwrap();
     assert_eq!(log, a.log());
-    let mut cfg = common::cfg();
-    cfg.tower_budget = 32;
-    let mut r = new_match(cfg, 12);
+    let mut r = new_match(common::cfg(), 12);
     for e in &log {
         while r.tick() < e.tick {
             r.step();
@@ -472,12 +459,20 @@ fn same_seed_and_actions_give_the_same_hashes() {
 
 #[test]
 fn actions_serialize_as_tagged_json() {
-    let a = Action::PlaceFence { points: vec![[1.5, 2.25], [3.0, 0.1]] };
+    let a = Action::PlayCard { hand_index: 2, target: Target::Polyline(vec![[1.5, 2.25], [3.0, 0.1]]) };
     let s = serde_json::to_string(&a).unwrap();
-    assert_eq!(s, r#"{"type":"place_fence","points":[[1.5,2.25],[3.0,0.1]]}"#);
+    assert_eq!(s, r#"{"type":"play_card","hand_index":2,"target":{"polyline":[[1.5,2.25],[3.0,0.1]]}}"#);
     assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     assert_eq!(serde_json::to_string(&Action::RetryWave).unwrap(), r#"{"type":"retry_wave"}"#);
-    assert_eq!(serde_json::from_str::<Action>(r#"{"type":"place_tower","building":7}"#).unwrap(), Action::PlaceTower { building: 7 });
+    assert_eq!(serde_json::to_string(&Action::Mulligan).unwrap(), r#"{"type":"mulligan"}"#);
+    assert_eq!(
+        serde_json::from_str::<Action>(r#"{"type":"play_card","hand_index":0,"target":{"buildings":[7,8]}}"#).unwrap(),
+        Action::PlayCard { hand_index: 0, target: Target::Buildings(vec![7, 8]) }
+    );
+    assert_eq!(serde_json::from_str::<Action>(r#"{"type":"play_card","hand_index":1,"target":{"point":[3.5,4]}}"#).unwrap(), Action::PlayCard { hand_index: 1, target: Target::Point([3.5, 4.0]) });
+    assert_eq!(serde_json::from_str::<Action>(r#"{"type":"pull_down","placement_id":3}"#).unwrap(), Action::PullDown { placement_id: 3 });
+    assert_eq!(serde_json::from_str::<Action>(r#"{"type":"repair","fence_id":4}"#).unwrap(), Action::Repair { fence_id: 4 });
+    assert_eq!(serde_json::from_str::<Action>(r#"{"type":"keep_cards","hand_indices":[0,3]}"#).unwrap(), Action::KeepCards { hand_indices: vec![0, 3] });
 }
 
 #[test]
@@ -485,7 +480,7 @@ fn wrong_phase_actions_are_refused() {
     let mut m = new_match(common::cfg(), 14);
     assert!(matches!(m.apply(Action::NextWave), Err(ActionError::WrongPhase { .. })));
     m.apply(Action::StartWave).unwrap();
-    for a in [Action::PlaceTower { building: 0 }, Action::PlaceFence { points: vec![[0.0, 0.0], [1.0, 1.0]] }, Action::Undo, Action::StartWave, Action::NextWave] {
+    for a in [Action::Mulligan, Action::Repair { fence_id: 1 }, Action::PullDown { placement_id: 1 }, Action::StartWave, Action::NextWave] {
         assert!(matches!(m.apply(a), Err(ActionError::WrongPhase { phase: Phase::Running, .. })));
     }
     // Refused actions are not logged.
@@ -561,27 +556,27 @@ fn chunks_give_the_same_match_whatever_their_arrival_order() {
     let cfg = common::cfg();
     let setup = MatchSetup::new(15, &cfg);
     let (shell, chunks) = marais_chunks();
-    let sorted = play_chunked(Match::new_streaming(&shell, cfg.clone(), setup, chunks.clone()).unwrap(), vec![]);
+    let sorted = play_chunked(Match::new_streaming(&shell, cfg.clone(), setup.clone(), chunks.clone()).unwrap(), vec![]);
     let mut rev = chunks.clone();
     rev.reverse();
-    let reversed = play_chunked(Match::new_streaming(&shell, cfg.clone(), setup, rev).unwrap(), vec![]);
+    let reversed = play_chunked(Match::new_streaming(&shell, cfg.clone(), setup.clone(), rev).unwrap(), vec![]);
     assert_eq!(sorted, reversed);
 
     // Only wave 1's blocks first, the rest later in another order.
     let r1 = Match::ring_radii(&cfg, 400.0)[0];
     let (first, late): (Vec<_>, Vec<_>) = chunks.iter().cloned().partition(|c| extent_meets(c, r1));
     assert!(!late.is_empty() && !first.is_empty());
-    let staged = play_chunked(Match::new_streaming(&shell, cfg.clone(), setup, first.clone()).unwrap(), late.clone());
+    let staged = play_chunked(Match::new_streaming(&shell, cfg.clone(), setup.clone(), first.clone()).unwrap(), late.clone());
     assert_eq!(sorted, staged);
 
     // Refusals: duplicate block, revealed area, wave 1 not covered.
-    let mut m = Match::new_streaming(&shell, cfg.clone(), setup, first.clone()).unwrap();
+    let mut m = Match::new_streaming(&shell, cfg.clone(), setup.clone(), first.clone()).unwrap();
     assert_eq!(m.add_buildings(first[0].clone()), Err(MatchError::DuplicateBlock(first[0].block_id)));
     let mut inside = late[0].clone();
     inside.block_id = 999_999;
     inside.bounds = [-10.0, -10.0, 10.0, 10.0];
     assert_eq!(m.add_buildings(inside), Err(MatchError::AreaRevealed(999_999)));
-    assert!(matches!(Match::new_streaming(&shell, cfg.clone(), setup, late.clone()), Err(MatchError::RingNotLoaded(1))));
+    assert!(matches!(Match::new_streaming(&shell, cfg.clone(), setup.clone(), late.clone()), Err(MatchError::RingNotLoaded(1))));
     let mut with_buildings = shell.clone();
     with_buildings.buildings = marais().buildings;
     assert!(matches!(Match::new_streaming(&with_buildings, cfg.clone(), setup, first.clone()), Err(MatchError::LevelHasBuildings)));

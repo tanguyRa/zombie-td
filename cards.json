@@ -1,0 +1,102 @@
+{
+  "deck_rules": {
+    "deck_size": 20,
+    "max_copies": { "common": 3, "uncommon": 2, "rare": 1, "legendary": 1 },
+    "max_legendaries": 2
+  },
+  "starter_decks": [
+    {
+      "id": "civil_defence_issue",
+      "name": "Civil Defence Issue",
+      "cards": [
+        { "card": "rifles", "copies": 3 },
+        { "card": "hunting_rifles", "copies": 3 },
+        { "card": "militia", "copies": 3 },
+        { "card": "light_fence", "copies": 2 },
+        { "card": "barbed_wire", "copies": 1 },
+        { "card": "grenades", "copies": 1 },
+        { "card": "machine_gun_nest", "copies": 2 },
+        { "card": "mortar", "copies": 2 },
+        { "card": "heavy_stockade", "copies": 2 },
+        { "card": "paratrooper", "copies": 1 }
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "id": "light_fence", "name": "Light fence", "rarity": "common", "kind": "fortification", "cost": 2,
+      "text": "Up to 400 m of fence, medium resistance.",
+      "effect": { "type": "fence", "length_m": 400.0, "cell_hp": 300.0 }
+    },
+    {
+      "id": "barbed_wire", "name": "Barbed wire", "rarity": "common", "kind": "fortification", "cost": 1,
+      "text": "Up to 200 m of wire, low resistance.",
+      "effect": { "type": "fence", "length_m": 200.0, "cell_hp": 120.0 }
+    },
+    {
+      "id": "heavy_stockade", "name": "Heavy stockade", "rarity": "uncommon", "kind": "fortification", "cost": 3,
+      "text": "Up to 100 m of stockade, very resistant.",
+      "effect": { "type": "fence", "length_m": 100.0, "cell_hp": 2400.0 }
+    },
+    {
+      "id": "concrete_barriers", "name": "Concrete barriers", "rarity": "rare", "kind": "fortification", "cost": 4,
+      "text": "Up to 300 m of concrete barriers, very resistant.",
+      "effect": { "type": "fence", "length_m": 300.0, "cell_hp": 1800.0 }
+    },
+    {
+      "id": "rifles", "name": "Rifles", "rarity": "common", "kind": "armament", "cost": 3,
+      "text": "Equip 3 buildings with rifles (40 m).",
+      "effect": { "type": "garrison", "buildings": 3, "weapon": { "range_m": 40.0, "damage": 34, "fire_rate": 2.0 } }
+    },
+    {
+      "id": "hunting_rifles", "name": "Hunting rifles", "rarity": "common", "kind": "armament", "cost": 2,
+      "text": "Equip 2 buildings with hunting rifles: longer range, slower.",
+      "effect": { "type": "garrison", "buildings": 2, "weapon": { "range_m": 55.0, "damage": 50, "fire_rate": 1.0 } }
+    },
+    {
+      "id": "militia", "name": "Militia", "rarity": "common", "kind": "armament", "cost": 2,
+      "text": "Arm volunteers in 4 buildings with shotguns: short range, slow.",
+      "effect": { "type": "garrison", "buildings": 4, "weapon": { "range_m": 25.0, "damage": 34, "fire_rate": 1.0 } }
+    },
+    {
+      "id": "machine_gun_nest", "name": "Machine-gun nest", "rarity": "uncommon", "kind": "armament", "cost": 3,
+      "text": "Equip 1 building with a machine gun: short range, very fast.",
+      "effect": { "type": "garrison", "buildings": 1, "weapon": { "range_m": 35.0, "damage": 25, "fire_rate": 8.0 } }
+    },
+    {
+      "id": "mortar", "name": "Mortar", "rarity": "uncommon", "kind": "armament", "cost": 4,
+      "text": "Equip 2 buildings with mortars: long range, slow, area damage, can't hit within 20 m.",
+      "effect": { "type": "garrison", "buildings": 2, "weapon": { "range_m": 90.0, "min_range_m": 20.0, "damage": 60, "fire_rate": 0.5, "splash_m": 8.0 } }
+    },
+    {
+      "id": "sniper_nest", "name": "Sniper nest", "rarity": "rare", "kind": "armament", "cost": 3,
+      "text": "Equip 1 building with a sniper: very long range, one shot one kill.",
+      "effect": { "type": "garrison", "buildings": 1, "weapon": { "range_m": 120.0, "damage": 100, "fire_rate": 0.67 } }
+    },
+    {
+      "id": "grenades", "name": "Grenades", "rarity": "common", "kind": "tactical", "cost": 1,
+      "text": "During a wave: a grenade bursts at a point after 1 s (8 m).",
+      "effect": { "type": "strike", "delay_s": 1.0, "radius_m": 8.0, "damage": 100, "pulses": 1, "interval_s": 1.0 }
+    },
+    {
+      "id": "paratrooper", "name": "Paratrooper", "rarity": "uncommon", "kind": "tactical", "cost": 2,
+      "text": "During a wave: a soldier with an assault rifle lands near a point after 10 s.",
+      "effect": { "type": "unit", "delay_s": 10.0, "scatter_m": 15.0, "weapon": { "range_m": 30.0, "damage": 34, "fire_rate": 5.0 } }
+    },
+    {
+      "id": "napalm", "name": "Napalm", "rarity": "rare", "kind": "tactical", "cost": 4,
+      "text": "During a wave: a 20 m area burns for 12 s, starting after 3 s.",
+      "effect": { "type": "strike", "delay_s": 3.0, "radius_m": 20.0, "damage": 25, "pulses": 12, "interval_s": 1.0 }
+    },
+    {
+      "id": "airstrike", "name": "Airstrike", "rarity": "legendary", "kind": "tactical", "cost": 6,
+      "text": "During a wave: everything undead within 40 m of a point dies after 5 s.",
+      "effect": { "type": "strike", "delay_s": 5.0, "radius_m": 40.0, "damage": 1000, "pulses": 1, "interval_s": 1.0 }
+    },
+    {
+      "id": "armored_convoy", "name": "Armored convoy", "rarity": "legendary", "kind": "tactical", "cost": 6,
+      "text": "During a wave: an armored car with a heavy machine gun drives along a route after 5 s.",
+      "effect": { "type": "unit", "delay_s": 5.0, "scatter_m": 0.0, "follows_path": true, "speed_m_s": 5.0, "weapon": { "range_m": 40.0, "damage": 34, "fire_rate": 8.0 } }
+    }
+  ]
+}

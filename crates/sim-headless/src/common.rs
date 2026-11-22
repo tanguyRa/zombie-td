@@ -19,9 +19,16 @@ pub fn load_level(name: &str) -> LevelPack {
     }
 }
 
+/// `config.default.json`, or the file named by `ZT_CONFIG` (balance sweeps).
 pub fn load_config() -> Config {
-    let p = repo_root().join("config.default.json");
-    Config::from_json(&std::fs::read_to_string(p).expect("config.default.json")).unwrap()
+    let p = std::env::var("ZT_CONFIG").map(PathBuf::from).unwrap_or_else(|_| repo_root().join("config.default.json"));
+    Config::from_json(&std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).unwrap()
+}
+
+/// `cards.json`, or the file named by `ZT_CARDS` (balance sweeps).
+pub fn load_cards() -> sim_core::CardDb {
+    let p = std::env::var("ZT_CARDS").map(PathBuf::from).unwrap_or_else(|_| repo_root().join("cards.json"));
+    sim_core::CardDb::from_json(&std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).unwrap()
 }
 
 pub struct WallClock(Instant);

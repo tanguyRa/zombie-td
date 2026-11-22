@@ -89,6 +89,21 @@ pub struct Stats {
     pub first_breach_tick: Option<u32>,
 }
 
+/// What a tower (or a unit) shoots with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Weapon {
+    pub range_m: f32,
+    /// Zombies closer than this are not targeted (mortars). 0: none.
+    pub min_range_m: f32,
+    pub damage: u16,
+    /// Ticks between shots.
+    pub period_ticks: u32,
+    /// Every zombie within this radius of the target is hit too. 0: none.
+    pub splash_m: f32,
+}
+
+/// A shooter: a garrisoned building, or a unit (`building == NO_BUILDING`)
+/// such as a paratrooper or a convoy vehicle.
 #[derive(Clone, Debug)]
 pub struct Tower {
     pub building: u32,
@@ -97,6 +112,42 @@ pub struct Tower {
     pub cooldown: u32,
     pub shots: u32,
     pub kills: u32,
+    pub weapon: Weapon,
+    /// Sim tick from which it acts (a paratrooper landing). 0: at once.
+    pub active_from: u32,
+    /// Waypoints still ahead, sim coordinates (a convoy). Empty: static.
+    pub path: Vec<[f32; 2]>,
+    /// Meters per tick along `path`.
+    pub speed_m_tick: f32,
+}
+
+/// A timed area attack (airstrike, napalm): `pulses_left` pulses of
+/// `damage` to every zombie within `radius_m`, the first at `next_tick`,
+/// then every `interval_ticks`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AreaEffect {
+    pub x: f32,
+    pub y: f32,
+    pub radius_m: f32,
+    pub damage: u16,
+    pub next_tick: u32,
+    pub interval_ticks: u32,
+    pub pulses_left: u32,
+    pub kills: u32,
+}
+
+impl Tower {
+    /// A static garrison in `building`, at (x, y), active at once.
+    pub fn garrison(building: u32, x: f32, y: f32, weapon: Weapon) -> Tower {
+        Tower { building, x, y, cooldown: 0, shots: 0, kills: 0, weapon, active_from: 0, path: Vec::new(), speed_m_tick: 0.0 }
+    }
+    /// A unit (no building) that starts acting at sim tick `active_from`.
+    pub fn unit(x: f32, y: f32, weapon: Weapon, active_from: u32, path: Vec<[f32; 2]>, speed_m_tick: f32) -> Tower {
+        Tower { building: NO_BUILDING, x, y, cooldown: 0, shots: 0, kills: 0, weapon, active_from, path, speed_m_tick }
+    }
+    pub fn is_unit(&self) -> bool {
+        self.building == NO_BUILDING
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +245,8 @@ pub struct Sim {
     fence_touched: Vec<u32>,
 
     pub towers: Vec<Tower>,
+    /// Area attacks in progress (match tactical cards).
+    pub effects: Vec<AreaEffect>,
     pub placements: Vec<Placement>,
     pub fence_used_m: f32,
     /// Civilians spawned per building (index = building index).
@@ -328,6 +381,7 @@ impl Sim {
             fence_damage: vec![0.0; cells],
             fence_touched: Vec::with_capacity(cells),
             towers: Vec::new(),
+            effects: Vec::new(),
             placements: Vec::new(),
             fence_used_m: 0.0,
             spawn_counts: Vec::new(),
@@ -511,18 +565,21 @@ impl Sim {
             return Err("tower budget exhausted".into());
         }
         let [x, y] = self.grid.buildings[building as usize].centroid;
-        self.towers.push(Tower { building, x, y, cooldown: 0, shots: 0, kills: 0 });
+        self.towers.push(Tower::garrison(building, x, y, self.cfg.tower_weapon()));
         self.placements.push(Placement::Tower(building));
         Ok(())
     }
 
-    /// Place a fence polyline (sim coordinates). Returns its length in meters.
-    pub fn place_fence(&mut self, pts: &[[f32; 2]]) -> Result<f32, String> {
-        if self.phase != GamePhase::Setup {
-            return Err("fences can only be placed during setup".into());
-        }
+    /// The placed length (meters) and open cells of a fence polyline (sim
+    /// coordinates), without placing it. Cells on buildings or the map edge
+    /// are clipped away: a fence drawn from wall to wall seals the street,
+    /// and only the share of the line actually placed counts.
+    pub fn fence_preview(&self, pts: &[[f32; 2]]) -> Result<(f32, Vec<usize>), String> {
         if pts.len() < 2 {
             return Err("a fence needs at least two points".into());
+        }
+        if pts.iter().any(|p| !p[0].is_finite() || !p[1].is_finite()) {
+            return Err("fence points must be finite".into());
         }
         let length: f32 = pts
             .windows(2)
@@ -532,29 +589,41 @@ impl Sim {
             })
             .sum();
         let cells = self.grid.rasterize_polyline(pts);
-        // Cells on buildings or the map edge are clipped away: a fence drawn
-        // from wall to wall seals the street. The budget pays only for the
-        // share of the line that is actually placed.
         let open: Vec<usize> = cells.iter().copied().filter(|&c| self.grid.kind[c] == WALK || self.grid.kind[c] == FENCE).collect();
         if open.is_empty() {
             return Err("fences cannot be placed on buildings or the map edge".into());
         }
         let length = (length * open.len() as f32 / cells.len() as f32).max(self.grid.cell);
-        if length > self.fence_left_m() + 1e-3 {
-            return Err(format!("fence is {:.0} m, only {:.0} m left", length, self.fence_left_m()));
-        }
-        let cells = open;
+        Ok((length, open))
+    }
+
+    /// Turn the walkable cells among `cells` into fence cells with `hp` each
+    /// (cells that already are fences are left alone). Returns the new cells.
+    pub(crate) fn build_fence_cells(&mut self, cells: &[usize], hp: f32) -> Vec<u32> {
         let mut new_cells = Vec::new();
-        for c in cells {
+        for &c in cells {
             if self.grid.kind[c] == WALK {
                 self.grid.set_kind(c, FENCE);
-                self.grid.fence_hp[c] = self.cfg.fence_cell_hp;
+                self.grid.fence_hp[c] = hp;
                 new_cells.push(c as u32);
             }
         }
+        self.push_agents_off_blocked_cells();
+        new_cells
+    }
+
+    /// Place a fence polyline (sim coordinates). Returns its length in meters.
+    pub fn place_fence(&mut self, pts: &[[f32; 2]]) -> Result<f32, String> {
+        if self.phase != GamePhase::Setup {
+            return Err("fences can only be placed during setup".into());
+        }
+        let (length, open) = self.fence_preview(pts)?;
+        if length > self.fence_left_m() + 1e-3 {
+            return Err(format!("fence is {:.0} m, only {:.0} m left", length, self.fence_left_m()));
+        }
+        let new_cells = self.build_fence_cells(&open, self.cfg.fence_cell_hp);
         self.fence_used_m += length;
         self.placements.push(Placement::Fence { cells: new_cells, length_m: length });
-        self.push_agents_off_blocked_cells();
         Ok(length)
     }
 
@@ -583,7 +652,7 @@ impl Sim {
         while self.undo() {}
     }
 
-    fn nearest_walkable(&self, c: usize) -> Option<usize> {
+    pub(crate) fn nearest_walkable(&self, c: usize) -> Option<usize> {
         let g = &self.grid;
         let (cx, cy) = ((c % g.w) as i64, (c / g.w) as i64);
         for r in 1..32i64 {
@@ -897,6 +966,13 @@ impl Sim {
 
     /// Nearest agent in `state` within `r` of (x, y), excluding `skip`.
     fn nearest_of_state(&self, x: f32, y: f32, r: f32, state: u8, skip: usize) -> Option<(usize, f32)> {
+        self.nearest_of_state_beyond(x, y, r, 0.0, state, skip)
+    }
+
+    /// Like `nearest_of_state`, ignoring agents closer than `min_r`. With
+    /// `min_r == 0` the result is the same (`d2 >= 0` always holds).
+    fn nearest_of_state_beyond(&self, x: f32, y: f32, r: f32, min_r: f32, state: u8, skip: usize) -> Option<(usize, f32)> {
+        let min2 = min_r * min_r;
         let bm = self.bucket_m;
         let bx0 = (((x - r) / bm).max(0.0)) as usize;
         let by0 = (((y - r) / bm).max(0.0)) as usize;
@@ -920,7 +996,7 @@ impl Sim {
                         continue;
                     }
                     let d2 = dx * dx + dy * dy;
-                    if d2 <= r2 && best.map_or(true, |(bj, bd)| d2 < bd || (d2 == bd && j < bj)) {
+                    if d2 <= r2 && d2 >= min2 && best.map_or(true, |(bj, bd)| d2 < bd || (d2 == bd && j < bj)) {
                         best = Some((j, d2));
                     }
                 }
@@ -1448,12 +1524,72 @@ impl Sim {
         }
     }
 
+    /// Every zombie (hash-time position) within `r` of (x, y), in bucket order.
+    fn zombies_within(&self, x: f32, y: f32, r: f32, out: &mut Vec<usize>) {
+        out.clear();
+        let bm = self.bucket_m;
+        let bx0 = (((x - r) / bm).max(0.0)) as usize;
+        let by0 = (((y - r) / bm).max(0.0)) as usize;
+        let bx1 = (((x + r) / bm).max(0.0) as usize).min(self.hash_w - 1);
+        let by1 = (((y + r) / bm).max(0.0) as usize).min(self.hash_h - 1);
+        let r2 = r * r;
+        for by in by0..=by1 {
+            for bx in bx0..=bx1 {
+                let b = by * self.hash_w + bx;
+                for k in self.bucket_civ_end[b]..self.bucket_start[b + 1] {
+                    let k = k as usize;
+                    let j = self.agent_ids[k] as usize;
+                    if self.state[j] != ZOMBIE {
+                        continue;
+                    }
+                    let (dx, dy) = (self.hx[k] - x, self.hy[k] - y);
+                    if dx * dx + dy * dy <= r2 {
+                        out.push(j);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Damage zombie `j`; returns whether it died.
+    fn hit_zombie(&mut self, j: usize, dmg: u16, dead_ticks: u16) -> bool {
+        self.hp[j] = self.hp[j].saturating_sub(dmg);
+        if self.hp[j] == 0 {
+            self.state[j] = DEAD;
+            self.timer[j] = dead_ticks;
+            self.vx[j] = 0.0;
+            self.vy[j] = 0.0;
+            self.stats.zombies -= 1;
+            self.stats.dead += 1;
+            self.stats.zombies_killed += 1;
+            true
+        } else {
+            false
+        }
+    }
+
     fn fire_towers(&mut self) {
-        let range = self.cfg.tower_range_m;
-        let period = self.cfg.tower_period_ticks();
-        let dmg = self.cfg.tower_damage;
         let dead_ticks = (self.cfg.kill_flash_seconds * self.cfg.tick_hz as f32) as u16;
+        let mut hits = Vec::new();
         for t in 0..self.towers.len() {
+            if self.tick < self.towers[t].active_from {
+                continue;
+            }
+            if !self.towers[t].path.is_empty() {
+                let tw = &mut self.towers[t];
+                let [px, py] = tw.path[0];
+                let (dx, dy) = (px - tw.x, py - tw.y);
+                let d = (dx * dx + dy * dy).sqrt();
+                if d <= tw.speed_m_tick {
+                    tw.x = px;
+                    tw.y = py;
+                    tw.path.remove(0);
+                } else {
+                    let k = tw.speed_m_tick / d;
+                    tw.x += dx * k;
+                    tw.y += dy * k;
+                }
+            }
             if self.towers[t].cooldown > 0 {
                 self.towers[t].cooldown -= 1;
                 if self.towers[t].cooldown > 0 {
@@ -1461,21 +1597,40 @@ impl Sim {
                 }
             }
             let (tx, ty) = (self.towers[t].x, self.towers[t].y);
-            if let Some((j, _)) = self.nearest_of_state(tx, ty, range, ZOMBIE, usize::MAX) {
-                self.hp[j] = self.hp[j].saturating_sub(dmg);
+            let w = self.towers[t].weapon;
+            if let Some((j, _)) = self.nearest_of_state_beyond(tx, ty, w.range_m, w.min_range_m, ZOMBIE, usize::MAX) {
                 self.towers[t].shots += 1;
-                self.towers[t].cooldown = period;
-                if self.hp[j] == 0 {
-                    self.state[j] = DEAD;
-                    self.timer[j] = dead_ticks;
-                    self.vx[j] = 0.0;
-                    self.vy[j] = 0.0;
-                    self.stats.zombies -= 1;
-                    self.stats.dead += 1;
-                    self.stats.zombies_killed += 1;
+                self.towers[t].cooldown = w.period_ticks;
+                if w.splash_m > 0.0 {
+                    self.zombies_within(self.x[j], self.y[j], w.splash_m, &mut hits);
+                    if !hits.contains(&j) {
+                        hits.push(j);
+                    }
+                    for k in 0..hits.len() {
+                        if self.hit_zombie(hits[k], w.damage, dead_ticks) {
+                            self.towers[t].kills += 1;
+                        }
+                    }
+                } else if self.hit_zombie(j, w.damage, dead_ticks) {
                     self.towers[t].kills += 1;
                 }
             }
+        }
+        for e in 0..self.effects.len() {
+            let ef = &self.effects[e];
+            if ef.pulses_left == 0 || self.tick < ef.next_tick {
+                continue;
+            }
+            let (x, y, r, dmg) = (ef.x, ef.y, ef.radius_m, ef.damage);
+            self.zombies_within(x, y, r, &mut hits);
+            for k in 0..hits.len() {
+                if self.hit_zombie(hits[k], dmg, dead_ticks) {
+                    self.effects[e].kills += 1;
+                }
+            }
+            let ef = &mut self.effects[e];
+            ef.pulses_left -= 1;
+            ef.next_tick += ef.interval_ticks.max(1);
         }
     }
 

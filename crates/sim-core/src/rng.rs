@@ -26,6 +26,11 @@ impl Pcg32 {
         xorshifted.rotate_right(rot)
     }
 
+    /// The generator's (state, increment), for state hashes.
+    pub fn raw_state(&self) -> (u64, u64) {
+        (self.state, self.inc)
+    }
+
     /// Uniform in [0, n). Lemire-free simple modulo with rejection.
     #[inline]
     pub fn below(&mut self, n: u32) -> u32 {

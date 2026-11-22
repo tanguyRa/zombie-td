@@ -1,9 +1,16 @@
-//! `sim-headless match`: play an 8-wave match with a simple scripted defence
-//! and print one row per wave.
+//! `sim-headless match`: play an 8-wave match with the starter deck and a
+//! simple scripted defence, and print one row per wave.
+//!
+//! The script, per prep: mulligan a hand with no armament; play armaments
+//! (buildings chosen by `pick_towers`), then fortifications as arcs of a
+//! circle just inside the previous ring (wave 1: 60% of the core), while
+//! supply lasts; keep tactical cards. While the wave runs: every 2 s, play
+//! a tactical card on the densest visible group of zombies.
 
 use std::time::Instant;
 
-use sim_core::match_::{Action, Match, MatchSetup, Phase};
+use sim_core::cards::{CardKind, Effect, TargetKind};
+use sim_core::match_::{Action, Match, MatchSetup, Phase, Target};
 use sim_core::sim::{CIVILIAN, INFECTED, ZOMBIE};
 use sim_core::LevelPack;
 
@@ -20,8 +27,8 @@ pub struct MatchOpts {
     /// outbreak) to reach a late wave quickly. Benchmarks only.
     pub fast_forward_to: u8,
     pub multiplier: Option<f32>,
-    /// Config overrides for the temporary tools (towers / fence per wave).
-    pub tower_budget: Option<u32>,
+    /// Play no tactical card (to measure what they add).
+    pub no_tactical: bool,
 }
 
 pub struct WaveRow {
@@ -35,6 +42,9 @@ pub struct WaveRow {
     pub killed: u32,
     pub bites: u32,
     pub towers: usize,
+    /// Supply at Start (after the prep's plays) and cards played this wave.
+    pub supply: u32,
+    pub played: u32,
     pub ticks: u32,
     pub outcome: &'static str,
     pub p50_ms: f64,
@@ -53,7 +63,42 @@ pub fn load_any_level(name: &str) -> LevelPack {
 /// Towers for this prep: revealed buildings without a garrison, newest ring
 /// first, largest first, at least 50 m apart where possible. `variant`
 /// shifts the choice for retries.
-fn pick_towers(m: &Match, variant: u32) -> Vec<u32> {
+/// Coverage picks: repeatedly the revealed building farthest from every
+/// shooter already placed (and the play-area edge counts as covered), so
+/// towers spread over the revealed disc. Among buildings at least 10 m²,
+/// ties by index.
+fn pick_spread(m: &Match, want: usize) -> Vec<u32> {
+    let sim = m.sim();
+    let taken: Vec<u32> = sim.towers.iter().map(|t| t.building).collect();
+    let mut pts: Vec<[f32; 2]> = sim.towers.iter().filter(|t| !t.is_unit()).map(|t| [t.x, t.y]).collect();
+    let [cx, cy] = m.center();
+    let r = m.radius_m();
+    let cands: Vec<(u32, [f32; 2])> = (0..sim.grid.buildings.len() as u32)
+        .filter(|&b| {
+            let i = &sim.grid.buildings[b as usize];
+            i.cell_count > 0 && i.area_m2 >= 10.0 && !taken.contains(&b) && m.wave_of_point(i.centroid[0], i.centroid[1]) <= m.wave()
+        })
+        .map(|b| (b, sim.grid.buildings[b as usize].centroid))
+        .collect();
+    let mut out = Vec::new();
+    while out.len() < want {
+        let score = |p: [f32; 2]| {
+            let edge = r - ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt();
+            pts.iter().map(|q| ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt()).fold(edge.max(0.0) + 25.0, f32::min)
+        };
+        let best = cands.iter().filter(|(b, _)| !out.contains(b)).map(|&(b, p)| (score(p), b, p)).max_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(b.1.cmp(&a.1)));
+        let Some((_, b, p)) = best else { break };
+        out.push(b);
+        pts.push(p);
+    }
+    out
+}
+
+fn pick_towers(m: &Match, variant: u32, want: usize) -> Vec<u32> {
+    if variant % 2 == 0 {
+        return pick_spread(m, want);
+    }
+    let variant = variant / 2;
     let sim = m.sim();
     let wave = m.wave();
     let taken: Vec<u32> = sim.towers.iter().map(|t| t.building).collect();
@@ -81,7 +126,6 @@ fn pick_towers(m: &Match, variant: u32) -> Vec<u32> {
             cands.sort_by(|a, b| d(a.2).partial_cmp(&d(b.2)).unwrap().then(a.2.cmp(&b.2)))
         }
     }
-    let want = m.towers_left() as usize;
     let mut out: Vec<u32> = Vec::new();
     let far = |out: &[u32], b: u32| {
         let c = sim.grid.buildings[b as usize].centroid;
@@ -103,27 +147,106 @@ fn pick_towers(m: &Match, variant: u32) -> Vec<u32> {
     out
 }
 
+/// Points of an arc of the circle (cx, cy, r) from angle `a0` (radians)
+/// growing in 2° steps while the fence would stay within `limit_m` placed
+/// meters. Returns the points and the end angle. (Trig is fine here: the
+/// script only produces action inputs, which a replay reads back.)
+fn fence_arc(m: &Match, c: [f32; 2], r: f32, a0: f32, limit_m: f32) -> (Vec<[f32; 2]>, f32) {
+    let at = |a: f32| [c[0] + r * a.cos(), c[1] + r * a.sin()];
+    let step = 2.0f32.to_radians();
+    let mut pts = vec![at(a0), at(a0 + step)];
+    let mut a = a0 + step;
+    while a < a0 + std::f32::consts::TAU {
+        let next = at(a + step);
+        pts.push(next);
+        if !matches!(m.fence_length_m(&pts), Ok(l) if l <= limit_m) {
+            pts.pop();
+            break;
+        }
+        a += step;
+    }
+    (pts, a)
+}
+
+/// The prep part of the script. Returns the cards played.
+fn play_prep(m: &mut Match, variant: u32, arc: &mut f32) -> u32 {
+    let has_armament = m.hand().iter().any(|c| c.kind == CardKind::Armament);
+    if !has_armament && m.mulligan_available() {
+        m.apply(Action::Mulligan).unwrap();
+    }
+    let mut played = 0;
+    let wave = m.wave();
+    let [cx, cy] = m.center();
+    let r = if wave == 1 { 0.6 * m.ring_radius_m(1) } else { m.ring_radius_m(wave - 1) - 4.0 };
+    for kind in [CardKind::Armament, CardKind::Fortification] {
+        loop {
+            let hand = m.hand();
+            let Some(c) = hand.iter().find(|c| c.kind == kind && c.playable) else { break };
+            let def = m.cards().get(&c.card).unwrap().clone();
+            let target = match (&def.effect, c.target) {
+                (Effect::Garrison { buildings, .. }, _) => Target::Buildings(pick_towers(m, variant, *buildings as usize)),
+                (Effect::Fence { length_m, .. }, TargetKind::Polyline) => {
+                    let (pts, end) = fence_arc(m, [cx, cy], r, *arc, *length_m);
+                    *arc = end;
+                    Target::Polyline(pts)
+                }
+                _ => break,
+            };
+            match m.apply(Action::PlayCard { hand_index: c.hand_index, target }) {
+                Ok(()) => played += 1,
+                Err(_) => break,
+            }
+        }
+    }
+    // Keep tactical cards for later waves.
+    let keep: Vec<u32> = m.hand().iter().filter(|c| c.kind == CardKind::Tactical).map(|c| c.hand_index).take(m.config().match_.hand_keep as usize).collect();
+    m.apply(Action::KeepCards { hand_indices: keep }).unwrap();
+    played
+}
+
+/// The densest group of zombies: the 20 m square holding the most, at the
+/// mean position of its zombies.
+fn zombie_hotspot(m: &Match) -> Option<[f32; 2]> {
+    let s = m.sim();
+    let cell = 20.0f32;
+    let mut cells: std::collections::BTreeMap<(i32, i32), (u32, f32, f32)> = Default::default();
+    for i in 0..s.n {
+        if s.state[i] == ZOMBIE {
+            let e = cells.entry(((s.x[i] / cell) as i32, (s.y[i] / cell) as i32)).or_insert((0, 0.0, 0.0));
+            e.0 += 1;
+            e.1 += s.x[i];
+            e.2 += s.y[i];
+        }
+    }
+    let (_, &(n, x, y)) = cells.iter().max_by_key(|(k, v)| (v.0, std::cmp::Reverse(**k)))?;
+    Some([x / n as f32, y / n as f32])
+}
+
+/// The running part of the script: one tactical card on the hotspot.
+fn play_tactical(m: &mut Match) -> u32 {
+    let Some(c) = m.hand().into_iter().find(|c| c.kind == CardKind::Tactical && c.playable && c.target == TargetKind::Point) else { return 0 };
+    let Some(p) = zombie_hotspot(m) else { return 0 };
+    m.apply(Action::PlayCard { hand_index: c.hand_index, target: Target::Point(p) }).map_or(0, |_| 1)
+}
+
 pub fn run(o: &MatchOpts) -> (Match, Vec<WaveRow>) {
     let level = load_any_level(&o.level);
-    let mut cfg = load_config();
-    if let Some(t) = o.tower_budget {
-        cfg.tower_budget = t;
-    }
-    let mut setup = MatchSetup::new(o.seed, &cfg);
+    let cfg = load_config();
+    let cards = load_cards();
+    let mut setup = MatchSetup::new(o.seed, &cfg).with_deck(cards.starter_deck_ids());
     if let Some(k) = o.multiplier {
         setup.population_multiplier = k;
     }
-    let mut m = Match::new(&level, cfg, setup).expect("match");
+    let mut m = Match::new_with_cards(&level, cfg, cards, setup).expect("match");
     let max_ticks = o.max_wave_s * m.config().tick_hz;
     let mut rows = Vec::new();
     let mut attempt = 0u32;
     let mut clock = WallClock::new();
     loop {
         let wave = m.wave();
-        let towers = pick_towers(&m, attempt);
-        for b in towers {
-            m.apply(Action::PlaceTower { building: b }).expect("tower");
-        }
+        let mut arc = 0.37 * attempt as f32;
+        let mut played = play_prep(&mut m, attempt, &mut arc);
+        let supply = m.supply();
         m.apply(Action::StartWave).unwrap();
         let mut times = Vec::new();
         if wave < o.fast_forward_to {
@@ -136,6 +259,9 @@ pub fn run(o: &MatchOpts) -> (Match, Vec<WaveRow>) {
         }
         let mut stalled = false;
         while m.phase() == Phase::Running {
+            if !o.no_tactical && m.wave_tick() % 40 == 39 {
+                played += play_tactical(&mut m);
+            }
             let t = clock_ms(&mut clock);
             m.step_timed(&mut clock);
             times.push(clock_ms(&mut clock) - t);
@@ -161,7 +287,9 @@ pub fn run(o: &MatchOpts) -> (Match, Vec<WaveRow>) {
             saved: if start_civ > 0 { end_civ as f32 / start_civ as f32 } else { 0.0 },
             killed,
             bites,
-            towers: sim.towers.len(),
+            towers: sim.towers.iter().filter(|t| !t.is_unit()).count(),
+            supply,
+            played,
             ticks,
             outcome,
             p50_ms: percentile(&times, 50.0),
@@ -190,10 +318,10 @@ fn clock_ms(c: &mut WallClock) -> f64 {
 }
 
 pub fn table(m: &Match, rows: &[WaveRow]) -> String {
-    let mut s = String::from("| wave | try | radius m | newcomers | start civ | end civ | saved | killed | bites | towers | game s | result | tick p50 ms | p95 ms | max ms | end hash |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+    let mut s = String::from("| wave | try | radius m | newcomers | start civ | end civ | saved | killed | bites | towers | cards | supply left | game s | result | tick p50 ms | p95 ms | max ms | end hash |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for r in rows {
         s += &format!(
-            "| {} | {} | {:.0} | {} | {} | {} | {:.0}% | {} | {} | {} | {:.0} | {} | {:.2} | {:.2} | {:.2} | {:016x} |\n",
+            "| {} | {} | {:.0} | {} | {} | {} | {:.0}% | {} | {} | {} | {} | {} | {:.0} | {} | {:.2} | {:.2} | {:.2} | {:016x} |\n",
             r.wave,
             r.attempt + 1,
             r.radius_m,
@@ -204,6 +332,8 @@ pub fn table(m: &Match, rows: &[WaveRow]) -> String {
             r.killed,
             r.bites,
             r.towers,
+            r.played,
+            r.supply,
             r.ticks as f32 / 20.0,
             r.outcome,
             r.p50_ms,
@@ -235,11 +365,11 @@ pub fn cmd(args: &[String]) {
         max_wave_s: crate::arg(args, "--max-wave-s", 1800),
         fast_forward_to: crate::arg(args, "--fast-forward-to", 0),
         multiplier: crate::arg::<String>(args, "--multiplier", String::new()).parse().ok(),
-        tower_budget: Some(crate::arg(args, "--tower-budget", 32)),
+        no_tactical: args.iter().any(|a| a == "--no-tactical"),
     };
     let t0 = Instant::now();
     let (m, rows) = run(&o);
-    println!("match on {} seed {} (population multiplier {}, {} towers per wave)", o.level, o.seed, m.setup().population_multiplier, m.config().tower_budget);
+    println!("match on {} seed {} (population multiplier {}, starter deck, {} reshuffles)", o.level, o.seed, m.setup().population_multiplier, m.reshuffles());
     print!("{}", table(&m, &rows));
     println!("wall {:.1}s", t0.elapsed().as_secs_f64());
 }

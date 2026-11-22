@@ -88,6 +88,26 @@ pub struct MatchConfig {
     /// ready once every cell within its radius + this margin is covered, so
     /// every block whose buildings reach into the ring has arrived.
     pub block_margin_m: f32,
+
+    // Cards and supply (T3).
+    /// Cards drawn at every prep.
+    pub hand_draw: u32,
+    /// Unplayed cards kept into the next wave (the rest are discarded).
+    pub hand_keep: u32,
+    /// Supply before wave 1's income.
+    pub supply_start: u32,
+    /// Supply granted when each wave's prep opens.
+    pub supply_base_income: u32,
+    /// +1 supply per this many civilians saved in a wave (per wave, paid
+    /// into the next wave's prep).
+    pub supply_civilians_per_point: Vec<u32>,
+    /// Supply cost of the one mulligan per wave.
+    pub mulligan_cost: u32,
+    /// Repairing a fence costs `ceil(card cost × this × damaged share)`.
+    pub repair_cost_factor: f32,
+    /// Pulling down a structure from an earlier wave refunds
+    /// `floor(card cost × this × condition)` (condition: fence hp left).
+    pub pull_down_refund: f32,
 }
 
 impl MatchConfig {
@@ -101,6 +121,7 @@ impl MatchConfig {
             ("inner_outbreaks", self.inner_outbreaks.len()),
             ("outbreak_radius_m", self.outbreak_radius_m.len()),
             ("outbreak_min_per_cluster", self.outbreak_min_per_cluster.len()),
+            ("supply_civilians_per_point", self.supply_civilians_per_point.len()),
         ] {
             if len != w {
                 return Err(format!("match.{name} has {len} entries, ring_radius_m has {w}"));
@@ -117,6 +138,12 @@ impl MatchConfig {
         }
         if !(self.block_margin_m >= 0.0) {
             return Err("match.block_margin_m must be >= 0".into());
+        }
+        if self.supply_civilians_per_point.contains(&0) {
+            return Err("match.supply_civilians_per_point must be > 0".into());
+        }
+        if !(self.repair_cost_factor >= 0.0) || !(0.0..=1.0).contains(&self.pull_down_refund) {
+            return Err("match.repair_cost_factor must be >= 0 and pull_down_refund in [0, 1]".into());
         }
         if self.fatigue_curve.windows(2).any(|p| p[1][0] <= p[0][0]) {
             return Err("match.fatigue_curve times must increase".into());
@@ -162,7 +189,19 @@ impl Config {
         10.0 / self.cell_size_m
     }
     pub fn tower_period_ticks(&self) -> u32 {
-        ((self.tick_hz as f32 / self.tower_fire_rate).round() as u32).max(1)
+        self.period_ticks(self.tower_fire_rate)
+    }
+    /// Ticks between shots at `rate` shots per second (at least 1).
+    pub fn period_ticks(&self, rate: f32) -> u32 {
+        ((self.tick_hz as f32 / rate).round() as u32).max(1)
+    }
+    /// Ticks in `s` seconds, rounded.
+    pub fn ticks(&self, s: f32) -> u32 {
+        (s * self.tick_hz as f32).round().max(0.0) as u32
+    }
+    /// The single-wave tower (and the base of the Rifles card).
+    pub fn tower_weapon(&self) -> crate::sim::Weapon {
+        crate::sim::Weapon { range_m: self.tower_range_m, min_range_m: 0.0, damage: self.tower_damage, period_ticks: self.tower_period_ticks(), splash_m: 0.0 }
     }
     pub fn max_ticks(&self) -> u32 {
         self.max_game_seconds * self.tick_hz

@@ -51,14 +51,19 @@ Useful extras:
 
 - `./dev.sh cargo run --release -p sim-headless -- run --level suburb --pop 20000 --seed 3`
   plays one game headless and prints the population every 10 s.
-- `./dev.sh cargo run --release -p sim-headless -- match --level paris-marais --seed 2`
-  plays an 8-wave match headless with a simple scripted defence (32 towers
-  per wave on the largest revealed buildings, up to 3 retries per lost wave
-  with a different choice) and prints one row per wave attempt: radius,
-  newcomers, civilians at start and end, kills, bites, game time, tick
-  times, end-of-wave state hash. `--retries`, `--tower-budget`,
-  `--multiplier` and `--max-wave-s` (a safety cap; the match itself has no
-  timeout) tune it; `--level marais-tiled:1300 --fast-forward-to 8 --max-wave-s 150`
+- `./dev.sh cargo run --release -p sim-headless -- match --level paris-marais --seed 1`
+  plays an 8-wave match headless with the starter deck "Civil Defence
+  Issue" and a simple scripted defence. In prep it mulligans a hand with no
+  armament, plays armaments on spread-out buildings and fences as arcs
+  inside the previous ring, and keeps tactical cards. While the wave runs it
+  plays tactical cards on the densest group of zombies. It retries a lost
+  wave up to 3 times with a different building choice. It prints one row
+  per wave attempt: radius, newcomers, civilians at start and end, kills,
+  bites, towers, cards played, supply left, game time, tick times and the
+  end-of-wave state hash. `--retries`, `--multiplier`, `--no-tactical` and
+  `--max-wave-s` (a safety cap; the match itself has no timeout) tune it.
+  `ZT_CONFIG=<file>` and `ZT_CARDS=<file>` swap `config.default.json` /
+  `cards.json` for balance sweeps; `--level marais-tiled:1300 --fast-forward-to 8 --max-wave-s 150`
   times a real wave 8 at the wave-8 caps (earlier waves won instantly).
 - `./dev.sh cargo run --release -p sim-headless -- report --quick` makes a
   fast report (2 seeds, no S5, short benchmarks) for iteration. It is marked
@@ -187,6 +192,10 @@ don't change the outcome (S2). The fence ring in S3 is first breached after
   wave by wave, newcomers from the new ring's buildings, per-wave outbreaks,
   fatigue, persistent placements, retry / restart, buildings streamed in
   chunks. Every change goes through `Match::apply(Action)` and `step()`.
+  Cards (`cards.rs`, data in `cards.json`) are the player's tools: a 20-card
+  deck, a hand of 5 per wave (2 can be kept), supply per wave, one
+  mulligan, repair and pull-down. Fortifications and armaments are played
+  in prep, tactical cards during the wave.
   The browser still plays the single-wave `Sim` until T5.
 - **`crates/sim-headless`**: tests support, scenarios S1–S5, benchmarks and
   the report writer (SVG charts, no Python).
@@ -206,6 +215,8 @@ don't change the outcome (S2). The fence ring in S3 is first breached after
   `levels/paris-marais.json` (659 buildings, r = 400 m) and
   `levels/suburb.json` (Le Vésinet, 375 buildings, r = 250 m).
 - **`config.default.json`**: every tunable number, read by both the headless
-  runner and the browser.
+  runner and the browser. **`cards.json`**: the cards (cost, rarity, kind,
+  effect numbers), the deck rules and the starter deck, embedded in
+  `sim-core` like the config.
 
 Every choice the spec left open is in [DECISIONS.md](DECISIONS.md).

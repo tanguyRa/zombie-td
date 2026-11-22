@@ -306,7 +306,7 @@ Every choice the spec left open, and every simplification, in one place.
   remainder and placed from the `SPAWN` stream on walkable cells of the new
   disc. Survivors stay where they are. Corpses keep their slots for the
   whole match (as in T1's definition of `max_population`).
-- **`population_multiplier` 0.5**: the 1.3 km tiled Marais then holds
+- **`population_multiplier` 0.5** (lowered to 0.3 in T3, see "Cards"): the 1.3 km tiled Marais then holds
   92,303 agents at wave 8 (1,266 in the core), under the 100k cap with room
   for denser places. The committed Marais (400 m) holds about 10.4k over
   the match. Difficulty (T7) scales `MatchSetup::population_multiplier`.
@@ -319,7 +319,8 @@ Every choice the spec left open, and every simplification, in one place.
   tick from the wave tick. It multiplies the civilians' wander and flee
   speeds only. Default: 1.0 for the first minute, 0.75 at 3 min, 0.5 at
   6 min, 0.35 from 10 min on.
-- **Outbreaks:** per-wave `outbreak_clusters` (2, 2, 3, 3, 4, 5, 6, 10),
+- **Outbreaks** (wave 1 reduced and squeezed-ring scaling added in T3,
+  see "Cards"): per-wave `outbreak_clusters` (2, 2, 3, 3, 4, 5, 6, 10),
   `inner_outbreaks` (0, 0, 0, 0, 1, 1, 2, 3), `outbreak_radius_m` and
   `outbreak_min_per_cluster` (5 to 12). Wave 1 draws among all civilians;
   later waves first draw the inner seeds among civilians inside the previous
@@ -327,7 +328,8 @@ Every choice the spec left open, and every simplification, in one place.
   falls back to anywhere). The 150 m separation applies across both groups,
   with the old fallback after 5,000 tries. Seed positions are kept
   (`outbreak_sites`, hidden information for tests and debug views).
-- **Temporary tools until T3:** each prep grants `tower_budget` towers and
+- **Temporary tools until T3 (removed in T3: `PlaceTower`, `PlaceFence`
+  and `Undo` are gone, cards replace them):** each prep grants `tower_budget` towers and
   `fence_budget_m` meters on top of what is placed; unused budget is lost.
   `Undo` only takes back this prep's placements. Placements persist; broken
   fence cells stay walkable.
@@ -352,7 +354,9 @@ Every choice the spec left open, and every simplification, in one place.
   after the tick that ended the wave. A second fixture, two waves of a
   Marais match (`fixture::compute_match_fixture_hash`), hashes
   `4909c13c5beea4e9` natively and in WASM under Node (tested both sides).
-- **`sim-headless match`** plays with 32 towers per wave (`--tower-budget`;
+  (T3 changed it on purpose to `e1061f2da92f6c9f`, see "Cards".)
+- **`sim-headless match`** (T2 version; since T3 it plays the starter
+  deck) plays with 32 towers per wave (`--tower-budget`;
   the config keeps today's 8): with 8, wave 1 already ends at the 15% line
   on the Marais, as every single-wave scenario in the report already ended
   at 0% survival. Up to 3 retries per lost wave, each with a different
@@ -371,6 +375,235 @@ Every choice the spec left open, and every simplification, in one place.
   ratio there (1.26) that puts WASM around 41 ms p95, under the 50 ms
   target. It is an estimate: the WASM match bindings come in T5. All seven
   reveals and Starts together took under 1 s.
+
+## Cards (T3)
+
+- **Data:** `cards.json` at the repo root, embedded in `sim-core` like the
+  config (`CardDb::default_cards()`; the headless CLI reads the file at run
+  time and `ZT_CARDS` / `ZT_CONFIG` swap either file for balance sweeps).
+  It holds the cards, the deck rules and the starter decks. Each card has
+  an id, name, rarity, kind, supply cost, text and one effect, tagged by
+  `type`:
+  - `fence {length_m, cell_hp}`: a polyline of at most `length_m` placed
+    meters (clipped at buildings as before).
+  - `garrison {buildings, weapon}`: up to N distinct revealed buildings.
+  - `unit {delay_s, scatter_m, follows_path, speed_m_s, weapon}`: a shooter
+    with no building, at a point or along a polyline.
+  - `strike {delay_s, radius_m, damage, pulses, interval_s}`: area damage.
+
+  A weapon is `{range_m, min_range_m, damage, fire_rate, splash_m}`.
+  Loading checks unique ids, that the kind matches the effect
+  (fence = fortification, garrison = armament, unit/strike = tactical),
+  sane numbers and that every starter deck is legal.
+- **v1 cards** (cost, numbers):
+  - Fortifications: Light fence (common, 2, 400 m, 300 hp per cell, i.e.
+    today's fence), Barbed wire (common, 1, 200 m, 120 hp), Heavy stockade
+    (uncommon, 3, 100 m, 2,400 hp: 240 zombie-seconds per cell), Concrete
+    barriers (rare, 4, 300 m, 1,800 hp).
+  - Armaments: Rifles (common, 3, 3 buildings, 40 m, 34 dmg, 2/s: today's
+    tower), Hunting rifles (common, 2, 2 buildings, 55 m, 50 dmg, 1/s),
+    Militia (common, 2, 4 buildings, 25 m, 34 dmg, 1/s), Machine-gun nest
+    (uncommon, 3, 1 building, 35 m, 25 dmg, 8/s), Mortar (uncommon, 4, 2
+    buildings, 90 m, minimum 20 m, 60 dmg, 0.5/s, 8 m splash), Sniper nest
+    (rare, 3, 1 building, 120 m, 100 dmg, 0.67/s).
+  - Tactical: Grenades (common, 1, 8 m, 100 dmg after 1 s), Paratrooper
+    (uncommon, 2, lands within 15 m of the point after 10 s, assault rifle
+    30 m, 34 dmg, 5/s), Napalm (rare, 4, 20 m, 25 dmg per second for 12 s
+    after 3 s), Airstrike (legendary, 6, 40 m, 1,000 dmg after 5 s),
+    Armored convoy (legendary, 6, drives a polyline at 5 m/s after 5 s,
+    heavy machine gun 40 m, 34 dmg, 8/s).
+- **Starter deck "Civil Defence Issue"** (`civil_defence_issue`): Rifles ×3,
+  Hunting rifles ×3, Militia ×3, Light fence ×2, Barbed wire, Grenades,
+  Machine-gun nest ×2, Mortar ×2, Heavy stockade ×2, Paratrooper.
+  That is 13 armaments, 5 fortifications and 2 tactical cards. Militia was
+  added in the balance pass: the first version averaged ~1 building per
+  card (~5 towers per hand), and wave 1 needs about 9–12 spread towers.
+- **Deck rules** (`deck_rules` in `cards.json`): exactly 20 cards; at most
+  3 / 2 / 1 / 1 copies of a common / uncommon / rare / legendary; at most 2
+  legendaries. `validate_deck` returns every problem (`WrongSize`,
+  `UnknownCard`, `TooManyCopies`, `TooManyLegendaries`), in a fixed order,
+  each with a readable `Display`. `Match::new` refuses an illegal deck
+  (`MatchError::InvalidDeck`).
+- **The deck is a match input:** `MatchSetup { seed, population_multiplier,
+  deck }`, card ids in the order given (`MatchSetup::new` uses the starter
+  deck). `Match::new_with_cards` / `new_streaming_with_cards` take another
+  card list (tests use relaxed copy limits); `new` / `new_streaming` use
+  the embedded one. `CardDb::content_hash` is there for T4's run record.
+- **Hand, deck, discard:** at wave 1's prep the deck is shuffled
+  (Fisher-Yates) from the `DECK` stream of wave 1. Every prep re-creates
+  the stream for its wave (`stream(DECK, k)`), so a retry redraws exactly
+  the same. Each prep then:
+  1. gets its supply income;
+  2. keeps up to `hand_keep` (2) unplayed cards and discards the rest in
+     hand order. The kept cards are those marked by `KeepCards`, or the
+     first two in hand order if none are marked;
+  3. draws `hand_draw` (5) on top, so a hand holds up to 7.
+
+  The draw pile is a stack. When it is empty at a draw, the whole discard
+  becomes the deck and is shuffled from the current prep's stream (counted
+  in `reshuffles`). Played cards go to the discard right away, and their
+  structures stay on the map.
+- **Mulligan:** prep only, once per wave, only before any card is played
+  this prep, costs `mulligan_cost` (1). The hand goes to the bottom of the
+  deck in hand order (no RNG) and the same number is drawn. Putting the
+  cards at the bottom instead of discarding them keeps them in this pass of
+  the deck; requiring "before any play" keeps the pull-down rule below
+  simple.
+- **Supply:** wave 1's prep grants `supply_start + supply_base_income`
+  (8 + 6). A won wave k earns `supply_base_income + floor(civilians alive
+  at the end / supply_civilians_per_point[k])`, with N = 150, 200, 250,
+  300, 400, 500, 650, 800. It is paid when the next prep opens
+  (`WaveResult::supply_earned`, `Match::supply_income()`). Lost waves and
+  wave 8 earn nothing. Unspent supply carries over.
+- **Actions** (`Action`, tagged `type`, snake_case):
+  - `play_card {hand_index, target}`, where `target` is externally tagged:
+    `{"buildings": [..]}`, `{"polyline": [[x, y], ..]}` or
+    `{"point": [x, y]}`, in sim meters.
+  - `mulligan`.
+  - `keep_cards {hand_indices}`: Prep, Running or WaveWon.
+  - `repair {fence_id}` and `pull_down {placement_id}`: prep only.
+
+  Checks run in this order: card index, phase for the kind (fortification
+  and armament in Prep, tactical in Running, so nothing on a result
+  screen), supply, target kind, then the effect's own checks. A refused
+  play changes nothing and is not logged.
+- **Errors** (`ActionError`, tagged `error`):
+  - `no_such_card`; `card_wrong_phase {card, kind, phase}`, whose message
+    says "can only be played during prep / during a wave";
+  - `not_enough_supply {need, have}`; `wrong_target {card, expected}`;
+  - `too_many_buildings {card, max}`; `already_garrisoned {building}`;
+    `not_revealed {building}`;
+  - `outside_revealed`: a point or route point outside the revealed disc;
+  - `placement {reason}`: geometry, or a fence longer than its card, e.g.
+    "fence is 512 m, Light fence allows 400 m";
+  - `mulligan_used`, `mulligan_after_play`, `empty_hand`;
+  - `too_many_kept {max}`, `duplicate_index`;
+  - `no_such_structure`, `no_such_fence`, `nothing_to_repair`;
+  - `wrong_phase` for non-card actions in the wrong phase.
+- **Structures:** every fortification or armament play adds a `Structure
+  {id, card, cost, wave, kind: fence {cells, cell_hp, length_m} | garrison
+  {buildings}}`. Ids are never reused (the counter is part of the state, so
+  a retry gives the same ids). A new fence over broken cells of an older
+  fence takes those cells over, so each cell has one owner for repairs.
+- **Repair:** costs `max(1, ceil(card cost × repair_cost_factor (0.5) ×
+  damaged share))`. The damaged share is missing hp over full hp, and a
+  broken cell counts as fully missing. Every cell goes back to full hp,
+  and broken cells become fence again (agents on them are pushed off).
+- **Pull down:** for a structure placed during this prep, the full cost
+  comes back and the card returns to the hand (taken back from the discard;
+  it is an undo, replacing T2's `Undo`). For an older structure the refund
+  is `floor(cost × pull_down_refund (0.5) × condition)`, with condition =
+  hp left / full hp for fences and 1 for garrisons, and the card stays in
+  the discard. Fence cells become open ground; garrisons lose their
+  towers.
+- **Card effects in the sim:**
+  - `Tower` now carries its `Weapon` (range, minimum range, damage, period,
+    splash), plus `active_from` (the sim tick it starts acting), an
+    optional `path` and a speed. A unit is a tower whose building is
+    `NO_BUILDING`.
+  - Targeting is the same nearest-zombie search with a minimum distance.
+    A minimum of 0 accepts every `d² >= 0`, so the plain towers give the
+    same floats as before.
+  - Splash hits every zombie within `splash_m` of the target's position.
+    It uses the spatial hash (bucket order, hash-time positions) and
+    includes the target.
+  - Strikes are `Sim::effects` (`AreaEffect`), pulsed in the towers phase
+    after the towers.
+  - Delays count from the play: an action applied before tick t with a
+    10 s delay acts from tick t + 200, so 200 steps with no shot and a
+    shot on the 201st (tested).
+  - The paratrooper's landing spot is the point plus an offset drawn
+    uniformly in the scatter disc (rejection sampling, at most 16 tries,
+    no trig) from the `CARD_EFFECTS` stream of the wave. That stream is
+    re-created at Start, so a retry lands it in the same place. The spot
+    is moved to the nearest open cell if it is on a building.
+  - The convoy starts at the route's first point and moves straight
+    between points (it ignores buildings; a known simplification).
+  - Units and strikes last one wave: they are removed when the next prep
+    opens.
+  - Units are not bitten and do not block.
+- **Single-wave `Sim` unchanged:** `place_tower` builds the tower from
+  `Config::tower_weapon()` (the config values), `place_fence` is
+  `fence_preview` + `build_fence_cells` with the same float operations,
+  and the new tower fields and effects are not in `Sim::state_hash`.
+  **The single-wave fixture stays `0ea142296a5795a9`** (native, WASM and
+  the three browsers). `tower_budget` / `fence_budget_m` remain for the
+  single-wave prototype only.
+- **`Match::state_hash`** now also covers every shooter's position, weapon,
+  activation tick, kills and route, the strikes, and the card state:
+  supply, hand (ids and keep marks), deck order, discard, both RNG
+  positions, the mulligan flag, play counters, income, reshuffles and the
+  structures.
+- **Match fixture changed on purpose:** `4909c13c5beea4e9` →
+  **`e1061f2da92f6c9f`** (native = WASM under Node, tested). The fixture
+  now plays cards: every playable prep card via
+  `fixture::fixture_prep_plays`, a tactical card at tick 20 of wave 1, and
+  a mulligan in wave 2. It also runs on the T3 defaults (population,
+  wave-1 outbreak, supply).
+- **Defeat line rounding fix:** `ceil(defeat_fraction × start)` is now
+  computed with a 1e-3 tolerance. f32 0.15 is slightly above 0.15, so
+  15% of 760 came out as 115 instead of 114. The f32 error is at most
+  ~0.006 at 100k civilians, and decimal fractions times an integer have a
+  fractional part of at least 0.05, so the tolerance never hides a real
+  rounding.
+- **Outbreaks on squeezed rings:** on a level smaller than the wave-8 cap
+  the rings are squeezed (T2), and outbreak counts now scale with the disc
+  area. Wave k gets `max(1, round(clusters[k] × (r_k / r_config_k)²))`
+  clusters, and inner clusters likewise (at most the total), so outbreaks
+  per km² match the full-size match. A level at least 1.3 km keeps the
+  config counts (tested). The Marais (400 m) gets 1 cluster in every
+  wave: wave 1's core is full size and its config count is 1. Cluster
+  size is not scaled. `Match::outbreak_count(wave)` exposes the result.
+- **Balance pass (first pass, Marais, `sim-headless match`, 3 retries per
+  lost wave):**
+  - Defaults changed: `population_multiplier` 0.5 → **0.3**; wave 1
+    outbreak 2 clusters × (8 m, min 5) → **1 cluster × (2 m, min 3)**;
+    `supply_start` 4 → **8**; Militia added to the starter deck (see
+    above).
+  - Tried (seeds 1–6 or 1–8, retries 0 unless noted):
+
+    | variant | cleared 8 waves | wave 1 first try |
+    |---|---|---|
+    | first card set, T2 outbreak, multiplier 0.5 | 2/6 | 2/6 |
+    | + 1 cluster in wave 1 | 2/6 | 2/6 |
+    | + wave 1 cluster 4 m, min 3 | 4/8 | 4/8 |
+    | + `supply_start` 10, coverage-greedy tower picks | 5/8 | 5/8 |
+    | multiplier 0.3, `supply_start` 8 (A, retries 3) | 8/8 | 6/8 |
+    | same on seeds 9–16 | 4/8 | 4/8 |
+    | multiplier 0.35 (B, retries 3) | 6/8 | 6/8 |
+
+    Once wave 1 is held, the later Marais waves are easy with
+    area-scaled outbreaks.
+  - A wave-1 probe with N spread rifle towers and no cards needed ~16–24
+    towers against the T2 outbreak at multiplier 0.5. Against 1 × 3
+    zombies at 0.3 it needed 9–12.
+  - **Final (committed defaults), seeds 1–16, 3 retries per lost wave:
+    13/16 clear all 8 waves, wave 1 held on the first try in 12/16.**
+    Retries per seed: 0, 0, 0, 0, 0, 0, 1, 3 (fails wave 2), 0, 0, 3
+    (fails wave 1), 0, 0, 4 (clears), 0, 3 (fails wave 1). Seed 1 clears
+    with no retry (a test checks it). A retry replays the same draws, so
+    a wave-1 hand that can't hold stays lost unless the player
+    mulligans; the script only mulligans a hand with no armament.
+  - Tactical cards barely change the scripted results. With
+    `--no-tactical`, seeds 1–16 still give 13/16 and 12/16; only seed 5
+    needs 2 retries instead of 0. The script plays them late, on the
+    densest visible group.
+  - One run on the full-size tiled Marais (1300 m, seed 1): waves 1–2
+    won, wave 3 (3 full-size clusters at 450 m) still running at the
+    240 s cap with 49% saved. Full-size levels are harder than the Marais
+    with the starter deck; tune them with difficulty (T7).
+  - With 0.3 the tiled 1.3 km Marais holds about 55k agents at wave 8
+    (0.6 × T2's 92k), more headroom under the 100k cap.
+- **Script for `sim-headless match`** (`matchcmd.rs`):
+  - In prep: mulligan if the hand has no armament; armaments on
+    buildings chosen greedily for coverage (the revealed building farthest
+    from every shooter and from the edge; odd retries use T2's
+    "largest" variants); fences as arcs of a circle 4 m inside the
+    previous ring (wave 1: 60% of the core), grown in 2° steps while the
+    placed length fits the card; tactical cards kept.
+  - While running: every 2 s, a tactical card at the mean position of the
+    20 m square with the most zombies.
+  - The script only produces actions, so its trig is not part of the sim.
 
 ## Player tools
 

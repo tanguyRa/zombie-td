@@ -21,30 +21,65 @@ pub fn compute_fixture_hash(level: &LevelPack) -> u64 {
 
 pub const MATCH_FIXTURE_SEED: u64 = 2026;
 
-/// The match fixture: Paris Marais, default config, seed 2026. Wave 1 with
-/// the three first revealed buildings garrisoned and one fence, 300 ticks,
-/// then the outbreak is cleared (test shortcut) and wave 2 runs 200 ticks.
-/// Returns `Match::state_hash` at the end. Must match native and WASM.
+/// Play every playable prep card of the hand, in hand order: armaments on
+/// the first revealed buildings without a garrison, fences as horizontal
+/// lines north of the centre. A fixed script shared by native and WASM.
+pub fn fixture_prep_plays(m: &mut crate::match_::Match) {
+    use crate::cards::{Effect, TargetKind};
+    use crate::match_::{Action, Target};
+    let [cx, cy] = m.center();
+    let mut row = 0.0f32;
+    loop {
+        let Some(c) = m.hand().into_iter().find(|c| c.playable) else { break };
+        let target = match c.target {
+            TargetKind::Buildings => {
+                let max = match &m.cards().get(&c.card).expect("card").effect {
+                    Effect::Garrison { buildings, .. } => *buildings as usize,
+                    _ => 1,
+                };
+                let sim = m.sim();
+                let bs: Vec<u32> = (0..sim.grid.buildings.len() as u32)
+                    .filter(|&b| {
+                        let info = &sim.grid.buildings[b as usize];
+                        info.cell_count > 0 && m.wave_of_point(info.centroid[0], info.centroid[1]) <= m.wave() && !sim.towers.iter().any(|t| t.building == b)
+                    })
+                    .take(max)
+                    .collect();
+                Target::Buildings(bs)
+            }
+            TargetKind::Polyline => {
+                row += 12.0;
+                Target::Polyline(vec![[cx - 30.0, cy + 30.0 + row], [cx + 30.0, cy + 30.0 + row]])
+            }
+            TargetKind::Point => Target::Point([cx, cy]),
+        };
+        if m.apply(Action::PlayCard { hand_index: c.hand_index, target }).is_err() {
+            break;
+        }
+    }
+}
+
+/// The match fixture: Paris Marais, default config and cards, starter deck,
+/// seed 2026. Wave 1: every playable prep card (`fixture_prep_plays`), 300
+/// ticks with the first tactical card in hand played at the centre on tick
+/// 20, then the outbreak is cleared (test shortcut); wave 2: a mulligan,
+/// the prep plays again, 200 ticks. Returns `Match::state_hash` at the end.
+/// Must match native and WASM.
 pub fn compute_match_fixture_hash(level: &LevelPack) -> u64 {
-    use crate::match_::{Action, Match, MatchSetup, Phase};
+    use crate::match_::{Action, Match, MatchSetup, Phase, Target};
     use crate::sim::{INFECTED, ZOMBIE};
     let cfg = Config::default_config();
     let setup = MatchSetup::new(MATCH_FIXTURE_SEED, &cfg);
     let mut m = Match::new(level, cfg, setup).expect("match");
-    let picks: Vec<u32> = (0..m.sim().grid.buildings.len() as u32)
-        .filter(|&b| {
-            let c = m.sim().grid.buildings[b as usize].centroid;
-            m.sim().grid.buildings[b as usize].cell_count > 0 && m.wave_of_point(c[0], c[1]) == 1
-        })
-        .take(3)
-        .collect();
-    for b in picks {
-        let _ = m.apply(Action::PlaceTower { building: b });
-    }
-    let [cx, cy] = m.center();
-    let _ = m.apply(Action::PlaceFence { points: vec![[cx - 30.0, cy + 40.0], [cx + 30.0, cy + 40.0]] });
+    fixture_prep_plays(&mut m);
     let _ = m.apply(Action::StartWave);
-    for _ in 0..300 {
+    for t in 0..300 {
+        if t == 20 {
+            let [cx, cy] = m.center();
+            if let Some(c) = m.hand().into_iter().find(|c| c.playable) {
+                let _ = m.apply(Action::PlayCard { hand_index: c.hand_index, target: Target::Point([cx, cy]) });
+            }
+        }
         m.step();
     }
     let sim = m.debug_sim_mut();
@@ -56,6 +91,8 @@ pub fn compute_match_fixture_hash(level: &LevelPack) -> u64 {
     m.step();
     assert_eq!(m.phase(), Phase::WaveWon, "match fixture: wave 1 must be won");
     m.apply(Action::NextWave).expect("next wave");
+    let _ = m.apply(Action::Mulligan);
+    fixture_prep_plays(&mut m);
     m.apply(Action::StartWave).expect("start wave 2");
     for _ in 0..200 {
         m.step();
