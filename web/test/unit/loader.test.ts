@@ -496,6 +496,33 @@ describe("MapLoader: abort with a warm cache", () => {
     expect(l.ringReady(2)).toBe(false);
   });
 
+  it("an abort from a chunk listener emits no ring event and no further chunk deliveries", async () => {
+    const cache = await warmCache(RINGS);
+    const l = makeLoader(fakeOverpass(ways), { cache });
+    const events: string[] = [];
+    l.on("ring", (w) => events.push(`ring ${w}`));
+    let aborter: number | null = null;
+    l.on("chunk", (c) => {
+      events.push(`chunk ${c.block_id}`);
+      // Abort on the block that completes wave 3 (start() loads waves 1-2).
+      if (aborter === null && l.ringReady(3)) {
+        aborter = c.block_id;
+        l.abort();
+      }
+    });
+    const late: number[] = [];
+    l.on("chunk", (c) => late.push(c.block_id));
+    l.on("ring", (w) => events.push(`late ring ${w}`));
+    await l.start();
+    await l.done();
+    expect(aborter).not.toBeNull();
+    expect(events.filter((e) => e.includes("ring"))).toEqual(["ring 1", "late ring 1", "ring 2", "late ring 2"]);
+    expect(events[events.length - 1]).toBe(`chunk ${aborter}`);
+    expect(late).not.toContain(aborter);
+    expect(late).toEqual(events.filter((e) => e.startsWith("chunk ")).slice(0, -1).map((e) => Number(e.slice(6))));
+    expect(l.ringReady(3)).toBe(true);
+  });
+
   it("an abort during a cache put adds no more blocks and emits no more events", async () => {
     let held: (() => void) | null = null;
     let puts = 0;

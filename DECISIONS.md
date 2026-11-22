@@ -839,7 +839,9 @@ yet: that comes after T5).
   AbortError even when every block came from the cache without a network
   wait. After an abort no block is added and no `chunk` or `ring` event is
   emitted: cache hits are skipped and the put loop checks the signal before
-  each block.
+  each block. This holds when a listener aborts mid-event: the remaining
+  `chunk`/`ring` listeners are skipped and no `ring` event follows the
+  `chunk` that triggered the abort.
 - **Listeners can't break the loader.** Each `chunk`, `ring` and `error`
   listener is called in its own try/catch: a throw (in the planned wiring,
   `match.add_buildings` returning an error) is not a network failure, so it

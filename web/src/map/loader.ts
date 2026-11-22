@@ -198,8 +198,12 @@ export class MapLoader {
 
   /// Calls every listener of `ev`; a throwing listener never reaches the
   /// loader (see the header: `listenerError`, else a microtask rethrow).
+  /// Once aborted (possibly by one of these listeners) no further `chunk` or
+  /// `ring` listener is called.
   private emit<K extends keyof MapLoaderEvents>(ev: K, v: MapLoaderEvents[K]) {
+    const stopOnAbort = ev === "chunk" || ev === "ring";
     for (const fn of [...this.listeners[ev]]) {
+      if (stopOnAbort && this.abortCtl.signal.aborted) return;
       try {
         fn(v);
       } catch (error) {
@@ -340,7 +344,9 @@ export class MapLoader {
     this.loaded.set(block.id, chunk);
     this.hashes.set(block.id, block.hash);
     if (this.emitChunks) this.emit("chunk", chunk);
-    while (this.readyWaves < this.waveBlocks.length && this.ringReady(this.readyWaves + 1)) {
+    // A chunk or ring listener may abort: then no ring event follows.
+    if (this.abortCtl.signal.aborted) return;
+    while (!this.abortCtl.signal.aborted && this.readyWaves < this.waveBlocks.length && this.ringReady(this.readyWaves + 1)) {
       this.readyWaves++;
       this.emit("ring", this.readyWaves);
     }
