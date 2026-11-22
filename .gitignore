@@ -6,3 +6,7 @@ crates/sim-wasm/pkg
 .DS_Store
 __pycache__/
 crates/sim-wasm/pkg-node
+web/test-results
+web/playwright-report
+web/blob-report
+web/playwright/.cache

@@ -207,6 +207,10 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     sim = null;
     return;
   }
+  if (m.type === "hash") {
+    post({ type: "hash", id: m.id, tick: sim?.tick() ?? -1, hash: sim?.state_hash() ?? "" });
+    return;
+  }
   if (!sim) return;
   switch (m.type) {
     case "tower":

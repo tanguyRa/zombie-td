@@ -132,7 +132,45 @@ function fitView(animate = true) {
   );
 }
 
-if (import.meta.env.DEV) (window as unknown as { __zt: unknown }).__zt = { map, overlay, toSim, get level() { return level; }, get buildings() { return buildings; } };
+function toLngLat(x: number, y: number): { lng: number; lat: number } | null {
+  if (!geo || !level) return null;
+  return { lng: geo.lon0 + (x - level.center[0]) / geo.kx, lat: geo.lat0 + (y - level.center[1]) / geo.ky };
+}
+
+// Test hook (`?test=1`): loaded on demand so the normal page never runs it.
+// See testhook.ts for the `window.__zt` API.
+const TEST_MODE = new URLSearchParams(location.search).get("test") === "1";
+let testTap: ((m: FromWorker) => boolean) | null = null;
+if (TEST_MODE) {
+  void import("./testhook").then(({ installTestHook }) => {
+    testTap = installTestHook({
+      send,
+      map,
+      overlay,
+      presets: PRESETS.map((p) => p.name),
+      screen: () => document.body.dataset.screen ?? "",
+      stats: () => stats,
+      level: () => level,
+      placeName: () => currentPlace?.name ?? null,
+      history: () => history,
+      buildings: () => buildings,
+      resultVisible: () => !$("result").hidden,
+      toSim,
+      toLngLat,
+      enterPreset: (i) => enterGame(PRESETS[i]),
+      setup: (population, seed) => {
+        ($("pop") as HTMLInputElement).value = String(population);
+        ($("seed") as HTMLInputElement).value = String(seed);
+        popLabel();
+        reset();
+      },
+      reset: () => reset(),
+      replay: () => $("replay").click(),
+    });
+  });
+} else if (import.meta.env.DEV) {
+  (window as unknown as { __zt: unknown }).__zt = { map, overlay, toSim, get level() { return level; }, get buildings() { return buildings; } };
+}
 
 const inGame = () => document.body.dataset.screen === "game";
 
@@ -465,6 +503,7 @@ function hashLayer() {
 // ---------------------------------------------------------------- worker messages
 worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   const m = ev.data;
+  if (testTap?.(m)) return;
   if (document.body.dataset.screen !== "game") return; // late messages after "← Map"
   switch (m.type) {
     case "ready": {

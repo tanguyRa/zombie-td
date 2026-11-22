@@ -7,7 +7,8 @@
     "wasm": "cd .. && wasm-pack build crates/sim-wasm --release --target web --out-dir ../../web/src/wasm/pkg",
     "dev": "npm run wasm && vite --host 0.0.0.0 --port 5173 --strictPort",
     "build": "npm run wasm && tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@deck.gl/core": "9.4.1",
@@ -16,6 +17,7 @@
     "maplibre-gl": "5.24.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "typescript": "5.9.3",
     "vite": "6.4.6"
   }

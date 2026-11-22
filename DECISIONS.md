@@ -220,3 +220,56 @@ Every choice the spec left open, and every simplification, in one place.
   (white vanished on the light map) and turn red as they take damage.
 - **Replay** passes the level JSON itself to the worker, so replays never
   re-download.
+
+## Browser tests
+
+- **Playwright 1.61.1, pinned exactly**, with Chromium, Firefox and WebKit
+  projects (`web/playwright.config.ts`). The Docker image installs the same
+  version's browsers with `--with-deps` into `/ms-playwright`, outside the
+  `node_modules` volume; `PLAYWRIGHT_VERSION` in the Dockerfile must follow
+  `web/package.json`.
+- **Why 1.61 and not the latest (1.65):** Playwright froze WebKit for macOS 14
+  at build 2251, and from 1.62 on the driver sends a setting
+  (`PushAPIEnabled`) that this build does not know, so every WebKit page
+  fails to open on a macOS 14 host. 1.61.1 is the newest version that works
+  there. Moving up is safe once the host runs macOS 15+.
+- **The test server is Vite dev on port 5199**, not 5173, so tests can run
+  while `npm run dev` is up. Its command runs `npm run wasm` first, so a bare
+  `npx playwright test` never tests a stale WASM build (the rebuild is
+  incremental, a few seconds).
+- **Tests run offline.** A shared fixture (`web/e2e/offline.ts`) routes every
+  request: the Vite server passes, the OpenFreeMap style URL gets a blank
+  local style (`e2e/fixtures/style.json`, one background layer) so MapLibre
+  still loads and fires its events, and everything else (tiles, Nominatim,
+  Overpass, fonts) is aborted. The tests only use the built-in levels.
+- **Test hook behind `?test=1`.** `main.ts` imports `src/testhook.ts`
+  dynamically only in test mode, so the normal page never loads or runs it.
+  `window.__zt` exposes read-only snapshots (screen, phase, tick, stats,
+  placements, level summary, state hash) and helpers that send exactly the
+  worker messages the UI sends. The only protocol addition is a `hash`
+  request/reply, answered by the worker with the current tick and hash.
+- **The smoke test clicks through the real UI** (preset chip, population
+  slider, Tower/Fence tools, a click on a building, a drag for the fence,
+  Start, 4×) and uses the hook only to find screen positions and to assert.
+  It plays Le Vésinet at 5k agents, the quickest built-in game.
+- **Chromium runs as full Chromium in new headless mode** (`channel:
+  "chromium"`), not the default headless shell. With the shell, every input
+  event waited about half a second on software-rendered frames and the smoke
+  test took 1.5 minutes instead of under one.
+- **Firefox WebGL in Docker:** headless Firefox on a GPU-less Linux refuses
+  WebGL, so MapLibre can't start and the page never gets past the map. The
+  Firefox project sets the `webgl.force-enabled` pref and the image sets
+  `MOZ_WEBGL_FORCE_EGL=1`; together they give Mesa's llvmpipe (both are
+  needed). A Linux host without a GPU needs the same variable.
+- **Generous waits instead of retries:** level load and spawning get 60 s
+  (they take a few seconds, but three browsers share the CPU) and the whole
+  game 170 s (about 45–55 s at 4×). `retries` stays 0 so flakiness shows.
+  The smoke test logs the end tick, kills and final state hash per browser;
+  in practice all three end on the same tick, but that is not asserted
+  because the placements come from browser-dependent pixel → meter
+  conversions.
+- **The cross-browser determinism test** runs the existing fixture through a
+  small test page (`web/e2e/pages/fixture.html`) that loads the same WASM
+  build as the game and calls the existing `fixture_hash` export. No new
+  WASM export was needed. It runs on the main thread; the worker uses the
+  same module, so the engine and the result are the same.

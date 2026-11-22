@@ -26,6 +26,7 @@ Everything else lives in the dev image (`Dockerfile`):
 | Node.js / npm | 22.23 / 10.9 |
 | Python (level tool), requests, shapely | 3.11.2, 2.28, 1.8.5 |
 | Web: Vite, TypeScript, deck.gl, MapLibre GL | 6.4.6, 5.9.3, 9.4.1, 5.24.0 |
+| Browser tests: Playwright (Chromium, Firefox, WebKit) | 1.61.1 |
 
 `./dev.sh <command>` runs a command in that container with this folder
 mounted at `/work`. `./dev.sh` alone opens a shell. Rust build output and
@@ -39,10 +40,11 @@ wasm-pack and Node 22 on the host, the commands below also work without the
 
 | What | Command | Output |
 |---|---|---|
-| Everything | `./run-all.sh` | Builds WASM, runs all tests, writes the report, serves http://localhost:5173 |
+| Everything | `./run-all.sh` | Builds WASM, runs all tests (native, WASM, browsers), writes the report, serves http://localhost:5173 |
 | Headless test suite | `./dev.sh cargo test --release` | All tests green |
 | Native = WASM hash test | `./dev.sh wasm-pack test --node --release crates/sim-wasm` | WASM reproduces the native hash |
 | Headless report | `./dev.sh cargo run --release -p sim-headless -- report` | `reports/headless-report.md` and `.html` (charts), raw `reports/*.json` and `*.csv` |
+| Browser tests (Chromium, Firefox, WebKit) | `./dev.sh bash -c "cd web && npm ci && npm run e2e"` | Smoke test and native = browser hash test pass in all three browsers |
 | Browser prototype | `./dev.sh bash -c "cd web && npm install && npm run dev"` | Playable page at http://localhost:5173 |
 
 Useful extras:
@@ -54,6 +56,34 @@ Useful extras:
   "QUICK MODE".
 - `./dev.sh python3 tools/levelgen/levelgen.py --name paris-marais --lat 48.8580 --lon 2.3580 --query-radius 500`
   regenerates a committed level from Overpass (one query).
+
+### Browser tests
+
+Playwright end-to-end tests live in `web/e2e/` and run in Chromium, Firefox
+and WebKit. On the host, install the browsers once, then run them:
+
+```sh
+cd web
+npm install
+npx playwright install chromium firefox webkit   # once per Playwright version
+npm run e2e                                      # = npx playwright test
+npx playwright test --project=firefox            # one browser
+npx playwright test e2e/determinism.spec.ts      # one file
+```
+
+Playwright starts its own Vite server on port 5199 (after `npm run wasm`), so
+`npm run dev` can stay up. The tests need no network: map tiles, search and
+Overpass are blocked and the built-in levels are used. The Docker image has
+the browsers already, and `./run-all.sh` runs these tests too.
+
+- `smoke.spec.ts`: Le Vésinet at 5k agents; places a tower and a fence with
+  the mouse, starts at 4× and checks the result panel (about 1.5 minutes).
+- `determinism.spec.ts`: runs the native/WASM fixture in each browser and
+  compares its hash to `crates/sim-core/tests/fixtures/native_hash.json`.
+
+Opening the app with `?test=1` (for example http://localhost:5173/?test=1)
+installs the test hook `window.__zt` (state snapshots and action helpers, see
+`web/src/testhook.ts`). Without the flag it is never loaded.
 
 The generated report is committed in [`reports/`](reports/headless-report.md),
 so you can read the results without running anything.

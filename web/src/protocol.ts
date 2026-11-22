@@ -10,7 +10,8 @@ export type ToWorker =
   | { type: "start" }
   | { type: "pause"; paused: boolean }
   | { type: "speed"; speed: number }
-  | { type: "field"; kind: "chase" | "flee" };
+  | { type: "field"; kind: "chase" | "flee" }
+  | { type: "hash"; id: number }; // test hook only (?test=1)
 
 export type Placement = { type: "tower"; x: number; y: number } | { type: "fence"; pts: number[] };
 
@@ -52,7 +53,8 @@ export type FromWorker =
   | { type: "placements"; towers: Float32Array; fences: Float32Array; history: Placement[] }
   | { type: "fences"; fences: Float32Array }
   | { type: "error"; message: string; fatal?: boolean }
-  | { type: "field"; kind: "chase" | "flee"; data: Int32Array; w: number; h: number };
+  | { type: "field"; kind: "chase" | "flee"; data: Int32Array; w: number; h: number }
+  | { type: "hash"; id: number; tick: number; hash: string };
 
 // ---- shared buffer: header, then 3 slots of (positions f32 x,y; render u8) ----
 // Triple buffering: the worker writes slot (latest + 1) % 3 while the main
