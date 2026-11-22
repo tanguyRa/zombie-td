@@ -1,0 +1,19 @@
+services:
+  dev:
+    build: .
+    image: zombie-td-dev
+    working_dir: /work
+    volumes:
+      - .:/work                              # the local project folder
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target:/cache/target           # Rust build output
+      - web-node-modules:/work/web/node_modules  # Linux node_modules, kept out of the host
+    ports:
+      - "5173:5173"
+    stdin_open: true
+    tty: true
+
+volumes:
+  cargo-registry:
+  cargo-target:
+  web-node-modules:
