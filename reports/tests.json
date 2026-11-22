@@ -1,0 +1,122 @@
+[
+  {
+    "group": "sim-core unit",
+    "name": "rng::tests::reference_stream",
+    "ok": true
+  },
+  {
+    "group": "M1 level",
+    "name": "synthetic_levels_rasterize",
+    "ok": true
+  },
+  {
+    "group": "M1 level",
+    "name": "population_follows_building_size",
+    "ok": true
+  },
+  {
+    "group": "M1 level",
+    "name": "population_exact_and_on_walkable_cells",
+    "ok": true
+  },
+  {
+    "group": "M1 level",
+    "name": "wall_safety_2000_ticks_real_levels",
+    "ok": true
+  },
+  {
+    "group": "M2 rules",
+    "name": "infected_are_never_bitten_again",
+    "ok": true
+  },
+  {
+    "group": "M2 rules",
+    "name": "infection_delay_is_exactly_20_ticks",
+    "ok": true
+  },
+  {
+    "group": "M2 rules",
+    "name": "infected_are_never_targeted_by_towers",
+    "ok": true
+  },
+  {
+    "group": "M2 rules",
+    "name": "dijkstra_bucket_queue_matches_brute_force",
+    "ok": true
+  },
+  {
+    "group": "M2 rules",
+    "name": "outbreak_seeds_clusters",
+    "ok": true
+  },
+  {
+    "group": "M2 rules",
+    "name": "native_hash_fixture",
+    "ok": true
+  },
+  {
+    "group": "M2 rules",
+    "name": "determinism_same_seed_same_hash",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "fences_are_clipped_at_buildings_and_charged_for_placed_part",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "rasterized_fences_have_no_diagonal_gaps",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "tower_never_targets_civilians",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "tower_kills_zombie_at_30m_in_exactly_3_shots",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "tower_ignores_zombie_at_41m",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "placement_budgets_and_undo",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "fence_break_reopens_cell_and_recomputes_fields_same_tick",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "zombies_detour_through_a_gap",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "civilians_never_cross_fences",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
+    "name": "zombies_attack_the_fence_without_a_gap",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_sim_runs_and_reports",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_hash_matches_native_fixture",
+    "ok": true
+  }
+]
