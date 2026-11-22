@@ -65,6 +65,22 @@ pub fn step_allowed(kind: &[u8], c: usize, d: usize, off: &[isize; 8], mode: Mod
 
 const STEP_COST: [i32; 8] = [STRAIGHT, STRAIGHT, STRAIGHT, STRAIGHT, DIAGONAL, DIAGONAL, DIAGONAL, DIAGONAL];
 
+/// The part of a grid a field computation reads: a live `Grid`, or a copy
+/// of one taken earlier (a field job keeps the grid of its start tick).
+#[derive(Clone, Copy)]
+pub struct FieldGrid<'a> {
+    pub w: usize,
+    pub kind: &'a [u8],
+    pub step_chase: &'a [u8],
+    pub step_flee: &'a [u8],
+}
+
+impl<'a> From<&'a Grid> for FieldGrid<'a> {
+    fn from(g: &'a Grid) -> FieldGrid<'a> {
+        FieldGrid { w: g.w, kind: &g.kind, step_chase: &g.step_chase, step_flee: &g.step_flee }
+    }
+}
+
 /// Reusable, resumable bucket-queue Dijkstra. Allocates on first use only.
 ///
 /// `begin` + `advance` / `settle` let a caller stop early and continue later:
@@ -161,14 +177,15 @@ impl Dial {
 
     /// Process buckets until every cell with a value `<= limit` is final (or
     /// the queue is empty).
-    pub fn advance(&mut self, grid: &Grid, dist: &mut [i32], limit: i32) {
+    pub fn advance<'g>(&mut self, grid: impl Into<FieldGrid<'g>>, dist: &mut [i32], limit: i32) {
         self.advance_budget(grid, dist, limit, usize::MAX);
     }
 
     /// `advance`, stopping early (at a bucket boundary) once about
     /// `max_pops` cells were finalized in this call. Where a run pauses
     /// never changes its result.
-    pub fn advance_budget(&mut self, grid: &Grid, dist: &mut [i32], limit: i32, max_pops: usize) {
+    pub fn advance_budget<'g>(&mut self, grid: impl Into<FieldGrid<'g>>, dist: &mut [i32], limit: i32, max_pops: usize) {
+        let grid = grid.into();
         let fence = self.mode == Mode::Chase && self.fence_cost != 0;
         match (fence, self.record_order) {
             (true, true) => self.advance_impl::<true, true>(grid, dist, limit, max_pops),
@@ -178,10 +195,10 @@ impl Dial {
         }
     }
 
-    fn advance_impl<const FENCE_COST: bool, const ORDER: bool>(&mut self, grid: &Grid, dist: &mut [i32], limit: i32, max_pops: usize) {
+    fn advance_impl<const FENCE_COST: bool, const ORDER: bool>(&mut self, grid: FieldGrid, dist: &mut [i32], limit: i32, max_pops: usize) {
         let rm = self.buckets.len() as i32 - 1;
-        let kind = &grid.kind[..];
-        let masks = if self.mode == Mode::Chase { &grid.step_chase[..] } else { &grid.step_flee[..] };
+        let kind = grid.kind;
+        let masks = if self.mode == Mode::Chase { grid.step_chase } else { grid.step_flee };
         assert!(kind.len() == dist.len() && masks.len() == dist.len());
         let off = offsets(grid.w);
         let fence_cost = self.fence_cost;
@@ -271,7 +288,8 @@ impl Dial {
 
     /// Continue until cell `c` is final.
     #[inline]
-    pub fn settle(&mut self, grid: &Grid, dist: &mut [i32], c: usize) {
+    pub fn settle<'g>(&mut self, grid: impl Into<FieldGrid<'g>>, dist: &mut [i32], c: usize) {
+        let grid = grid.into();
         while dist[c] > self.settled {
             let lim = self.settled.saturating_add(1);
             self.advance(grid, dist, lim);

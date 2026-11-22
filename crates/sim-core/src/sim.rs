@@ -2,7 +2,7 @@
 //! towers and fences, advanced by a fixed-order tick.
 
 use crate::config::Config;
-use crate::field::{self, Dial, Mode, DIR_UNIT, INF};
+use crate::field::{self, Dial, FieldGrid, Mode, DIR_UNIT, INF};
 use crate::grid::{Grid, BUILDING, FENCE, NO_BUILDING, WALK};
 use crate::level::{self, BuildingKind, LevelPack};
 use crate::rng::Pcg32;
@@ -165,6 +165,52 @@ enum ThreatJob {
     Done,
 }
 
+/// Where a field job reads the grid: the live grid (unchanged since the
+/// job started) or one of the two frozen copies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JobGrid {
+    Live,
+    Frozen(usize),
+}
+
+/// A copy of the grid's field inputs (`FieldGrid`), taken just before a
+/// fence break changes the grid under a job in flight.
+#[derive(Clone, Default)]
+struct FrozenGrid {
+    kind: Vec<u8>,
+    step_chase: Vec<u8>,
+    step_flee: Vec<u8>,
+}
+
+impl FrozenGrid {
+    fn copy_from(&mut self, g: &Grid) {
+        for (dst, src) in [(&mut self.kind, &g.kind), (&mut self.step_chase, &g.step_chase), (&mut self.step_flee, &g.step_flee)] {
+            dst.clear();
+            dst.extend_from_slice(src);
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.kind.capacity() + self.step_chase.capacity() + self.step_flee.capacity()
+    }
+}
+
+/// The grid a job reads: the live one, or its frozen copy. A job reading
+/// the live grid must have started on the current `Grid::version`.
+#[inline]
+fn job_grid<'a>(grid: &'a Grid, frozen: &'a [FrozenGrid; 2], src: JobGrid, version: u32) -> FieldGrid<'a> {
+    match src {
+        JobGrid::Live => {
+            debug_assert_eq!(grid.version, version, "the grid changed under a field job without a frozen copy");
+            grid.into()
+        }
+        JobGrid::Frozen(e) => {
+            let f = &frozen[e];
+            FieldGrid { w: grid.w, kind: &f.kind, step_chase: &f.step_chase, step_flee: &f.step_flee }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Placement {
     Tower(u32),
@@ -222,11 +268,30 @@ pub struct Sim {
     threat_next: Vec<i32>,
     flee_next: Vec<i32>,
     chase_dial: Dial,
-    /// Threat stops at the flee cap; cells beyond hold values >= the cap.
+    /// Threat stops at `threat_limit` (the flee cap, or the wake radius if
+    /// larger); cells beyond hold values above it.
     threat_dial: Dial,
     flee_dial: Dial,
     chase_job: bool,
     threat_job: ThreatJob,
+    /// The grid each job reads (see `freeze_job_grids`), and the grid
+    /// version at the job's start.
+    chase_src: JobGrid,
+    threat_src: JobGrid,
+    chase_version: u32,
+    threat_version: u32,
+    /// Copies of the grid for jobs whose grid changed after they started.
+    /// Two jobs, so two copies at most.
+    frozen: [FrozenGrid; 2],
+    /// Tests: replaces the per-tick work budget of the jobs
+    /// (`f(tick, job, budget)`, job 0 chase, 1 threat + flee). Budgets never
+    /// change results.
+    #[doc(hidden)]
+    pub test_budget: Option<fn(u32, usize, usize) -> usize>,
+    /// Tests: ticks that ended with a job paused part-way, per stage (chase,
+    /// threat, flee seed scan, flee).
+    #[doc(hidden)]
+    pub job_pauses: [u32; 4],
     /// Cells a field can reach (walkable or fence): bounds the job budgets.
     pub(crate) field_cells: usize,
     /// Cells finalized by the last job of each kind (sizes the budgets).
@@ -370,6 +435,13 @@ impl Sim {
             flee_next: vec![INF; cells],
             chase_job: false,
             threat_job: ThreatJob::Idle,
+            chase_src: JobGrid::Live,
+            threat_src: JobGrid::Live,
+            chase_version: 0,
+            threat_version: 0,
+            frozen: Default::default(),
+            test_budget: None,
+            job_pauses: [0; 4],
             field_cells: cells,
             chase_work: cells,
             threat_work: 2 * cells,
@@ -1032,10 +1104,12 @@ impl Sim {
     // job's start tick, the Dijkstra runs a budget of cells per tick, and the
     // result is published (swapped into the front buffer the agents read)
     // one interval later. Chase starts on tick % interval == 0, threat + flee
-    // on tick % interval == interval / 2. A job's result depends only on its
-    // snapshot and the grid, never on the budget, so the budget is free to
-    // adapt. A fence break restarts the jobs in flight on the new grid (same
-    // snapshot). See DECISIONS.md, "Scale".
+    // on tick % interval == interval / 2. A job reads the grid as it was at
+    // its start tick: a fence break during a job is picked up by the next
+    // job of that kind (the grid is copied just before the break, see
+    // `freeze_job_grids`). So a job's result depends only on its start tick's
+    // agents and grid, never on the budget, which is free to adapt. Steering
+    // always uses the live grid. See DECISIONS.md, "Scale".
 
     fn update_fields(&mut self) {
         let iv = self.cfg.field_interval_ticks.max(1);
@@ -1055,14 +1129,41 @@ impl Sim {
         // the publish tick is finished there. Budgets never change results.
         let slots = iv as usize;
         let est = |last: usize, bound: usize| (last + last / 2).min(bound).div_ceil(slots).max(1024);
-        let chase_budget = est(self.chase_work, self.field_cells);
-        let threat_budget = est(self.threat_work, 2 * self.field_cells + self.grid.kind.len() / 2);
+        let mut chase_budget = est(self.chase_work, self.field_cells);
+        let mut threat_budget = est(self.threat_work, 2 * self.field_cells + self.grid.kind.len() / 2);
+        if let Some(f) = self.test_budget {
+            chase_budget = f(self.tick, 0, chase_budget);
+            threat_budget = f(self.tick, 1, threat_budget);
+        }
         self.advance_chase_job(chase_budget);
         self.advance_threat_job(threat_budget);
+        if self.chase_job && !self.chase_dial.finished() {
+            self.job_pauses[0] += 1;
+        }
+        match self.threat_job {
+            ThreatJob::Threat => self.job_pauses[1] += 1,
+            ThreatJob::FleeScan => self.job_pauses[2] += 1,
+            ThreatJob::Flee => self.job_pauses[3] += 1,
+            _ => {}
+        }
     }
 
     fn threat_cap(&self) -> i32 {
         (self.cfg.flee_threat_cap_m * self.cfg.cost_per_m()) as i32
+    }
+
+    /// The wake radius in field units: civilians on cells with threat above
+    /// it are dormant.
+    fn wake_threshold(&self) -> i32 {
+        (self.cfg.wake_radius_m * self.cfg.cost_per_m()) as i32
+    }
+
+    /// The lazy threat job stops once every cell up to this value is final.
+    /// Values are read exactly up to `cap - 1` (flee caps the threat) and up
+    /// to the wake threshold (dormancy is `threat > wake`), so it must cover
+    /// both, also when the wake radius is beyond the flee cap.
+    pub(crate) fn threat_limit(&self) -> i32 {
+        (self.threat_cap() - 1).max(self.wake_threshold())
     }
 
     /// Recompute the chase field from the current state and publish it now.
@@ -1084,11 +1185,8 @@ impl Sim {
         let d = &mut self.chase_dial;
         d.seeds.clear();
         d.seeds.extend((0..self.n).filter(|&i| state[i] == CIVILIAN).map(|i| (grid.cell_of(x[i], y[i]) as u32, 0)));
-        self.restart_chase_job();
-    }
-
-    /// (Re)start the chase job from its snapshot on the current grid.
-    fn restart_chase_job(&mut self) {
+        self.chase_src = JobGrid::Live;
+        self.chase_version = self.grid.version;
         self.chase_next.fill(INF);
         self.chase_dial.begin(Mode::Chase, self.cfg.fence_path_cost, false);
         self.chase_job = true;
@@ -1099,7 +1197,8 @@ impl Sim {
 
     fn advance_chase_job(&mut self, budget: usize) {
         if self.chase_job && !self.chase_dial.finished() {
-            self.chase_dial.advance_budget(&self.grid, &mut self.chase_next, i32::MAX, budget);
+            let g = job_grid(&self.grid, &self.frozen, self.chase_src, self.chase_version);
+            self.chase_dial.advance_budget(g, &mut self.chase_next, i32::MAX, budget);
         }
     }
 
@@ -1118,10 +1217,8 @@ impl Sim {
         let d = &mut self.threat_dial;
         d.seeds.clear();
         d.seeds.extend((0..self.n).filter(|&i| state[i] == ZOMBIE).map(|i| (grid.cell_of(x[i], y[i]) as u32, 0)));
-        self.restart_threat_job();
-    }
-
-    fn restart_threat_job(&mut self) {
+        self.threat_src = JobGrid::Live;
+        self.threat_version = self.grid.version;
         self.threat_next.fill(INF);
         // The reference flee seeding reads the finalization order.
         let order = self.eager_fields || self.cfg.flee_multiplier < 0.0;
@@ -1135,10 +1232,10 @@ impl Sim {
     fn advance_threat_job(&mut self, budget: usize) {
         let before = self.threat_dial.pops;
         if self.threat_job == ThreatJob::Threat {
-            // Only values below the cap are ever read exactly (dormancy
-            // compares with the wake radius, flee caps the threat): stop there.
-            let limit = if self.eager_fields { i32::MAX } else { self.threat_cap() - 1 };
-            self.threat_dial.advance_budget(&self.grid, &mut self.threat_next, limit, budget);
+            // Only values up to `threat_limit` are ever read exactly: stop there.
+            let limit = if self.eager_fields { i32::MAX } else { self.threat_limit() };
+            let g = job_grid(&self.grid, &self.frozen, self.threat_src, self.threat_version);
+            self.threat_dial.advance_budget(g, &mut self.threat_next, limit, budget);
             if self.threat_dial.settled < limit {
                 return;
             }
@@ -1161,7 +1258,8 @@ impl Sim {
                 return;
             }
             let left = budget - spent;
-            self.flee_dial.advance_budget(&self.grid, &mut self.flee_next, i32::MAX, left);
+            let g = job_grid(&self.grid, &self.frozen, self.threat_src, self.threat_version);
+            self.flee_dial.advance_budget(g, &mut self.flee_next, i32::MAX, left);
             if self.flee_dial.finished() {
                 self.threat_job = ThreatJob::Done;
             }
@@ -1190,17 +1288,18 @@ impl Sim {
         if self.eager_fields || k < 0.0 {
             // Reference version: seeds sorted by value come for free (capped
             // cells first, then the threat's finalization order reversed).
+            let kind = job_grid(&self.grid, &self.frozen, self.threat_src, self.threat_version).kind;
             let fd = &mut self.flee_dial;
             fd.seeds.clear();
-            for c in 0..self.grid.kind.len() {
-                if self.grid.kind[c] == WALK && self.threat_next[c] >= cap {
+            for c in 0..kind.len() {
+                if kind[c] == WALK && self.threat_next[c] >= cap {
                     fd.seeds.push((c as u32, 0));
                 }
             }
             for &c in self.threat_dial.order.iter().rev() {
                 let c = c as usize;
                 let th = self.threat_next[c];
-                if self.grid.kind[c] == WALK && th < cap {
+                if kind[c] == WALK && th < cap {
                     fd.seeds.push((c as u32, off - (th as f32 * k) as i32));
                 }
             }
@@ -1221,11 +1320,13 @@ impl Sim {
     /// (sequential memory); the order among equal values doesn't change any
     /// distance.
     fn start_flee_zone_scan(&mut self, off: i32) {
-        if self.flee_base_version != Some(self.grid.version) {
-            let g = &self.grid;
+        // Keyed by the job's grid version (versions only grow within a run;
+        // `restore_from` forgets the cache).
+        if self.flee_base_version != Some(self.threat_version) {
+            let g = job_grid(&self.grid, &self.frozen, self.threat_src, self.threat_version);
             self.flee_base.clear();
             self.flee_base.extend(g.kind.iter().map(|&kd| if kd == WALK { 0 } else { INF }));
-            self.flee_base_version = Some(g.version);
+            self.flee_base_version = Some(self.threat_version);
         }
         // Capped walkable cells end at 0; zone cells start at their seed.
         self.flee_next.copy_from_slice(&self.flee_base);
@@ -1243,7 +1344,7 @@ impl Sim {
         let cap = self.threat_cap();
         let k = self.cfg.flee_multiplier;
         let off = (cap as f32 * k) as i32;
-        let g = &self.grid;
+        let g = job_grid(&self.grid, &self.frozen, self.threat_src, self.threat_version);
         let threat = &self.threat_next;
         let flee = &mut self.flee_next;
         let offs = field::offsets(g.w);
@@ -1293,20 +1394,31 @@ impl Sim {
         (end - start, true)
     }
 
-    /// The grid changed (a fence broke): restart the jobs in flight so the
-    /// next published fields see the new grid.
-    fn restart_field_jobs(&mut self) {
-        if self.chase_job {
-            self.restart_chase_job();
+    /// The grid is about to change during a wave (a fence breaks): every job
+    /// still reading the live grid gets a frozen copy of it, so it finishes
+    /// on the grid of its start tick. Jobs on the same grid share one copy.
+    /// At most once per job (afterwards it reads its copy).
+    fn freeze_job_grids(&mut self) {
+        let chase_live = self.chase_job && !self.chase_dial.finished() && self.chase_src == JobGrid::Live;
+        let threat_live = matches!(self.threat_job, ThreatJob::Threat | ThreatJob::FleeScan | ThreatJob::Flee) && self.threat_src == JobGrid::Live;
+        if !chase_live && !threat_live {
+            return;
         }
-        if self.threat_job != ThreatJob::Idle {
-            self.restart_threat_job();
+        // The copy no other job in flight reads.
+        let other = if chase_live { self.threat_src } else { self.chase_src };
+        let e = if other == JobGrid::Frozen(0) { 1 } else { 0 };
+        self.frozen[e].copy_from(&self.grid);
+        if chase_live {
+            self.chase_src = JobGrid::Frozen(e);
+        }
+        if threat_live {
+            self.threat_src = JobGrid::Frozen(e);
         }
     }
 
     fn update_civilians(&mut self, running: bool) {
         let cfg = &self.cfg;
-        let wake = if running { (cfg.wake_radius_m * cfg.cost_per_m()) as i32 } else { -1 };
+        let wake = if running { self.wake_threshold() } else { -1 };
         let period = cfg.dormant_period_ticks.max(1);
         let slot = self.tick % period;
         let keep = cfg.velocity_keep;
@@ -1667,6 +1779,9 @@ impl Sim {
             self.grid.fence_hp[c] -= dmg;
             if self.grid.fence_hp[c] <= 0.0 {
                 self.grid.fence_hp[c] = 0.0;
+                if !broke {
+                    self.freeze_job_grids();
+                }
                 self.grid.set_kind(c, WALK);
                 self.stats.fence_cells_broken += 1;
                 if self.stats.first_breach_tick.is_none() {
@@ -1676,9 +1791,6 @@ impl Sim {
             }
         }
         self.fence_touched.clear();
-        if broke {
-            self.restart_field_jobs();
-        }
     }
 
     // ------------------------------------------------------------- queries
@@ -1728,7 +1840,7 @@ impl Sim {
         let agents = agents + b(&self.sep_x) + b(&self.sep_y) + b(&self.spawn_x) + b(&self.spawn_y);
         let hash = b(&self.bucket_start) + b(&self.bucket_civ_end) + b(&self.bucket_fill) + b(&self.agent_ids) + b(&self.agent_bucket) + b(&self.hx) + b(&self.hy) + b(&self.hs);
         let fields = b(&self.chase) + b(&self.threat) + b(&self.flee) + b(&self.chase_next) + b(&self.threat_next) + b(&self.flee_next) + self.chase_dial.memory_bytes() + self.threat_dial.memory_bytes() + self.flee_dial.memory_bytes();
-        let fields = fields + b(&self.flee_base) + b(&self.flee_counts) + b(&self.flee_zone);
+        let fields = fields + b(&self.flee_base) + b(&self.flee_counts) + b(&self.flee_zone) + self.frozen.iter().map(FrozenGrid::bytes).sum::<usize>();
         let fences = b(&self.fence_damage) + b(&self.fence_touched);
         let g = &self.grid;
         let grid = b(&g.kind) + b(&g.building) + b(&g.fence_hp) + b(&g.step_chase) + b(&g.step_flee) + g.buildings.iter().map(|bi| b(&bi.polygon) + std::mem::size_of_val(bi)).sum::<usize>();
@@ -1767,16 +1879,18 @@ impl Sim {
             u32s: [take(&mut self.flee_counts), take(&mut self.flee_zone), take(&mut self.bucket_start), take(&mut self.bucket_civ_end), take(&mut self.bucket_fill), take(&mut self.agent_ids), take(&mut self.agent_bucket), take(&mut self.fence_touched)],
             f32s: [take(&mut self.hx), take(&mut self.hy), take(&mut self.sep_x), take(&mut self.sep_y), take(&mut self.fence_damage)],
             hs: take(&mut self.hs),
+            frozen: take(&mut self.frozen),
         }
     }
 
     fn put_scratch(&mut self, s: Scratch) {
-        let Scratch { fields, dials, u32s, f32s, hs } = s;
+        let Scratch { fields, dials, u32s, f32s, hs, frozen } = s;
         [self.chase, self.threat, self.flee, self.chase_next, self.threat_next, self.flee_next, self.flee_base] = fields;
         [self.chase_dial, self.threat_dial, self.flee_dial] = dials;
         [self.flee_counts, self.flee_zone, self.bucket_start, self.bucket_civ_end, self.bucket_fill, self.agent_ids, self.agent_bucket, self.fence_touched] = u32s;
         [self.hx, self.hy, self.sep_x, self.sep_y, self.fence_damage] = f32s;
         self.hs = hs;
+        self.frozen = frozen;
     }
 
     /// A copy of the persistent state without the scratch buffers (about a
@@ -1798,6 +1912,8 @@ impl Sim {
         self.flee_base_version = None;
         self.chase_job = false;
         self.threat_job = ThreatJob::Idle;
+        self.chase_src = JobGrid::Live;
+        self.threat_src = JobGrid::Live;
     }
 
     /// Run to the end of the game (or `max_ticks`), returning the outcome.
@@ -1818,6 +1934,7 @@ struct Scratch {
     u32s: [Vec<u32>; 8],
     f32s: [Vec<f32>; 5],
     hs: Vec<u8>,
+    frozen: [FrozenGrid; 2],
 }
 
 #[inline]

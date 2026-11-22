@@ -203,6 +203,31 @@ pub fn walled_compound() -> LevelPack {
 /// A `grid_city` centred on the origin and cut to a circle of `radius_m`,
 /// for wave-8-sized benchmarks. Blocks whose centre is not at least half a
 /// block inside the circle are dropped, so the edge is a street ring.
+/// `grid_city_disc` with a straight fence through the middle of every block
+/// row and column, across the whole disc. Every street segment is fenced
+/// once, so the city is sealed into one compartment per crossing: there is
+/// no detour, zombies chew through to reach anyone (break-heavy benchmark
+/// and tests).
+pub fn grid_city_disc_fenced(radius_m: f32, block_m: f32, street_m: f32, seed: u64) -> LevelPack {
+    let mut l = grid_city_disc(radius_m, block_m, street_m, seed);
+    let pitch = block_m + street_m;
+    // Same layout as `grid_city_disc`: block centres at
+    // b * pitch + street + block / 2 - half.
+    let n = ((2.0 * radius_m) / pitch).ceil() as u32 + 1;
+    let half = (n as f32 * pitch + street_m) * 0.5;
+    let r = radius_m;
+    for b in 0..n {
+        let c = b as f32 * pitch + street_m + block_m * 0.5 - half;
+        if c.abs() >= r {
+            continue;
+        }
+        l.fences.push(vec![[c, -r], [c, r]]);
+        l.fences.push(vec![[-r, c], [r, c]]);
+    }
+    l.name = format!("grid_fenced_{radius_m}m");
+    l
+}
+
 pub fn grid_city_disc(radius_m: f32, block_m: f32, street_m: f32, seed: u64) -> LevelPack {
     let pitch = block_m + street_m;
     let n = ((2.0 * radius_m) / pitch).ceil() as u32 + 1;

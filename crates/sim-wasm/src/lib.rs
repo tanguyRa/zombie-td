@@ -103,6 +103,7 @@ impl WasmSim {
             self.sim.towers_left() as f64,
             self.sim.fence_left_m() as f64,
             s.first_breach_tick.map_or(-1.0, |t| t as f64),
+            s.fence_cells_broken as f64,
         ]
     }
 

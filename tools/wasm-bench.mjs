@@ -35,22 +35,25 @@ for (const population of pops) {
   const sim = new WasmSim(levelJson, configJson, population, seed);
   sim.start();
   const setup_ms = performance.now() - t0;
-  const run = { runtime: "wasm", population, ticks, tick_ms: [], phase_ms: [], dormant_share: [], setup_ms, memory_bytes: 0 };
+  const run = { runtime: "wasm", population, ticks, tick_ms: [], phase_ms: [], dormant_share: [], setup_ms, memory_bytes: 0, fence_cells_broken: 0, break_ticks: 0 };
   for (let t = 0; t < ticks; t++) {
     if (sim.game_phase() >= 2) break;
     if (stopCiv > 0 && sim.stats()[0] < stopCiv * population) break;
+    const broken = sim.stats()[11];
     sim.step(1);
     const ph = Array.from(sim.phase_ms());
     run.tick_ms.push(ph.reduce((a, b) => a + b, 0));
     run.phase_ms.push(ph);
     const st = sim.stats();
     run.dormant_share.push(st[0] > 0 ? st[4] / st[0] : 0);
+    if (st[11] > broken) run.break_ticks++;
+    run.fence_cells_broken = st[11];
   }
   // Linear memory only grows, so this is the peak for this run (and earlier ones).
   run.memory_bytes = wasmPkg.__wasm.memory.buffer.byteLength;
   const sorted = [...run.tick_ms].sort((a, b) => a - b);
   const p = (q) => sorted[Math.min(sorted.length - 1, Math.round((q / 100) * (sorted.length - 1)))];
-  console.error(`wasm ${population}: p50 ${p(50).toFixed(2)} p95 ${p(95).toFixed(2)} max ${sorted.at(-1).toFixed(2)} ms, memory ${(run.memory_bytes / 1048576).toFixed(0)} MB`);
+  console.error(`wasm ${population}: p50 ${p(50).toFixed(2)} p95 ${p(95).toFixed(2)} max ${sorted.at(-1).toFixed(2)} ms, memory ${(run.memory_bytes / 1048576).toFixed(0)} MB, ${run.fence_cells_broken} fence cells broken on ${run.break_ticks} ticks`);
   runs.push(run);
   sim.free();
 }

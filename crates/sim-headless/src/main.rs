@@ -4,7 +4,8 @@
 //!   cargo run --release -p sim-headless -- run --level paris-marais --pop 20000 --seed 1
 //!   cargo run --release -p sim-headless -- bench --pop 100000
 //!   cargo run --release -p sim-headless -- bench --scale [--radii 1100,1300,1600] [--pops 20000,...]
-//!        [--ticks 8000] [--clusters 12] [--level marais-tiled:1300,<levels/ name>|none] [--skip-wasm] [--out reports/scale.md]
+//!        [--ticks 8000] [--clusters 12] [--level marais-tiled:1300,<levels/ name>|none]
+//!        [--fenced 1300|none] [--skip-wasm] [--out reports/scale.md]   # --radii none: no plain grid
 //!   cargo run --release -p sim-headless -- scenarios
 //!   cargo run --release -p sim-headless -- match --level paris-marais --seed 1 [--retries 2] [--max-wave-s 1800]
 //!        [--multiplier 0.3] [--fast-forward-to 8]   # level may also be marais-tiled:1300
@@ -80,6 +81,7 @@ fn cmd_scale(args: &[String]) {
         clusters: arg(args, "--clusters", scale::SCALE_CLUSTERS),
         wasm: !args.iter().any(|a| a == "--skip-wasm"),
         real_levels: list::<String>(args, "--level", &["marais-tiled:1300".to_string()]).into_iter().filter(|l| l != "none").collect(),
+        fenced: list(args, "--fenced", &[1300.0]),
     };
     if o.wasm {
         let st = std::process::Command::new("wasm-pack")

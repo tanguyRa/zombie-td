@@ -364,6 +364,7 @@ pub fn run(args: &[String]) {
             clusters: scale::SCALE_CLUSTERS,
             wasm: !skip_wasm && wasm_note.is_none(),
             real_levels: if quick { vec![] } else { vec!["marais-tiled:1300".into()] },
+            fenced: vec![1300.0],
         };
         eprintln!("[report] scale runs (wave 8)");
         let runs = scale::run_all(&o);
@@ -457,7 +458,7 @@ fn known_issues(c: &Ctx) -> Vec<String> {
     let mut v = vec![
         "Towers have no line-of-sight check: a garrison shoots through buildings (spec simplification).".to_string(),
         "Towers are indestructible and zombies ignore them.".to_string(),
-        "Fields refresh every 5 ticks (chase and threat/flee on alternating ticks), so agents steer on data up to 0.25 s old.".to_string(),
+        "Fields refresh every 5 ticks (chase and threat/flee started on staggered ticks), each computed over the 5 ticks after its start, so agents steer on fields 5–9 ticks (0.25–0.45 s) old; a fence break reaches them within 10 ticks.".to_string(),
         "Separation looks at no more than 8 overlapping neighbours and scans at most 48 candidates, so very dense crowds overlap a little.".to_string(),
         "With zombies only 0.3 m/s faster than fleeing civilians, the last survivors can run along the map edge for minutes; such runs end in a timeout with a few survivors.".to_string(),
         "Benchmarks run inside the Docker dev container (Linux VM on the host), single-threaded.".to_string(),

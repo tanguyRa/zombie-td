@@ -69,8 +69,9 @@ Every choice the spec left open, and every simplification, in one place.
 - **Field schedule (changed in T1, see "Scale"):** a chase job starts when
   `tick % 5 == 0` and a threat + flee job when `tick % 5 == 2`, each from a
   snapshot of the agents at that tick; each is published 5 ticks later.
-  Start computes both at once. A fence break restarts the jobs in flight on
-  the new grid instead of recomputing immediately.
+  Start computes both at once. A job reads the grid of its start tick: a
+  fence break during a job is picked up by the next job of that kind
+  (within 10 ticks), see "Scale", *Fence breaks*.
 - **Field units:** 10 per straight step = 5 cost units per meter. The wake
   radius (60 m) is therefore a threat value of 300.
 - **Flee field:** threat is capped at `flee_threat_cap_m` (200 m) before
@@ -163,7 +164,13 @@ Every choice the spec left open, and every simplification, in one place.
     on where it paused. Ring size rounded to a power of two (mask instead of
     `rem_euclid`). Same results.
   - *Threat stops at the flee cap* (200 m): values at or above the cap are
-    only ever compared with the cap or the wake radius. Same results.
+    only ever compared with the cap or the wake radius. Same results. The
+    stop is `max(cap - 1, wake)` in field units (`Sim::threat_limit`):
+    dormancy reads `threat > wake` exactly, so with `wake_radius_m` at or
+    beyond `flee_threat_cap_m` the job runs on to the wake radius (a T1
+    review finding: stopping at the cap made dormancy diverge from the
+    reference at tick 0 with wake 250 m). Allowed rather than rejected in
+    config; tested with wake 250 / cap 200 and wake 150 / cap 120.
   - *Flee only inside the threat zone*: capped cells end at exactly 0, so
     only zone cells are seeded (each next to a capped cell at min(seed,
     step cost)), counting-sorted by value over cells in index order, with
@@ -178,17 +185,56 @@ Every choice the spec left open, and every simplification, in one place.
     for threat + flee, plus the flee seed scan at a quarter per cell); the
     flee seed scan is itself incremental. Any leftover is finished at the
     publish tick. The budget never changes results, only where the work
-    happens. A fence break restarts the jobs in flight on the new grid (the
-    published fields catch up within one interval instead of the same tick).
-    This is the change that moved the hash: **fixture
+    happens. This is the change that moved the hash: **fixture
     `db5a39a980ef2a0a` → `0ea142296a5795a9`**, updated on purpose. WASM
     under Node reproduces it.
+  - *Fence breaks* (**rule change**, T1 review fix): a job reads the grid
+    as it was at its start tick, and a break during a job is picked up by
+    the next job of that kind, so the fields agents read reflect a break
+    within two intervals (10 ticks) instead of one. Until T1's review a
+    break restarted the jobs in flight on the new grid, and the leftover
+    was finished on the publish tick: a whole chase job (~13–16 ms native
+    at 1.3 km / 100k, 1.2–2× that in WASM) on one tick, every interval
+    with a break. Now, just before the first break under a job still on
+    the live grid, its field inputs (kind and both step masks, 3 bytes per
+    cell, ~5 MB at 1.3 km) are copied into one of two frozen copies (jobs
+    on the same grid share one; at most one copy per job) and the job
+    finishes on the copy; the work stays spread out. Steering always uses
+    the live grid and its step masks, so nobody walks through an intact
+    fence because of a stale field (zombies still chew a fence cell the
+    field leads them into; tested: no agent ever stands on a fence cell).
+    The two existing fixtures have no fence break, so **their hashes do not
+    change** (`native_hash.json` `0ea142296a5795a9`, `match_hash.json`
+    `e1061f2da92f6c9f`); a new **break-heavy fixture**
+    (`fence_break_hash.json`, `948428b482f65852`:
+    `fixture::compute_fence_fixture_hash`, a 200 m city sealed by fences,
+    4 hp fences, 1,200 ticks) pins the new rule natively and in WASM under
+    Node. Rejected: postponing the publish after a break (simpler, but
+    breaks every few ticks would starve the fields).
+  - *Break-heavy bench* (`bench --scale --fenced 1300`, on by default):
+    `grid_city_disc` with a fence through every block row and column
+    (`level::grid_city_disc_fenced`: every street segment fenced once, no
+    detour), fence hp 6, fence path cost 100, 12 clusters. 1.3 km, 100k,
+    2,000 ticks, before → after the fix (same host as below): native p95
+    20.5–29.1 → 14.0 ms, p99 29.7–45.7 → 14.9, fields max 34–124 → 10.2;
+    WASM p95 29.5 → 18.0, p99 41.7 → 18.9 (273 fence cells broken on 231
+    ticks before, 454 on 364 after: zombies now walk through a hole up to
+    one interval later, so the game differs; native and WASM equal in
+    both). Fence-free runs do no copies and are unchanged, so the caps
+    below still hold.
 - **Tested:** `tests/t1_scale.rs` runs a sim and an `eager_fields` reference
   (every job computed in full the moment it starts, original flee seeding,
   uncapped threat) side by side on Paris with towers and fences, on a
   `grid_city_disc` and through fence breaks: same hash every tick, same
   chase and flee fields, same threat below the cap. Plus resumable Dial vs
-  brute force and step masks vs `step_allowed`.
+  brute force and step masks vs `step_allowed`. Since the T1 review also:
+  a config with the wake radius beyond the flee cap; the fence-break rule
+  against an independent one-shot Dijkstra over the grid recorded at each
+  job's start (published chase and threat, on jobs the grid changed
+  under); and forced budgets (`Sim::test_budget`: 1 everywhere, a crawling
+  flee scan, erratic 0 / 1 / small / 3×) equal to the default budget and
+  the eager reference, with pauses counted in every stage (chase, threat,
+  flee seed scan, flee).
 - **Tried and dropped:** a lazy chase field (zombies settle it up to their
   own cell): civilians are everywhere, so it still settles almost the whole
   map, just inside the zombie phase. Coarser cells were not needed.

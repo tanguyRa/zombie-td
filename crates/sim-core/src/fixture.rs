@@ -100,3 +100,21 @@ pub fn compute_match_fixture_hash(level: &LevelPack) -> u64 {
     assert_eq!((m.wave(), m.phase()), (2, Phase::Running));
     m.state_hash()
 }
+
+/// A break-heavy run: a 200 m city sealed by fences across every street
+/// (`level::grid_city_disc_fenced`), weak fences (4 hp per cell), 6
+/// outbreak clusters, 2k agents, 1200 ticks. Covers field jobs that finish
+/// on the grid of their start tick while fences break under them. Returns
+/// the state hash and the fence cells broken. Must match native and WASM.
+pub fn compute_fence_fixture_hash() -> (u64, u32) {
+    let level = crate::level::grid_city_disc_fenced(200.0, 40.0, 14.0, 7);
+    let mut cfg = Config::default_config();
+    cfg.fence_cell_hp = 4.0;
+    cfg.outbreak_clusters = 6;
+    let mut sim = Sim::new(&level, cfg, 2_000, FIXTURE_SEED);
+    sim.start();
+    while sim.tick < 1200 && sim.outcome().is_none() {
+        sim.step();
+    }
+    (sim.state_hash(), sim.stats.fence_cells_broken)
+}
