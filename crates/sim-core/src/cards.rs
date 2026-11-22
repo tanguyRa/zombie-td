@@ -19,6 +19,18 @@ pub enum Rarity {
     Legendary,
 }
 
+impl std::fmt::Display for Rarity {
+    /// The rarity as the player reads it ("a common card").
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Rarity::Common => "common",
+            Rarity::Uncommon => "uncommon",
+            Rarity::Rare => "rare",
+            Rarity::Legendary => "legendary",
+        })
+    }
+}
+
 /// When a card can be played: fortifications and armaments in prep,
 /// tactical cards while the wave runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,7 +223,7 @@ impl std::fmt::Display for DeckError {
         match self {
             DeckError::WrongSize { size, expected } => write!(f, "a deck has exactly {expected} cards, this one has {size}"),
             DeckError::UnknownCard { card } => write!(f, "unknown card \"{card}\""),
-            DeckError::TooManyCopies { card, rarity, copies, max } => write!(f, "{copies} copies of \"{card}\": at most {max} of a {rarity:?} card"),
+            DeckError::TooManyCopies { card, rarity, copies, max } => write!(f, "{copies} copies of \"{card}\": at most {max} of a {rarity} card"),
             DeckError::TooManyLegendaries { count, max } => write!(f, "{count} legendary cards: at most {max} per deck"),
         }
     }

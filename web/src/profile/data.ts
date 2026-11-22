@@ -118,8 +118,6 @@ export function difficultyOf(tables: ProfileTables, tier: Tier): DifficultyParam
   return tables.difficulty[tier];
 }
 
-const RUST_RARITY: Record<Rarity, string> = { common: "Common", uncommon: "Uncommon", rare: "Rare", legendary: "Legendary" };
-
 /// The message sim-core's `Display for DeckError` prints, for the UI.
 export function deckErrorMessage(e: DeckError): string {
   switch (e.error) {
@@ -128,7 +126,7 @@ export function deckErrorMessage(e: DeckError): string {
     case "unknown_card":
       return `unknown card "${e.card}"`;
     case "too_many_copies":
-      return `${e.copies} copies of "${e.card}": at most ${e.max} of a ${RUST_RARITY[e.rarity]} card`;
+      return `${e.copies} copies of "${e.card}": at most ${e.max} of a ${e.rarity} card`;
     case "too_many_legendaries":
       return `${e.count} legendary cards: at most ${e.max} per deck`;
   }

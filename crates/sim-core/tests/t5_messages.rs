@@ -1,8 +1,28 @@
 //! T5 review: `ActionError` messages are player-facing. Phases, card kinds
 //! and target kinds read as words, never as Rust `Debug` names, and no
-//! building, fence or structure index the player can't know is shown.
-use sim_core::cards::{CardKind, TargetKind};
-use sim_core::match_::{ActionError, Phase};
+//! building, fence or structure index the player can't know is shown. The
+//! verifier's, deck rules' and match setup's messages read as words too.
+mod common;
+use sim_core::cards::{CardKind, DeckError, Rarity, TargetKind};
+use sim_core::match_::{Action, ActionError, Match, MatchError, MatchSetup, Phase, Target};
+use sim_core::record::{MapSource, VerifyError};
+
+/// Rifles played on the same (unknown) building twice, in a real match:
+/// the core's placement reason.
+fn same_building_twice() -> ActionError {
+    let cfg = common::cfg();
+    let setup = MatchSetup::new(2, &cfg);
+    let mut m = Match::new(&common::level("paris-marais"), cfg, setup).unwrap();
+    let rifles = m.hand().iter().find(|c| c.card == "rifles").expect("seed 2's first hand holds rifles").hand_index;
+    let sim = m.sim();
+    let b = (0..sim.grid.buildings.len() as u32)
+        .find(|&b| {
+            let i = &sim.grid.buildings[b as usize];
+            i.cell_count > 0 && m.wave_of_point(i.centroid[0], i.centroid[1]) <= m.wave()
+        })
+        .expect("a revealed building");
+    m.apply(Action::PlayCard { hand_index: rifles, target: Target::Buildings(vec![b, b]) }).unwrap_err()
+}
 
 #[test]
 fn phase_and_kind_names_read_as_words() {
@@ -29,6 +49,9 @@ fn no_debug_names_or_hidden_indices() {
         ActionError::NoSuchFence { fence_id: 4711 },
         ActionError::NothingToRepair { fence_id: 4711 },
     ];
+    let twice = same_building_twice();
+    assert_eq!(twice.to_string(), "the same building is chosen twice");
+    all.push(twice);
     for p in phases {
         all.push(ActionError::WrongPhase { action: "start_wave".into(), phase: p });
         for k in [CardKind::Fortification, CardKind::Armament, CardKind::Tactical] {
@@ -42,4 +65,57 @@ fn no_debug_names_or_hidden_indices() {
             assert!(!m.contains(debug), "{debug:?} in {m:?}");
         }
     }
+}
+
+#[test]
+fn verifier_deck_and_setup_messages_read_as_words() {
+    let debug_names = ["Prep", "Running", "WaveWon", "WaveLost", "MatchWon", "Common", "Uncommon", "Rare", "Legendary", "Level", "Chunks", "(\"", "{ ", "_"];
+    let check = |m: String| {
+        for d in debug_names {
+            assert!(!m.contains(d), "{d:?} in {m:?}");
+        }
+        m
+    };
+    assert_eq!(
+        check(VerifyError::TooLong { attempt: 0, wave: 1, phase: Phase::Running, ticks: 301, max: 300 }.to_string()),
+        "attempt 0 (wave 1) stayed in a wave in progress for 301 ticks, the limit is 300"
+    );
+    assert_eq!(check(VerifyError::TooLong { attempt: 2, wave: 3, phase: Phase::Prep, ticks: 201, max: 200 }.to_string()), "attempt 2 (wave 3) stayed in prep for 201 ticks, the limit is 200");
+    for p in [Phase::Prep, Phase::Running, Phase::WaveWon, Phase::WaveLost, Phase::MatchWon] {
+        check(VerifyError::Unfinished { phase: p, wave: 2 }.to_string());
+        check(VerifyError::TooLong { attempt: 0, wave: 2, phase: p, ticks: 1, max: 0 }.to_string());
+    }
+    assert_eq!(
+        check(VerifyError::Unfinished { phase: Phase::Running, wave: 2 }.to_string()),
+        "the record ends in a wave in progress at wave 2 without being marked abandoned"
+    );
+    check(VerifyError::MapSource { record: MapSource::Level }.to_string());
+    check(VerifyError::MapSource { record: MapSource::Chunks }.to_string());
+    for r in [Rarity::Common, Rarity::Uncommon, Rarity::Rare, Rarity::Legendary] {
+        check(DeckError::TooManyCopies { card: "x".into(), rarity: r, copies: 4, max: 3 }.to_string());
+    }
+    assert_eq!(
+        check(DeckError::TooManyCopies { card: "rifles".into(), rarity: Rarity::Common, copies: 4, max: 3 }.to_string()),
+        "4 copies of \"rifles\": at most 3 of a common card"
+    );
+    let errs = [
+        MatchError::InvalidConfig("x".into()),
+        MatchError::NoPlayArea,
+        MatchError::LevelHasBuildings,
+        MatchError::DuplicateBlock(7),
+        MatchError::BadChunk(7),
+        MatchError::AreaRevealed(7),
+        MatchError::BuildingOutsideBlock { block_id: 7, building_id: 8 },
+        MatchError::RingNotLoaded(1),
+        MatchError::InvalidDeck(vec![DeckError::WrongSize { size: 19, expected: 20 }, DeckError::UnknownCard { card: "x".into() }]),
+        MatchError::InvalidSetup("x".into()),
+        MatchError::BadShell("x".into()),
+    ];
+    for e in errs {
+        check(e.to_string());
+    }
+    assert_eq!(
+        MatchError::InvalidDeck(vec![DeckError::WrongSize { size: 19, expected: 20 }, DeckError::UnknownCard { card: "x".into() }]).to_string(),
+        "invalid deck: a deck has exactly 20 cards, this one has 19; unknown card \"x\""
+    );
 }

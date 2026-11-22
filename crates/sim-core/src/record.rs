@@ -103,6 +103,15 @@ pub enum MapSource {
     Chunks,
 }
 
+impl std::fmt::Display for MapSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MapSource::Level => "whole-level",
+            MapSource::Chunks => "streamed-chunk",
+        })
+    }
+}
+
 /// The map a run was played on.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -452,7 +461,7 @@ impl std::fmt::Display for VerifyError {
             SimVersion { record, verifier } => write!(f, "recorded with sim rules version {record}, this verifier runs version {verifier}"),
             ConfigHash { record, verifier } => write!(f, "config hash {record} differs from the verifier's {verifier}"),
             CardsHash { record, verifier } => write!(f, "cards hash {record} differs from the verifier's {verifier}"),
-            MapSource { record } => write!(f, "the run was played on {record:?} map data; give the matching --level, or --chunks with --shell"),
+            MapSource { record } => write!(f, "the run was played on {record} map data; give the matching --level, or --chunks with --shell"),
             MapShell => write!(f, "the map shell given (radius, bounds, centre or fences) differs from the record's"),
             BadShell { reason } => write!(f, "the record's map shell is out of bounds: {reason}"),
             Unexpected { what, record, expected } => write!(f, "the record's {what} is {record}, the server issued {expected}"),
@@ -464,11 +473,11 @@ impl std::fmt::Display for VerifyError {
             OutOfOrder { index, tick, previous } => write!(f, "action {index} at tick {tick} comes after tick {previous}"),
             FutureTick { index, tick, end_tick } => write!(f, "action {index} at tick {tick} is past the record's end (tick {end_tick})"),
             IllegalAction { index, tick, action, reason } => write!(f, "action {index} ({action}) at tick {tick} is illegal: {reason}"),
-            TooLong { attempt, wave, phase, ticks, max } => write!(f, "attempt {attempt} (wave {wave}) stayed in {phase:?} for {ticks} ticks, the limit is {max}"),
+            TooLong { attempt, wave, phase, ticks, max } => write!(f, "attempt {attempt} (wave {wave}) stayed in {phase} for {ticks} ticks, the limit is {max}"),
             Diverged { attempt, wave, tick, what, record, replay } => {
                 write!(f, "diverged at attempt {attempt} (wave {wave}), tick {tick}: {what} is {replay} in the replay, {record} in the record")
             }
-            Unfinished { phase, wave } => write!(f, "the record ends in {phase:?} at wave {wave} without being marked abandoned"),
+            Unfinished { phase, wave } => write!(f, "the record ends in {phase} at wave {wave} without being marked abandoned"),
             Outcome { what, record, replay } => write!(f, "outcome {what}: record says {record}, replay gives {replay}"),
             Cancelled { tick } => write!(f, "replay cancelled at tick {tick}"),
         }
@@ -762,7 +771,7 @@ pub fn replay_with(
     let n = m.attempts().len();
     let e = &record.end;
     if e.phase != m.phase() || e.wave != m.wave() {
-        return Err(diverged(n, m.wave(), end, "phase", format!("{:?} wave {}", e.phase, e.wave), format!("{:?} wave {}", m.phase(), m.wave())));
+        return Err(diverged(n, m.wave(), end, "phase", format!("{} (wave {})", e.phase, e.wave), format!("{} (wave {})", m.phase(), m.wave())));
     }
     // The open attempt's start tick and prep hash: checked when its prep
     // opened only if the record ends in that prep or wave; a record ending

@@ -127,7 +127,8 @@ test("invalid plays are refused with the core's reason", async ({ page }) => {
   const err = await uiAction(page, async () => {
     await clickCard(page, 2);
     await expect(page.locator("#hint")).toHaveText("Click up to 3 highlighted buildings (0/3)");
-    expect(await hook(page, (h) => h.drawn.layers)).toContain("valid");
+    // `drawn` is rebuilt each animation frame: poll, a one-shot read can see the previous frame.
+    await expect.poll(() => hook(page, (h) => h.drawn.layers)).toContain("valid");
     for (const k of inner.slice(0, 3)) {
       const p = (await hookWith(page, (h, i) => h.buildingPoint(i), k))!;
       await clickSim(page, p[0], p[1]);
@@ -200,10 +201,9 @@ test("fog: the next ring is darkened and holds no agents", async ({ page }) => {
   await openLevel(page, MARAIS, 1);
   const st = (await hook(page, (h) => h.status))!;
   await expect.poll(() => hook(page, (h) => h.drawn.layers)).toContain("fog");
-  const d = await hook(page, (h) => h.drawn);
-  expect(d.layers).toEqual(expect.arrayContaining(["outside", "fog", "buildings", "agents"]));
-  expect(d.fogRadius.revealed).toBeCloseTo(st.radius_m, 3);
-  expect(d.fogRadius.next).toBeCloseTo(st.next_radius_m, 3);
+  await expect.poll(() => hook(page, (h) => h.drawn.layers)).toEqual(expect.arrayContaining(["outside", "fog", "buildings", "agents"]));
+  await expect.poll(() => hook(page, (h) => h.drawn.fogRadius.revealed)).toBeCloseTo(st.radius_m, 3);
+  await expect.poll(() => hook(page, (h) => h.drawn.fogRadius.next)).toBeCloseTo(st.next_radius_m, 3);
   expect(st.next_radius_m).toBeGreaterThan(st.radius_m);
   // Buildings of the next ring are drawn (they are visible through the fog).
   const ring2 = await hook(page, (h) => h.buildings.filter((b) => b.wave === 2).length);
@@ -223,7 +223,8 @@ test("fog: the next ring is darkened and holds no agents", async ({ page }) => {
   await hook(page, (h) => h.startWave());
   await runTo(page, st.tick + 400);
   expect(await outside(st.radius_m + 2)).toBe(0);
-  expect(await hook(page, (h) => h.drawn.agents)).toBe(await hook(page, (h) => h.status!.stats.civilians + h.status!.stats.infected + h.status!.stats.zombies + h.status!.stats.dead));
+  const total = await hook(page, (h) => h.status!.stats.civilians + h.status!.stats.infected + h.status!.stats.zombies + h.status!.stats.dead);
+  await expect.poll(() => hook(page, (h) => h.drawn.agents)).toBe(total);
 });
 
 test("pause and speed never change the simulation", async ({ page }) => {

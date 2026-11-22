@@ -172,7 +172,7 @@ fn deck_rules_are_enforced_with_clear_errors() {
     let errs = db.validate_deck(&many).unwrap_err();
     assert_eq!(errs.len(), 4, "size, rifles, airstrike, sniper: {errs:?}");
     assert!(errs.contains(&DeckError::TooManyCopies { card: "rifles".into(), rarity: Rarity::Common, copies: 4, max: 3 }));
-    assert!(errs.iter().any(|e| e.to_string().contains("at most 1 of a Legendary card")), "{errs:?}");
+    assert!(errs.iter().any(|e| e.to_string().contains("at most 1 of a legendary card")), "{errs:?}");
     assert!(errs[0].to_string().contains("exactly 20 cards"));
     // The match refuses an illegal deck.
     let cfg = common::cfg();

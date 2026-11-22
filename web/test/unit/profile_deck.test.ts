@@ -67,7 +67,7 @@ describe("mirrorValidateDeck = sim-core validate_deck (t3_cards.rs cases)", () =
     const errs = v(many);
     expect(errs.length).toBe(4);
     expect(errs).toContainEqual({ error: "too_many_copies", card: "rifles", rarity: "common", copies: 4, max: 3 });
-    expect(errs.map(deckErrorMessage).some((m) => m.includes("at most 1 of a Legendary card"))).toBe(true);
+    expect(errs.map(deckErrorMessage).some((m) => m.includes("at most 1 of a legendary card"))).toBe(true);
     expect(deckErrorMessage(errs[0])).toContain("exactly 20 cards");
     expect(deckErrorMessage({ error: "too_many_legendaries", count: 3, max: 2 })).toBe("3 legendary cards: at most 2 per deck");
     expect(deckErrorMessage({ error: "unknown_card", card: "x" })).toBe('unknown card "x"');
