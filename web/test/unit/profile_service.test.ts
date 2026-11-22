@@ -524,4 +524,237 @@ describe("export and import", () => {
     await expect(p.importProfile({ ...dump, state: { ...dump.state, schema: SCHEMA_VERSION + 1 } })).rejects.toMatchObject({ code: "schema_too_new" });
     expect((await p.listCards()).length).toBe(20);
   });
+
+  it("a malformed export is refused and the profile is left untouched", async () => {
+    const { p } = await fresh();
+    await p.claimMatch(summary(), { r: 1 });
+    const good = JSON.parse(JSON.stringify(await p.exportProfile())) as ProfileExport;
+    const before = JSON.stringify(await p.exportProfile());
+    const st = good.state as unknown as Record<string, unknown>;
+    const withState = (patch: Record<string, unknown>) => ({ ...good, state: { ...st, ...patch } as never });
+    const bad: unknown[] = [
+      { format: "zt-profile-export", schema: 1, state: { schema: 1 }, matches: [], coverage: [] },
+      withState({ instances: undefined }),
+      withState({ decks: {} }),
+      withState({ tickets: "x" }),
+      withState({ crates: null }),
+      withState({ claimedMatches: [1] }),
+      withState({ dailyKeys: undefined }),
+      withState({ achievements: undefined }),
+      withState({ instances: [null] }),
+      withState({ revision: "3" }),
+      withState({ nextSeq: NaN }),
+      withState({ rng: { state: "zz", inc: "1" } }),
+      withState({ rng: undefined }),
+      withState({ daily: { day: 3, counts: {} } }),
+      withState({ daily: { day: "2026-11-22", counts: { first_blood: 0 } } }),
+      withState({ highestClearedTier: 9 }),
+      withState({ profileId: "" }),
+      { ...good, matches: [{ summary: {} }] },
+      { ...good, matches: [null] },
+      { ...good, coverage: [{ cell: "12" }] },
+      { ...good, coverage: [{}] },
+    ];
+    for (const b of bad) {
+      await expect(p.importProfile(b as ProfileExport), JSON.stringify(b).slice(0, 120)).rejects.toMatchObject({ code: "bad_import" });
+    }
+    expect(JSON.stringify(await p.exportProfile())).toBe(before);
+    expect((await p.listCards()).length).toBe(20);
+    expect((await p.claimMatch(summary(), null)).paid).toBe(true);
+    // The good export still imports.
+    await p.importProfile(good);
+    expect((await p.listMatches()).length).toBe(1);
+  });
+
+  it("exports state, matches and coverage from one transaction", async () => {
+    const idb = new IDBFactory();
+    const a = await LocalProfileService.open({ indexedDB: idb, clock: new FakeClock(T0), seed: 1n });
+    const other = await LocalProfileService.open({ indexedDB: idb, clock: new FakeClock(T0), seed: 1n });
+    // Another tab claims a match while the export is between two reads.
+    const backend = (a as unknown as { backend: IdbProfileBackend }).backend;
+    let armed = true;
+    const realLoad = backend.loadState.bind(backend);
+    backend.loadState = async () => {
+      const s = await realLoad();
+      if (armed) {
+        armed = false;
+        await other.claimMatch(summary({ matchId: "racing" }), null);
+      }
+      return s;
+    };
+    const realAll = backend.allMatches.bind(backend);
+    backend.allMatches = async () => {
+      if (armed) {
+        armed = false;
+        await other.claimMatch(summary({ matchId: "racing" }), null);
+      }
+      return realAll();
+    };
+    const dump = await a.exportProfile();
+    expect(dump.matches.map((m) => m.summary.matchId).sort()).toEqual([...dump.state.claimedMatches].sort());
+    a.close();
+    other.close();
+  });
+});
+
+describe("review fixes", () => {
+  it("recordDailyEvent checks tier, wave, match id and population", async () => {
+    const { p } = await fresh();
+    const ok = { kind: "wave_victory" as const, matchId: "a", wave: 1, city: "Paris", district: "", tier: "recruit" as const, populationSaved: 10 };
+    await expect(p.recordDailyEvent({ ...ok, tier: "nightmare" })).rejects.toMatchObject({ code: "tier_locked" });
+    await expect(p.recordDailyEvent({ ...ok, kind: "first_blood", tier: "elite" })).rejects.toMatchObject({ code: "tier_locked" });
+    for (const bad of [
+      { tier: "bogus" },
+      { wave: 0 },
+      { wave: 9 },
+      { wave: 2.5 },
+      { wave: NaN },
+      { matchId: "" },
+      { matchId: 7 },
+      { populationSaved: -1 },
+      { populationSaved: NaN },
+      { populationSaved: Infinity },
+    ]) {
+      await expect(p.recordDailyEvent({ ...ok, ...bad } as never), JSON.stringify(bad)).rejects.toMatchObject({ code: "bad_summary" });
+    }
+    expect(await p.listTickets()).toEqual([]);
+    expect((await p.dailyStatus()).counts).toEqual({ first_blood: 0, wave_victory: 0, match_victory: 0 });
+    // Veteran unlocks after a recruit clear.
+    await p.claimMatch(summary(), null);
+    expect((await p.recordDailyEvent({ ...ok, tier: "veteran" })).granted).toHaveLength(1);
+  });
+
+  it("an unusable ticket doesn't wedge openCrate", async () => {
+    const backend = new MemoryProfileBackend();
+    const p = await LocalProfileService.open({ backend, clock: new FakeClock(T0), seed: 1n });
+    await p.recordDailyEvent({ kind: "first_blood", matchId: "a", wave: 1, city: "Paris", district: "", tier: "recruit", populationSaved: 0 });
+    const s = (await backend.loadState())!;
+    const good = s.tickets[0];
+    s.tickets.unshift({ ...good, id: "bad-ticket", tier: "bogus" as never });
+    await backend.commit({ expectedRevision: s.revision, state: { ...s, revision: s.revision + 1 } });
+    await expect(p.openCrate("bad-ticket")).rejects.toMatchObject({ code: "bad_ticket" });
+    const opened = await p.openCrate();
+    expect(opened.crate.ticketId).toBe(good.id);
+    // Only the unusable ticket is left: reported, not a TypeError.
+    await expect(p.openCrate()).rejects.toMatchObject({ code: "bad_ticket" });
+    expect((await p.listTickets()).map((t) => t.id)).toEqual(["bad-ticket"]);
+  });
+
+  it("a clock set a year ahead then corrected doesn't freeze the daily caps", async () => {
+    const clock = new FakeClock(T0 + 365 * DAY);
+    const { p } = await fresh(clock);
+    const fb = (m: string) => ({ kind: "first_blood" as const, matchId: m, wave: 1, city: "Paris", district: "", tier: "recruit" as const, populationSaved: 0 });
+    expect((await p.recordDailyEvent(fb("1"))).day).toBe("2027-11-22");
+    clock.t = T0; // corrected
+    const r = await p.recordDailyEvent(fb("2"));
+    expect(r.day).toBe("2026-11-22");
+    expect(r.granted).toHaveLength(1);
+    expect((await p.dailyStatus()).day).toBe("2026-11-22");
+    // One day ahead still holds (flying east, then back west).
+    clock.t = T0 + DAY;
+    expect((await p.recordDailyEvent(fb("3"))).day).toBe("2026-11-23");
+    clock.t = T0 + 2 * HOUR;
+    const back = await p.recordDailyEvent(fb("4"));
+    expect(back.day).toBe("2026-11-23");
+    expect(back.granted).toHaveLength(0);
+  });
+
+  it("an address in the city never reaches the city key, achievements, cells or progress", async () => {
+    const tables = { ...DEFAULT_TABLES, rewards: { ...DEFAULT_TABLES.rewards, coverage: { city_cleared_fraction: 0.75, placeholder_city_area_km2: 3 } } };
+    const seen: string[] = [];
+    const p = await memoryProfile({ clock: new FakeClock(T0), seed: 1n, tables, cityArea: ({ city, cityKey }) => (seen.push(city, cityKey), null) });
+    const raw = "12 Rue de Rivoli, 75004 Paris";
+    const claim = await p.claimMatch(summary({ city: raw, district: "12 Rue de Rivoli" }), null);
+    expect(claim.city).toMatchObject({ city: "Paris", cityKey: "name:paris" });
+    expect(claim.newAchievements.map((a) => a.id)).toEqual(["city_cleared:name:paris:recruit"]);
+    const progress = await p.cityProgress(raw);
+    expect(progress).toMatchObject({ city: "Paris", cityKey: "name:paris" });
+    expect(progress.fractionByTier.recruit).toBeGreaterThan(0);
+    const dump = await p.exportProfile();
+    const placeStrings = [
+      claim.city!.city,
+      claim.city!.cityKey,
+      progress.city,
+      progress.cityKey,
+      ...seen,
+      ...dump.state.achievements.flatMap((a) => [a.id, a.cityKey, a.city]),
+      ...dump.coverage.flatMap((c) => Object.keys(c.cities)),
+      ...dump.matches.flatMap((m) => [m.summary.city, m.summary.district]),
+      ...dump.state.tickets.flatMap((t) => [t.city, t.district]),
+    ];
+    for (const s of placeStrings) {
+      expect(s, s).not.toMatch(/\d/);
+      expect(s.toLowerCase(), s).not.toMatch(/rivoli|rue/);
+    }
+    expect(JSON.stringify(dump)).not.toMatch(/Rivoli|75004/);
+    // Same key as plain "Paris": the coverage counts for one city.
+    expect((await p.cityProgress("Paris")).fractionByTier).toEqual(progress.fractionByTier);
+  });
+
+  it("a city that sanitises to nothing adds coverage but no city key", async () => {
+    const { p } = await fresh();
+    const claim = await p.claimMatch(summary({ city: "12 Rue de Rivoli" }), null);
+    expect(claim.coverageCells).toBeGreaterThan(0);
+    expect(claim.city).toBeNull();
+    const dump = await p.exportProfile();
+    expect(dump.coverage.every((c) => Object.keys(c.cities).length === 0)).toBe(true);
+    expect((await p.cityProgress("12 Rue de Rivoli")).fractionByTier.recruit).toBe(0);
+  });
+
+  it("the defended radius is bounded and finite", async () => {
+    const { p } = await fresh();
+    const max = DEFAULT_TABLES.maxDefendedRadiusM;
+    expect(max).toBe(1300 * 1.5);
+    for (const r of [60000, max + 1, Infinity, NaN, -1]) {
+      await expect(p.claimMatch(summary({ defendedRadiusM: r }), null), String(r)).rejects.toMatchObject({ code: "bad_summary" });
+    }
+    expect((await p.claimMatch(summary({ defendedRadiusM: max }), null)).coverageCells).toBe(cellsInDisc(PARIS, max).length);
+  });
+
+  it("an unknown tier in claimMatch is a bad_summary", async () => {
+    const { p } = await fresh();
+    await expect(p.claimMatch(summary({ tier: "bogus" as never }), null)).rejects.toMatchObject({ code: "bad_summary" });
+  });
+
+  it("a blocked open is reported, not replaced by an empty memory profile", async () => {
+    const fakeReq = (fire: (r: Record<string, unknown>) => void) => {
+      const r: Record<string, unknown> = {};
+      setTimeout(() => fire(r), 0);
+      return r;
+    };
+    const blocked = { open: () => fakeReq((r) => (r.onblocked as () => void)()) } as unknown as IDBFactory;
+    await expect(LocalProfileService.open({ indexedDB: blocked })).rejects.toMatchObject({ code: "storage" });
+  });
+
+  it("a transient open error is retried, then reported", async () => {
+    const real = new IDBFactory();
+    let calls = 0;
+    const failing = (r: Record<string, unknown>) => {
+      r.error = new DOMException("disk hiccup", "UnknownError");
+      (r.onerror as () => void)();
+    };
+    const flaky = {
+      open: (name: string, v: number) => {
+        calls++;
+        if (calls === 1) {
+          const r: Record<string, unknown> = {};
+          setTimeout(() => failing(r), 0);
+          return r;
+        }
+        return real.open(name, v);
+      },
+    } as unknown as IDBFactory;
+    const p = await LocalProfileService.open({ indexedDB: flaky, seed: 1n });
+    expect(p.persistent).toBe(true);
+    expect(calls).toBe(2);
+    p.close();
+    const broken = {
+      open: () => {
+        const r: Record<string, unknown> = {};
+        setTimeout(() => failing(r), 0);
+        return r;
+      },
+    } as unknown as IDBFactory;
+    await expect(LocalProfileService.open({ indexedDB: broken })).rejects.toMatchObject({ code: "storage" });
+  });
 });

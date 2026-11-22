@@ -38,14 +38,15 @@ export function cellsInDisc(center: LatLon, radiusM: number): number[] {
 }
 
 /// Merge a match into existing cells: each cell keeps its highest tier, and
-/// its highest tier per city key. Returns the cells that changed.
-export function mergeCoverage(existing: Map<number, CoverageCell>, cells: number[], tier: Tier, cityKey: string): CoverageCell[] {
+/// its highest tier per city key (`null`: no city, e.g. a name that
+/// sanitised to nothing). Returns the cells that changed.
+export function mergeCoverage(existing: Map<number, CoverageCell>, cells: number[], tier: Tier, cityKey: string | null): CoverageCell[] {
   const changed: CoverageCell[] = [];
   const ti = tierIndex(tier);
   for (const id of cells) {
     const old = existing.get(id);
     if (!old) {
-      const c: CoverageCell = { cell: id, tier, cities: { [cityKey]: tier }, areaM2: cellAreaM2(id), bounds: blockLatLonBounds(id) };
+      const c: CoverageCell = { cell: id, tier, cities: cityKey === null ? {} : { [cityKey]: tier }, areaM2: cellAreaM2(id), bounds: blockLatLonBounds(id) };
       existing.set(id, c);
       changed.push(c);
       continue;
@@ -56,8 +57,8 @@ export function mergeCoverage(existing: Map<number, CoverageCell>, cells: number
       next.tier = tier;
       dirty = true;
     }
-    const prevCity = old.cities[cityKey];
-    if (prevCity === undefined || ti > tierIndex(prevCity)) {
+    const prevCity = cityKey === null ? undefined : old.cities[cityKey];
+    if (cityKey !== null && (prevCity === undefined || ti > tierIndex(prevCity))) {
       next.cities[cityKey] = tier;
       dirty = true;
     }
@@ -97,7 +98,9 @@ export function cellIdsForBox(box: LatLonBox, max = 20000): number[] | null {
 }
 
 /// The achievement key of a city: its stable id when the place search gave
-/// one, else its folded name ("Paris" = "paris" = " PARIS ").
+/// one, else its folded name ("Paris" = "paris" = " PARIS "). Callers pass
+/// the sanitised name (`sanitizePlace`), never a raw geocoder field: the key
+/// is stored in cells and achievement ids.
 export function cityKeyOf(city: string, cityId?: string): string {
   if (cityId && cityId.trim()) return `id:${cityId.trim()}`;
   return "name:" + city.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ");

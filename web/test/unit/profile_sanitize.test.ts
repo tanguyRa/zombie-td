@@ -1,5 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { looksLikeAddress, placeLabel, sanitizePlace } from "../../src/profile/sanitize";
+import { DISTRICT_FIXTURES, STREET_FIXTURES } from "./profile_helpers";
+
+describe("sanitizePlace on a fixed list of real names", () => {
+  it("drops real street names (Catalan, dotted abbreviations, Japanese, Korean, Chinese)", () => {
+    for (const { input, want, banned } of STREET_FIXTURES) {
+      const out = sanitizePlace(input);
+      expect(out, input).toBe(want);
+      expect(out.toLowerCase(), input).not.toContain(banned.toLowerCase());
+    }
+  });
+
+  it("keeps real district names that look a little like streets", () => {
+    for (const name of DISTRICT_FIXTURES) expect(sanitizePlace(name), name).toBe(name);
+  });
+
+  it("Paris arrondissements keep the city, never a digit or a lone generic word", () => {
+    const cases: [string, string][] = [
+      ["Paris 4e Arrondissement", "Paris"],
+      ["1st Arrondissement", ""],
+      ["Marseille 13e Arrondissement", "Marseille"],
+      ["4e Arrondissement, Paris", "Paris"],
+      ["Bezirk 7, Wien", "Wien"],
+      ["3. Bezirk, Wien", "Wien"],
+      ["District 1, Ho Chi Minh City", "Ho Chi Minh City"],
+      ["Arrondissement de Lyon", "Arrondissement de Lyon"],
+    ];
+    for (const [input, want] of cases) {
+      const out = sanitizePlace(input);
+      expect(out, input).toBe(want);
+      expect(out, input).not.toMatch(/\d/);
+    }
+    expect(placeLabel("Paris 4e Arrondissement", "Paris")).toBe("Paris");
+    expect(placeLabel("1st Arrondissement", "Paris")).toBe("Paris");
+  });
+});
 
 describe("sanitizePlace", () => {
   it("keeps plain district and city names", () => {
@@ -28,7 +63,7 @@ describe("sanitizePlace", () => {
     const cases: [string, string][] = [
       ["12 Rue de Rivoli, 75004 Paris", "Paris"],
       ["75004 Paris", "Paris"],
-      ["Paris 4e Arrondissement", "Paris Arrondissement"],
+      ["Paris 4e Arrondissement", "Paris"],
       ["221B Baker Street, London NW1 6XE", "London"],
       ["London SW1A 1AA", "London"],
       ["1600 Pennsylvania Avenue NW, Washington, DC 20500", "Washington"],

@@ -3,7 +3,9 @@ import { crateLore, rollCrate } from "../../src/profile/crates";
 import { DEFAULT_TABLES } from "../../src/profile/data";
 import { CRATE_STREAM, Pcg32 } from "../../src/profile/pcg32";
 import { looksLikeAddress } from "../../src/profile/sanitize";
+import { ProfileError } from "../../src/profile/store";
 import { RARITIES, TIERS } from "../../src/profile/types";
+import { STREET_FIXTURES } from "./profile_helpers";
 
 describe("Pcg32", () => {
   it("matches sim-core's reference stream (seed 42, stream 54)", () => {
@@ -110,6 +112,31 @@ describe("crate lore", () => {
     expect(l).toContain("Le Marais, Paris");
     expect(l).toContain("eighth");
     expect(l).toContain("Veteran");
+  });
+
+  it("on a fixed list of real streets, lore shows the expected place and no street", () => {
+    const rng = new Pcg32(5n, CRATE_STREAM);
+    for (const { input, want, banned } of STREET_FIXTURES) {
+      const label = want ? `${want}, Kyoto` : "Kyoto";
+      for (const source of ["payout", "match_victory", "wave_victory", "first_blood", "hometown"] as const) {
+        const lore = crateLore(rng, DEFAULT_TABLES.rewards, source, input, "Kyoto", 3, "elite");
+        expect(lore, input).toContain(label);
+        expect(lore.toLowerCase(), input).not.toContain(banned.toLowerCase());
+        expect(lore, input).not.toMatch(/\d/);
+      }
+      // The street as the city field: the lore falls back to a generic name or the city.
+      const asCity = crateLore(rng, DEFAULT_TABLES.rewards, "payout", "", input, 3, "elite");
+      expect(asCity, input).toContain(want || "an unnamed district");
+      expect(asCity.toLowerCase(), input).not.toContain(banned.toLowerCase());
+    }
+  });
+
+  it("an unknown tier or source fails with a ProfileError, not a TypeError", () => {
+    const rng = new Pcg32(5n, CRATE_STREAM);
+    const { cards, rewards } = DEFAULT_TABLES;
+    expect(() => rollCrate(rng, cards, rewards, "impossible" as never, 3)).toThrow(ProfileError);
+    expect(() => crateLore(rng, rewards, "payout", "", "Paris", 3, "impossible" as never)).toThrow(ProfileError);
+    expect(() => crateLore(rng, rewards, "nowhere" as never, "", "Paris", 3, "recruit")).toThrow(ProfileError);
   });
 
   it("every lore template is free of street words", () => {

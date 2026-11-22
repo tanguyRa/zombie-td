@@ -4,7 +4,12 @@
 import type { CardsTable, RewardsTable } from "./data";
 import type { Rng } from "./pcg32";
 import { placeLabel } from "./sanitize";
-import { RARITIES, type CrateSource, type Rarity, type Tier } from "./types";
+import { ProfileError } from "./store";
+import { RARITIES, TIERS, type CrateSource, type Rarity, type Tier } from "./types";
+
+export function isTier(t: unknown): t is Tier {
+  return typeof t === "string" && (TIERS as readonly string[]).includes(t);
+}
 
 export interface RolledCard {
   cardId: string;
@@ -37,7 +42,10 @@ export function rollCard(rng: Rng, cards: CardsTable, odds: RewardsTable["crates
   return { cardId: card.id, rarity, foil };
 }
 
+/// Throws ProfileError("bad_ticket") on a tier with no odds (a ticket from
+/// a corrupt or foreign profile), before the RNG moves.
 export function rollCrate(rng: Rng, cards: CardsTable, rewards: RewardsTable, tier: Tier, count: number): RolledCard[] {
+  if (!isTier(tier) || !Object.hasOwn(rewards.crates.odds, tier)) throw new ProfileError("bad_ticket", `no crate odds for tier ${String(tier)}`);
   const odds = rewards.crates.odds[tier];
   return Array.from({ length: count }, () => rollCard(rng, cards, odds));
 }
@@ -53,7 +61,9 @@ export function tierName(t: Tier): string {
 /// source. `{place}` is the sanitised "District, City"; `{wave}` is a word
 /// ("eighth"), so a lore line has no digit; `{tier}` the tier name.
 export function crateLore(rng: Rng, rewards: RewardsTable, source: CrateSource, district: string, city: string, wave: number, tier: Tier): string {
-  const templates = rewards.crates.lore[source];
+  if (!isTier(tier)) throw new ProfileError("bad_ticket", `unknown tier ${String(tier)}`);
+  const templates = Object.hasOwn(rewards.crates.lore, source) ? rewards.crates.lore[source] : undefined;
+  if (!Array.isArray(templates) || templates.length === 0) throw new ProfileError("bad_ticket", `no lore for crate source ${String(source)}`);
   const t = templates[rng.below(templates.length)];
   const w = WAVE_WORDS[Math.min(8, Math.max(1, wave)) - 1];
   return t.replace(/\{place\}/g, placeLabel(district, city)).replace(/\{wave\}/g, w).replace(/\{tier\}/g, TIER_NAMES[tier]);

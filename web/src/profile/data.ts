@@ -58,12 +58,20 @@ export interface ProfileTables {
   cards: CardsTable;
   rewards: RewardsTable;
   difficulty: Record<Tier, DifficultyParams>;
+  /// Largest `defendedRadiusM` a match summary may claim (m). Coverage cells
+  /// are enumerated from the radius, so it must be bounded.
+  maxDefendedRadiusM: number;
 }
+
+/// Slack over the wave-8 radius for the defended-radius bound (a level may
+/// be generated a little larger than the nominal ring).
+export const DEFENDED_RADIUS_SLACK = 1.5;
 
 export const DEFAULT_TABLES: ProfileTables = {
   cards: cardsJson as CardsTable,
   rewards: rewardsJson as RewardsTable,
   difficulty: (config as unknown as { difficulty: Record<Tier, DifficultyParams> }).difficulty,
+  maxDefendedRadiusM: (config as unknown as { wave8_radius_m: number }).wave8_radius_m * DEFENDED_RADIUS_SLACK,
 };
 
 /// Throws on a table that would break the profile (missing tier, odds not
@@ -85,6 +93,7 @@ export function checkTables(t: ProfileTables): void {
     if (!(o.foil >= 0 && o.foil <= 1)) fail(`crates.odds.${tier}.foil out of [0, 1]`);
     for (const r of RARITIES) if (o[r] > 0 && !t.cards.cards.some((c) => c.rarity === r)) fail(`no ${r} card to roll`);
   }
+  if (!(Number.isFinite(t.maxDefendedRadiusM) && t.maxDefendedRadiusM > 0)) fail("maxDefendedRadiusM must be a finite number > 0");
   if (t.rewards.payout.furthest_wave_tickets.length !== 8) fail("payout.furthest_wave_tickets needs 8 entries");
   for (const [k, v] of Object.entries(t.rewards.crates.lore)) if (!v.length) fail(`crates.lore.${k} is empty`);
   if (!t.cards.starter_decks.some((d) => d.id === STARTER_DECK_ID)) fail(`starter deck ${STARTER_DECK_ID} missing`);
@@ -105,6 +114,7 @@ export function tierIndex(t: Tier): number {
 }
 
 export function difficultyOf(tables: ProfileTables, tier: Tier): DifficultyParams {
+  if (!TIERS.includes(tier)) throw new Error(`unknown tier ${String(tier)}`);
   return tables.difficulty[tier];
 }
 

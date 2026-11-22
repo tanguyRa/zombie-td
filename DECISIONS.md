@@ -1051,8 +1051,14 @@ later).
   open (`migrateBundle`, one function per step over the whole bundle). A
   profile written by newer code (data schema or store layout) is refused
   with `schema_too_new`, never wiped and never replaced by an empty memory
-  profile. `openProfileBackend` falls back to memory only when IndexedDB is
-  missing or fails to open; `service.persistent` tells the UI to warn.
+  profile. `openProfileBackend` falls back to memory only when the browser
+  has no usable IndexedDB (missing, or the open fails with `SecurityError`,
+  `InvalidStateError`, `NotSupportedError` or `NotAllowedError`: private
+  mode, storage denied); `service.persistent` tells the UI to warn. An open
+  blocked by another tab is reported (`storage`), and any other open error
+  is retried twice (50 ms, 100 ms) and then reported (`storage`): an empty
+  memory profile must never hide the real one. The UI can offer
+  `memoryProfile()` explicitly.
 - **Every write is one transaction with a revision check.** The service
   reads the state, applies the change to a copy and commits state, matches
   and cells in one readwrite transaction that first checks the stored
@@ -1076,6 +1082,19 @@ later).
   street (street words in a dozen languages next to a name, glued suffixes
   such as `-straße`, `-straat`, `-gatan`, abbreviations such as `St`, `Bd`,
   `ul.`); the first segment left is kept, minus every token with a digit.
+  Also covered: Catalan (`carrer`, `passeig`, `avinguda`, `plaça`,
+  `rambla`, `travessera`), dotted Italian and Spanish abbreviations (`V.le`,
+  `P.za`, `C.so`, `Pº`/`P.º`, `Ctra.`), French `Imp.`, `Fbg`, `Rte`,
+  Japanese `-dōri`, Korean `-ro`, `-gil`, `-daero` (only hyphenated: "San
+  Gil" stays) and Chinese `Lu`, `Jie` as a word next to another word
+  ("Nanjing Lu"). District suffixes (`-gu`, `-ku`, `-dong`) are not street
+  markers ("Gangnam-gu" stays). The tests check a hand-written list of real
+  street names with their expected output, and a list of districts that
+  must stay ("Roppongi", "Le Marais", "Gràcia", "Montmartre", ...), on
+  top of the fuzz test. **A stamp never shows a digit**: ordinals go too,
+  and when one goes the division word next to it goes with it ("Paris 4e
+  Arrondissement" → "Paris", "1st Arrondissement" → "", so the stamp falls
+  back to the city), rather than a mangled "Paris Arrondissement".
   A street word alone is a town ("Rue", "Largo"), and "St" counts only in
   last position ("St Albans" stays). Accepted false positives: areas named
   after a street ("Earls Court") fall back to the city. Limit: a bare
@@ -1116,7 +1135,15 @@ later).
   backwards**: the effective day is the later of today's local date and the
   stored day. Flying west after midnight (or setting the clock back) can't
   reopen a day whose caps are used; flying east starts the next day early,
-  once. Each event has a key (`wave_victory:<match>:<wave>`,
+  once. The stored day is held only while it is plausible: at most one day
+  ahead of today's local day (or no later than today at UTC+14, for the
+  date line). Further ahead, the clock was wrong when it was stored (set a
+  year ahead, then corrected) and today is used, so the caps don't freeze
+  for a year; the cost is one extra set of caps per such clock change, which
+  the server (its own clock) removes. `recordDailyEvent` checks its event
+  like `claimMatch` does: a known tier that is unlocked (`tier_locked`
+  otherwise), an integer wave 1–8, a non-empty match id and a finite
+  population ≥ 0 (`bad_summary` otherwise). Each event has a key (`wave_victory:<match>:<wave>`,
   `match_victory:<match>`, `first_blood:<day>`) kept for all time, so a
   retried or restarted wave never counts twice, even the next day.
 - **Crates**: one ticket opens one crate of `cards_per_crate` (3) cards;
@@ -1125,7 +1152,10 @@ later).
   the player's own address). Each card: rarity from the tier's odds
   (`rewards.json` → `crates.odds`, cumulative against one 24-bit float),
   then a card of that rarity uniformly in `cards.json` order, then foil
-  against a second float. Lore: a template of the crate's source picked
+  against a second float. A ticket that can't open a crate (unknown tier or
+  source, from a corrupt profile) is skipped by `openCrate()` and refused
+  with `bad_ticket` by `openCrate(id)`; `rollCrate` and `crateLore` throw
+  `bad_ticket` on it before the RNG moves. Lore: a template of the crate's source picked
   with the same RNG. The RNG is a **PCG32 port of sim-core's** (same
   seeding, same `below`, checked against the reference stream), stream
   `CRATE_STREAM`, seeded once per profile from `crypto.getRandomValues`
@@ -1145,7 +1175,11 @@ later).
 - **Coverage grid = the map block grid** (`map/blocks.ts`, ~251 m cells),
   not a coarser one: a wave-8 disc (1300 m) is about 84 cells, Paris
   (105 km²) about 1700, so 75% of Paris takes about 15 non-overlapping
-  matches, the 10–20 of GAMEPLAY.md. A cell counts when its **centre** is
+  matches, the 10–20 of GAMEPLAY.md. `defendedRadiusM` must be finite and at most
+  `wave8_radius_m` × 1.5 (1950 m, `ProfileTables.maxDefendedRadiusM`, read
+  from `config.default.json`), else `bad_summary`: the cells are
+  enumerated from the radius. An unknown tier is a `bad_summary` too. A
+  cell counts when its **centre** is
   inside the defended radius (not when it merely touches the disc), so
   the covered area matches the disc's on average (within 15%, tested). Only
   cleared matches add coverage. Each cell keeps its highest tier and its
@@ -1155,8 +1189,12 @@ later).
 - **City cleared**: the area of the cells counted for the city at a tier or
   harder, over the city's area, ≥ `coverage.city_cleared_fraction` (0.75),
   one achievement per tier. The city key is the place search's `cityId`
-  when there is one (OSM relation later), else the folded name ("Paris" =
-  " PARIS "), so homonyms in different countries merge until ids are
+  when there is one (OSM relation later), else the folded **sanitised**
+  name ("Paris" = " PARIS " = "12 Rue de Rivoli, 75004 Paris"): the key is
+  stored in cells and achievement ids, so it goes through `sanitizePlace`
+  like every other place name, in `claimMatch` and in `cityProgress`
+  (which also returns the sanitised name). A city that sanitises to nothing,
+  with no id, still adds coverage but tags no city. Homonyms in different countries merge until ids are
   passed. The area comes from an injected lookup (km², OSM admin boundary
   later); when it is unknown the **placeholder** `placeholder_city_area_km2`
   (100 km²) is used and the achievement is **provisional**. A provisional
@@ -1172,7 +1210,12 @@ later).
   `getMatch` (with the run record, opaque JSON until T4). `exportProfile` /
   `importProfile` dump and restore everything (state, matches, coverage, RNG
   state, claimed ids) for debugging; an older export is migrated, a newer
-  one refused.
+  one refused. The export reads the three stores in one transaction
+  (`ProfileBackend.snapshot`). An import is validated in full after
+  migration and before the commit (`validateBundle`: every state array,
+  the counters, the RNG hex, the daily shape, each match's
+  `summary.matchId`, each cell's id, tiers and bounds); anything malformed
+  is `bad_import` and the current profile is left untouched.
 - **Data tables**: `rewards.json` at the repo root (next to `cards.json`):
   payout, daily caps, crate odds, foil chance, lore templates, coverage
   threshold and placeholder area. `checkTables` validates them when a

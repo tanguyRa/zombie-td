@@ -12,10 +12,15 @@
 //    a name next to it ("Rue de Rivoli", "Via Roma"; alone, "Rue" and
 //    "Largo" are towns), a street
 //    suffix glued to a word ("Hauptstraße", "Kalverstraat", "Drottninggatan"),
-//    or a street abbreviation ("Main St", "Bd Haussmann", "ul. Nowy Świat").
+//    a hyphenated one ("Teheran-ro", "Insadong-gil", "Meiji-dori"), or a
+//    street abbreviation ("Main St", "Bd Haussmann", "ul. Nowy Świat",
+//    "V.le Monza", "P.za Duomo", "Pº de la Castellana", "Ctra. de Valencia").
 // 4. Drop a whole segment holding a house number ("77", "12b", "221B").
 //    In the segments kept, drop every token with a digit, house-number
-//    markers ("No.", "n°", "bis", "ter"), and leftover punctuation.
+//    markers ("No.", "n°", "bis", "ter"), and leftover punctuation. When a
+//    token with a digit went, a division word goes too ("Paris 4e
+//    Arrondissement" -> "Paris", "1st Arrondissement" -> ""): a stamp never
+//    shows a digit, and "Paris Arrondissement" names nothing.
 // 5. Keep the first segment left (the most specific), trimmed to 60 chars.
 //    Nothing left => "" (callers fall back to the city, then to a generic name).
 //
@@ -42,6 +47,10 @@ const STREET_WORDS = new Set([
   "calle", "avenida", "paseo", "plaza", "camino", "carrera", "carretera", "ronda", "travesia", "pasaje",
   "via", "viale", "piazza", "corso", "vicolo", "largo", "strada", "piazzale", "lungomare", "lungotevere",
   "rua", "travessa", "praca", "estrada", "alameda", "beco",
+  // Catalan ("placa" is "plaça" folded)
+  "carrer", "passeig", "avinguda", "placa", "rambla", "travessera",
+  // Japanese, Chinese (romanised; Korean "-ro"/"-gil" are in HYPHEN_SUFFIXES)
+  "dori", "lu", "jie", "dajie",
   // Polish / Czech / Scandinavian / Turkish / Russian
   "ulica", "aleja", "plac", "ulice", "namesti", "trida", "gata", "gatan", "gade", "vej", "vagen", "veien",
   "cadde", "caddesi", "sokak", "sokagi", "bulvar", "bulvari", "mahallesi",
@@ -51,16 +60,29 @@ const STREET_WORDS = new Set([
 /// Street suffixes glued to a name ("Hauptstraße", "Kalverstraat", "Drottninggatan").
 const STREET_SUFFIXES = [
   "strasse", "str", "gasse", "straat", "gracht", "laan", "steeg", "gatan", "vagen", "gade", "vej", "veien",
-  "katu", "tie", "utca", "allee", "platz",
+  "katu", "tie", "utca", "allee", "platz", "daero",
 ];
+
+/// Street suffixes joined with a hyphen ("Teheran-ro", "Insadong-gil",
+/// "Meiji-dori"). Only hyphenated: glued or alone they are ordinary words
+/// ("San Gil", "Ro"). District suffixes ("-gu", "-ku", "-dong") are not here.
+const HYPHEN_SUFFIXES = new Set(["ro", "gil", "daero", "dori"]);
 
 /// Abbreviations that mark a street when they end a segment ("Main St").
 const STREET_ABBREV_LAST = new Set(["st", "rd", "ave", "av", "blvd", "ln", "dr", "ct", "pl", "sq", "hwy", "pkwy", "ter", "cres"]);
 /// Abbreviations that mark a street when they start a segment ("Bd Haussmann", "C/ Mayor").
-const STREET_ABBREV_FIRST = new Set(["av", "ave", "avda", "bd", "bld", "bvd", "blvd", "c/", "c/.", "cl", "pza", "pca"]);
+const STREET_ABBREV_FIRST = new Set(["av", "ave", "avda", "bd", "bld", "bvd", "blvd", "c/", "c/.", "cl", "pza", "pca", "ctra", "pº", "imp", "fbg", "rte", "vle", "pzza", "pzle"]);
 /// The same, only with a dot ("al. Jerozolimskie", "R. Augusta"): without one
 /// they are ordinary words ("Al Ain").
 const STREET_ABBREV_FIRST_DOT = new Set(["al", "ul", "pl", "r", "str", "trav", "av", "c", "pr", "sh"]);
+/// Abbreviations with a dot inside, matched on the whole first token
+/// ("V.le Monza", "P.za Duomo", "C.so Buenos Aires", "P.º de la Castellana").
+const STREET_ABBREV_DOTTED = new Set(["v.le", "p.za", "p.zza", "p.le", "c.so", "l.go", "p.º", "v.lo", "str.da"]);
+
+/// Generic words of an administrative division. When the ordinal before
+/// one is dropped ("Paris 4e Arrondissement"), the word goes too: alone it
+/// names nothing ("Paris Arrondissement").
+const DIVISION_WORDS = new Set(["arrondissement", "arrondissements", "arr", "district", "bezirk", "gemeindebezirk", "ward", "sector", "sektor", "distrito", "municipio", "kerulet", "obvod"]);
 
 /// House-number markers dropped as tokens.
 const NUMBER_MARKERS = new Set(["no", "nº", "n°", "nr", "num", "numero", "number", "bis", "ter", "quater", "#"]);
@@ -101,10 +123,16 @@ function isStreetSegment(seg: string): boolean {
   for (const w of parts) {
     for (const suf of STREET_SUFFIXES) if (w.length > suf.length + 2 && w.endsWith(suf)) return true;
   }
+  // "Teheran-ro", "Insadong-gil", "Meiji-dori": a hyphenated street suffix.
+  for (const w of words) {
+    const hp = w.split("-").filter((p) => p.length > 0);
+    if (hp.length > 1 && HYPHEN_SUFFIXES.has(hp[hp.length - 1])) return true;
+  }
   if (words.length > 1) {
     if (STREET_ABBREV_LAST.has(words[words.length - 1])) return true;
     if (STREET_ABBREV_FIRST.has(words[0])) return true;
     const first = raw[0];
+    if (STREET_ABBREV_DOTTED.has(first.replace(/\.$/, ""))) return true;
     if (first.endsWith(".") && STREET_ABBREV_FIRST_DOT.has(first.slice(0, -1))) return true;
     if (first.includes(".") && STREET_ABBREV_FIRST_DOT.has(first.split(".")[0])) return true;
   }
@@ -118,11 +146,15 @@ function cleanSegment(seg: string): string {
   // address line even without a street word ("Unter den Linden 77"): drop it.
   // Ordinals ("4e", "17th") are not house numbers; their token is dropped below.
   if (s.split(/\s+/).some((t) => /^\d{1,4}([a-d]|-\d{1,4})?[.,]?$/i.test(t))) return "";
-  const tokens = s
-    .split(/\s+/)
+  const all = s.split(/\s+/).filter((t) => t.length > 0);
+  // An ordinal went ("4e", "1st"): its division word goes with it, so
+  // "Paris 4e Arrondissement" is "Paris" and "1st Arrondissement" is "".
+  const droppedNumber = s !== seg || all.some((t) => /\d/.test(t));
+  const tokens = all
     .filter((t) => !/\d/.test(t)) // before trimming: "4e" must go, not become "e"
     .map((t) => t.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "")) // edge punctuation (keeps inner hyphens and apostrophes)
-    .filter((t) => t.length > 0 && !NUMBER_MARKERS.has(fold(t).replace(/\.$/, "")));
+    .filter((t) => t.length > 0 && !NUMBER_MARKERS.has(fold(t).replace(/\.$/, "")))
+    .filter((t) => !(droppedNumber && DIVISION_WORDS.has(fold(t).replace(/\.$/, ""))));
   return tokens.join(" ");
 }
 

@@ -10,7 +10,7 @@
 // timezone, not the client clock) and the crate RNG.
 
 import { cellIdsForBox, cellsInBox, cellsInDisc, cityFractions, cityKeyOf, mergeCoverage } from "./coverage";
-import { crateLore, rollCrate } from "./crates";
+import { crateLore, isTier, rollCrate } from "./crates";
 import { DEFAULT_TABLES, STARTER_DECK_ID, checkTables, difficultyOf, mirrorValidateDeck, starterCardIds, tierIndex, type DifficultyParams, type ProfileTables } from "./data";
 import { CRATE_STREAM, Pcg32, randomSeed } from "./pcg32";
 import { checkSummary, computePayout, effectiveDay, localDay, systemClock, type Clock } from "./rewards";
@@ -21,6 +21,7 @@ import {
   SCHEMA_VERSION,
   migrateBundle,
   openProfileBackend,
+  validateBundle,
   MIGRATIONS,
   type Bundle,
   type Migration,
@@ -206,7 +207,10 @@ export class LocalProfileService implements ProfileService {
   }
 
   private async load(): Promise<ProfileState> {
-    const s = await this.backend.loadState();
+    return this.checked(await this.backend.loadState());
+  }
+
+  private checked(s: ProfileState | undefined): ProfileState {
     if (!s) throw new ProfileError("storage", "no profile");
     if (s.schema !== this.schema) throw new ProfileError("schema_too_new", `profile schema ${s.schema}, expected ${this.schema}`);
     return s;
@@ -443,6 +447,7 @@ export class LocalProfileService implements ProfileService {
     return { areaKm2: this.tables.rewards.coverage.placeholder_city_area_km2, provisional: true };
   }
 
+  /// `city` is already sanitised.
   private async progress(cells: CoverageCell[], city: string, cityId: string | undefined): Promise<CityProgress> {
     const cityKey = cityKeyOf(city, cityId);
     const { areaKm2, provisional } = await this.cityArea(city, cityId, cityKey);
@@ -482,7 +487,7 @@ export class LocalProfileService implements ProfileService {
         const old = await this.backend.getMatch(summary.matchId);
         return { paid: false, payout: old?.payout ?? none, tickets: [], daily: null, unlockedTiers: [], coverageCells: 0, city: null, newAchievements: [] };
       }
-      const problems = checkSummary(summary);
+      const problems = checkSummary(summary, this.tables.maxDefendedRadiusM);
       if (problems.length) throw new ProfileError("bad_summary", problems.join("; "));
       const ti = tierIndex(summary.tier);
       if (ti > s.highestClearedTier + 1) throw new ProfileError("tier_locked", `${summary.tier} is locked`);
@@ -509,17 +514,23 @@ export class LocalProfileService implements ProfileService {
           unlockedTiers.push(...this.unlocked(ti).filter((t) => !before.includes(t)));
         }
         // Coverage: cells inside the defended (wave-8) radius, highest tier per cell.
-        const cityKey = cityKeyOf(summary.city, summary.cityId);
+        // The city key is built from the sanitised name (it is stored in cells
+        // and achievement ids); a name that sanitises to nothing, with no id,
+        // tags no city and counts for no city achievement.
+        const cityName = sanitizePlace(summary.city);
+        const cityKey = cityName || summary.cityId?.trim() ? cityKeyOf(cityName, summary.cityId) : null;
         const ids = cellsInDisc(summary.center, summary.defendedRadiusM);
         const existing = new Map((await this.backend.getCells(ids)).map((c) => [c.cell, c]));
         const changed = mergeCoverage(existing, ids, summary.tier, cityKey);
-        tx.cells.push(...changed);
+        for (const c of changed) tx.cells.push(c); // a loop: spreading many cells overflows the stack
         coverageCells = changed.length;
-        // City progress over every cell (including this match's).
-        const all = new Map((await this.backend.allCells()).map((c) => [c.cell, c]));
-        for (const c of changed) all.set(c.cell, c);
-        city = await this.progress([...all.values()], summary.city, summary.cityId);
-        newAchievements = this.applyAchievements(s, city);
+        if (cityKey !== null) {
+          // City progress over every cell (including this match's).
+          const all = new Map((await this.backend.allCells()).map((c) => [c.cell, c]));
+          for (const c of changed) all.set(c.cell, c);
+          city = await this.progress([...all.values()], cityName, summary.cityId);
+          newAchievements = this.applyAchievements(s, city);
+        }
       }
 
       // History keeps the sanitised names (a UI listing it can't show a street).
@@ -532,7 +543,15 @@ export class LocalProfileService implements ProfileService {
   recordDailyEvent(e: DailyEvent): Promise<DailyResult> {
     return this.mutate((tx) => {
       const s = tx.state;
+      if (!e || typeof e !== "object") throw new ProfileError("bad_summary", "not a daily event");
       if (e.kind !== "first_blood" && e.kind !== "wave_victory") throw new ProfileError("bad_summary", `unknown daily event ${String(e.kind)}`);
+      if (typeof e.matchId !== "string" || !e.matchId) throw new ProfileError("bad_summary", "matchId is empty");
+      if (!(Number.isInteger(e.wave) && e.wave >= 1 && e.wave <= 8)) throw new ProfileError("bad_summary", `wave must be 1..8, not ${String(e.wave)}`);
+      if (!(typeof e.populationSaved === "number" && Number.isFinite(e.populationSaved) && e.populationSaved >= 0)) {
+        throw new ProfileError("bad_summary", `populationSaved must be a finite number >= 0, not ${String(e.populationSaved)}`);
+      }
+      if (!isTier(e.tier)) throw new ProfileError("bad_summary", `unknown tier ${String(e.tier)}`);
+      if (tierIndex(e.tier) > s.highestClearedTier + 1) throw new ProfileError("tier_locked", `${e.tier} is locked`);
       const day = this.rollDay(s);
       const key = e.kind === "first_blood" ? `first_blood:${day}` : `wave_victory:${e.matchId}:${e.wave}`;
       const n = this.tables.rewards.daily[e.kind].tickets;
@@ -598,11 +617,25 @@ export class LocalProfileService implements ProfileService {
     return this.mutate((tx) => {
       const s = tx.state;
       if (s.tickets.length === 0) throw new ProfileError("no_ticket", "no resupply ticket left");
-      const i = ticketId === undefined ? 0 : s.tickets.findIndex((t) => t.id === ticketId);
-      if (i < 0) throw new ProfileError("unknown_ticket", `no ticket ${ticketId}`);
+      let i: number;
+      if (ticketId === undefined) {
+        // The oldest ticket that can open a crate: an unusable one (unknown
+        // tier or source, from a corrupt profile) is skipped, not fatal.
+        i = s.tickets.findIndex((t) => this.usableTicket(t));
+        if (i < 0) throw new ProfileError("bad_ticket", `${s.tickets.length} ticket(s) left, none can open a crate (unknown tier or source)`);
+      } else {
+        i = s.tickets.findIndex((t) => t.id === ticketId);
+        if (i < 0) throw new ProfileError("unknown_ticket", `no ticket ${ticketId}`);
+        if (!this.usableTicket(s.tickets[i])) throw new ProfileError("bad_ticket", `ticket ${ticketId} can't open a crate (unknown tier or source)`);
+      }
       const [t] = s.tickets.splice(i, 1);
       return this.open(s, t.source, t, t.id, this.tables.rewards.crates.cards_per_crate);
     });
+  }
+
+  private usableTicket(t: Ticket): boolean {
+    const c = this.tables.rewards.crates;
+    return isTier(t?.tier) && Object.hasOwn(c.odds, t.tier) && typeof t.source === "string" && Object.hasOwn(c.lore, t.source);
   }
 
   claimHometownCrate(matchId: string): Promise<CrateOpening> {
@@ -644,8 +677,10 @@ export class LocalProfileService implements ProfileService {
     });
   }
 
+  /// `city` is sanitised as in `claimMatch` (same key; the name returned is
+  /// the sanitised one).
   cityProgress(city: string, cityId?: string): Promise<CityProgress> {
-    return this.serial(async () => this.progress(await this.backend.allCells(), city, cityId));
+    return this.serial(async () => this.progress(await this.backend.allCells(), sanitizePlace(city), cityId));
   }
 
   achievements(): Promise<Achievement[]> {
@@ -669,23 +704,37 @@ export class LocalProfileService implements ProfileService {
   // ---- export / import ---------------------------------------------------------------
 
   exportProfile(): Promise<ProfileExport> {
-    return this.serial(async () => ({
-      format: "zt-profile-export" as const,
-      schema: this.schema,
-      exportedAt: this.nowIso(),
-      state: await this.load(),
-      matches: await this.backend.allMatches(),
-      coverage: await this.backend.allCells(),
-    }));
+    return this.serial(async () => {
+      // One read transaction: another tab's commit can't land between the
+      // state and the matches.
+      const snap = await this.backend.snapshot();
+      return {
+        format: "zt-profile-export" as const,
+        schema: this.schema,
+        exportedAt: this.nowIso(),
+        state: this.checked(snap.state),
+        matches: snap.matches,
+        coverage: snap.coverage,
+      };
+    });
   }
 
   /// Replace the whole profile with an export (older schemas are migrated).
+  /// The migrated bundle is validated in full before anything is written: a
+  /// malformed export throws `bad_import` and the profile stays as it was.
   importProfile(data: ProfileExport): Promise<void> {
     return this.serial(async () => {
       if (!data || data.format !== "zt-profile-export" || !data.state || !Array.isArray(data.matches) || !Array.isArray(data.coverage)) {
         throw new ProfileError("bad_import", "not a profile export");
       }
-      const b: Bundle = migrateBundle({ state: data.state, matches: data.matches, coverage: data.coverage }, this.schema, this.migrations);
+      let b: Bundle;
+      try {
+        b = migrateBundle({ state: data.state, matches: data.matches, coverage: data.coverage }, this.schema, this.migrations);
+      } catch (e) {
+        if (e instanceof ProfileError) throw e;
+        throw new ProfileError("bad_import", `the export could not be migrated: ${String((e as Error)?.message ?? e)}`);
+      }
+      validateBundle(b);
       const cur = await this.backend.loadState();
       b.state.revision = (cur?.revision ?? 0) + 1;
       await this.backend.commit({ expectedRevision: cur?.revision ?? null, state: b.state, matches: b.matches, cells: b.coverage, replaceAll: true });
