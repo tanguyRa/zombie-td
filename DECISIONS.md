@@ -860,3 +860,168 @@ Every choice the spec left open, and every simplification, in one place.
   build as the game and calls the existing `fixture_hash` export. No new
   WASM export was needed. It runs on the main thread; the worker uses the
   same module, so the engine and the result are the same.
+
+## Map blocks (T6a)
+
+The streaming-map library lives in `web/src/map/` (not wired into the game
+yet: that comes after T5).
+
+- **The grid is a lat/lon grid, not Web Mercator.** Rows are 1/440° of
+  latitude (110540 / 440 = 251.2 m). Each row has a whole number of equal
+  columns around the globe, `round(360 × 440 × cos(mid-lat) × 111320 /
+  110540)`, so blocks are about 251 m square everywhere. Every block is a
+  lat/lon rectangle, and the level projection is linear in lat and in lon
+  separately, so a block projects to an exact axis-aligned rectangle for any
+  match centre and neighbours share their projected edges bit for bit (the
+  sim-core tiling contract). Web Mercator blocks would also be lat/lon
+  rectangles, but their size in meters drifts with latitude and their edges
+  need `atan(sinh())`. Rows don't align their columns, which tiling doesn't
+  need. The antimeridian isn't handled (no match centre near ±180°).
+- **Block id = `row × 2^18 + col`**, row 0 at the south pole. Columns per
+  row are at most about 163 000 < 2^18 and rows 79 200, so ids are below
+  2^35: a plain JS safe integer, a JSON number and a Rust `u64`, with no
+  string encoding. The Paris fixture centre's block is 16016265130 (pinned
+  in a test: changing the grid breaks every cache and run record).
+- **`detCos` instead of `Math.cos`.** The column count and the projection
+  use a cosine computed with + − × ÷ only (Taylor series to x^24, |x| ≤
+  π/2), because `Math.cos` is implementation-defined and could differ by an
+  ulp between browsers, moving a block edge or a building by a centimetre
+  and so the snapshot hash. `levelgen.ts` now uses the same shared
+  projection (`map/osm.ts`); the Python tool keeps `math.cos` (identical
+  after cm rounding in practice).
+- **A building belongs to the block containing its anchor vertex**: the
+  lexicographically smallest (lat, then lon) vertex of its ring (closing
+  vertex excluded), so the rule doesn't depend on the ring's starting
+  vertex or direction. It has to be a vertex: Overpass `way(bbox)` returns
+  a way only when one of its vertices or segments is in the box, and the
+  vertex lies in its block's (padded) box, so that block's own query always
+  returns it. The first version used the vertex mean, which can fall in a
+  block that no vertex or segment enters (a C-shaped building around it):
+  the building was then lost when that block was fetched alone, and found
+  when it was batched with a neighbour, so a block's content depended on
+  the batching. The Overpass query for a batch is a union of
+  `way["building"](bbox)` boxes (each padded by 1e-6°); ways owned by other
+  blocks are dropped. Only ways, like `levelgen.ts` (no multipolygon
+  relations). The test fake answers with the same vertex-or-segment rule.
+- **An Overpass runtime error is a failure, never an empty block.** On a
+  timeout or out-of-memory Overpass answers HTTP 200 with
+  `remark: "runtime error: …"` and partial or empty `elements`. A `remark`
+  containing "error", an unparsable body or a body whose `elements` is not
+  an array counts as a failed endpoint (`overpassQuery` tries the next one,
+  then the loader's retry), so it is never cached. `levelgen.ts` shares the
+  check.
+- **The cache stores raw lat/lon** (`[lat, lon, ...]`, not closed), the
+  derived kind and floors, the fetch date and a content hash (FNV-1a 64 of
+  `JSON.stringify([id, [[bid, kind, floors, ring], ...]])`). The schema
+  version is the IndexedDB version: opening with another version drops the
+  store (an older build opening a newer database deletes and recreates it).
+  **Schema 2**: anchor-vertex assignment, error remarks rejected, floors
+  rounded half up. Empty blocks are cached too, so a second visit makes no
+  request. The cache is best effort both ways: a failed `put` or `getMany`
+  doesn't fail the load (a failed read counts as nothing cached). When
+  another tab opens a newer schema, `onversionchange` closes the connection
+  and the cache marks itself closed: reads then return nothing and writes
+  are no-ops. `openBlockCache()` falls back to `MemoryBlockCache` when
+  IndexedDB is missing or the open fails or is blocked. Blocks never expire
+  by default; `MapLoader`'s `maxAgeMs` option re-fetches older ones.
+- **Projection rules** (`projectBlock`): the level projection relative to
+  the match centre, rounded to cm like level packs (half up, see below); bounds are the projected
+  block corners rounded to cm (the same rounding on a shared edge, so tiling
+  stays exact). A building with a vertex more than 49.9 m outside its block
+  is **clipped** to the block grown by 49.9 m (Sutherland–Hodgman), not
+  dropped; the 0.1 m below `block_margin_m` absorbs cm rounding and f32.
+  The part beyond is lost (no other block has it). Trade-off of the anchor
+  vertex: it is the building's southernmost vertex, so the building can
+  stick out of its block by up to its full depth (north) or width (east or
+  west), against about half of it under the vertex mean. A building 50 to
+  100 m across is therefore more likely to be clipped, and one much larger
+  than 50 m (a station, a museum) loses whatever lies beyond 49.9 m. On the
+  Marais fixture nothing is clipped, but the worst overshoot is 49.4 m
+  (30.8 m with the vertex mean); `loader.test.ts` reports both. Buildings
+  under 15 m² are dropped, as in `levelgen.ts`. Buildings are sorted by OSM
+  id.
+- **`abort()` is final, even with a warm cache.** `start()` checks the
+  signal before and after loading the initial blocks, so it rejects with an
+  AbortError even when every block came from the cache without a network
+  wait. After an abort no block is added and no `chunk` or `ring` event is
+  emitted: cache hits are skipped and the put loop checks the signal before
+  each block. This holds when a listener aborts mid-event: the remaining
+  `chunk`/`ring` listeners are skipped and no `ring` event follows the
+  `chunk` that triggered the abort.
+- **Listeners can't break the loader.** Each `chunk`, `ring` and `error`
+  listener is called in its own try/catch: a throw (in the planned wiring,
+  `match.add_buildings` returning an error) is not a network failure, so it
+  causes no refetch, no extra query, no `error` event and no failed block,
+  and `start()` still resolves. The error goes to the `listenerError` event;
+  with no `listenerError` listener (or when that one throws) it is rethrown
+  from `queueMicrotask`, so it shows as an uncaught error in the console
+  without touching the load.
+- **Map snapshot hash** (`snapshotHash`, for the run record in T4):
+  FNV-1a 64 (offset 0xcbf29ce484222325, prime 0x100000001b3) over the UTF-8
+  bytes of `"zt-map-v1\n"` followed by, for each chunk in ascending block
+  id order, its canonical line and `"\n"`. The canonical line is the
+  compact JSON `[block_id,[x0,y0,x1,y1],[[id,"kind",floors_dm,[x,y,x,y,...]],...]]`
+  with buildings in id order, coordinates as integer centimetres
+  (`floor(v × 100 + 0.5)`) and floors as integer tenths
+  (`floor(floors × 10 + 0.5)`). Result: 16 lowercase hex digits. Integers
+  make it portable: Rust gets the same bytes from its f32 chunks with
+  `(v as f64 * 100.0 + 0.5).floor() as i64` and `serde_json::to_string`
+  of the same tuple shape (`crates/sim-core/tests/t6_chunks.rs` does this
+  and checks the fixture's hashes; T4 moves it into sim-core). It hashes the
+  projected chunks (what the sim consumes), so it depends on the match
+  centre; the per-block content hash of the raw data is kept alongside
+  (`MapLoader.blockHashes()`). JS computes FNV in 16-bit limbs, checked
+  against a BigInt reference.
+- **Rounding is `floor(v + 0.5)` everywhere** (cm coordinates and bounds,
+  the canonical line's centimetres and tenths, floors from tags), written
+  literally as `Math.floor(v + 0.5)` in JS (`roundHalfUp` in `map/osm.ts`).
+  A server-side port must use that formula, not its language's `round`:
+  Rust's `f64::round` rounds negative halves away from zero (−12.5 → −13,
+  where JS gives −12), and coordinates west and south of the centre are
+  negative.
+- **Loader order:** waves are the rings of discs of radius
+  `ring_radius + block_margin_m + coverageSlackM`; wave w's blocks touch
+  disc w but not disc w−1 (a 5 cm slack counts tangent blocks).
+  `coverageSlackM` defaults to one cell diagonal (`cell_size_m × √2`, read
+  from `config.default.json`: 2.83 m): today's sim-core `ring_ready` checks
+  the cells within `ring_radius + block_margin_m`, and a pending fix widens
+  that to `+ cell_size_m × √2` for cells straddling the disc. The larger
+  disc is a superset of both, so the JS loader is right with either rule
+  (`MapLoader.ringReady` implies sim-core's). `start()` loads waves 1–2
+  (cache first, then Overpass) and resolves with their chunks; the rest
+  follows in wave order, closest block first, 6 blocks per query, 2
+  queries in flight, 5 attempts with backoff from 1 s doubling. A
+  background batch that still fails emits `error` and waits for
+  `retryFailed()`. `start()`'s chunks are not emitted as `chunk` events, so
+  each block reaches the sim once. `matchRingRadii` ports
+  `Match::ring_radii` (f32 via `Math.fround`) for squeezed levels.
+- **Loader failures and abort.** Every exit from a load (success, failure,
+  abort) releases the blocks it claimed and didn't load, so `start()` can
+  be called again after it rejects and only fetches the initial blocks
+  still missing (concurrent calls share one load; after a success it
+  returns the same chunks). `abort()` cuts requests and backoff sleeps
+  short (the sleep is raced against the abort signal, whatever `sleep`
+  option is given). Pending `whenRingReady(w)` promises reject with an
+  `AbortError` on abort, and with "map ring w can't be loaded" once a block
+  that wave needs failed all its attempts (initial or background); after
+  `retryFailed()` or a new `start()` they can be awaited again.
+- **Unit tests run under Vitest in Node** (`npm run test:unit`, config in
+  `web/vitest.config.ts`, tests in `web/test/unit/`, typechecked with
+  `@types/node` through `web/test/tsconfig.json` so the browser code keeps
+  its DOM-only types). The fixtures rebuild Overpass ways from the committed
+  `levels/paris-marais.json` (inverse projection, 7 decimals) and a fake
+  Overpass server answers the bbox queries; no network.
+- **Rust fixture:** `npm run fixtures:chunks` writes
+  `crates/sim-core/tests/fixtures/map_chunks.json` (`BuildingChunk[]`, the
+  Paris buildings as a 500 m streaming level) and `map_chunks.meta.json`
+  (centre, schema, margin, slack, ring radii, waves 1–2 block ids, snapshot
+  hashes); the unit test fails when they are stale. 500 m rather than the
+  pack's 400 m because on a 400 m level ring 3 is only 33 m past ring 2 and
+  the waves 1–2 blocks already cover it. `crates/sim-core/tests/t6_chunks.rs`
+  reads it: `Match::new_streaming` with the waves 1–2 chunks gives
+  `ring_ready(1)`, `ring_ready(2)` and not `ring_ready(3)`; every other chunk
+  is accepted by `add_buildings`; then `ring_ready(8)`; and the snapshot
+  hashes recomputed in Rust equal the JS ones.
+- **`levelgen.ts`'s grow-the-radius logic stays** for now (the current
+  game still uses it); retiring or porting it to blocks is part of the
+  integration step.
