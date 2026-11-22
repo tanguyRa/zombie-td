@@ -718,6 +718,13 @@ Every choice the spec left open, and every simplification, in one place.
   while `npm run dev` is up. Its command runs `npm run wasm` first, so a bare
   `npx playwright test` never tests a stale WASM build (the rebuild is
   incremental, a few seconds).
+  The port is `PW_PORT` (default 5199) and a running server is reused only
+  with `PW_REUSE=1`: by default a busy port fails the run, so a leftover Vite
+  or another worktree's server is never tested by mistake.
+- **The smoke test sizes its own timeout** from `max_game_seconds` in
+  `config.default.json`: the result-panel wait is `max_game_seconds / 4 × 1.5`
+  (a game that hits the time limit at 4×, plus slack for slow browsers), and
+  the test timeout adds the setup waits on top.
 - **Tests run offline.** A shared fixture (`web/e2e/offline.ts`) routes every
   request: the Vite server passes, the OpenFreeMap style URL gets a blank
   local style (`e2e/fixtures/style.json`, one background layer) so MapLibre

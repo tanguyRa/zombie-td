@@ -90,7 +90,14 @@ npx playwright test e2e/determinism.spec.ts      # one file
 ```
 
 Playwright starts its own Vite server on port 5199 (after `npm run wasm`), so
-`npm run dev` can stay up. The tests need no network: map tiles, search and
+`npm run dev` can stay up. Two environment variables change that:
+
+- `PW_PORT=5288 npx playwright test` uses another port, for example to run a
+  second worktree's tests at the same time. If the port is busy the run fails
+  at once (`--strictPort`) instead of testing whatever server is there.
+- `PW_REUSE=1` reuses a server already running on that port instead. It skips
+  `npm run wasm`, so rebuild the WASM yourself first.
+ The tests need no network: map tiles, search and
 Overpass are blocked and the built-in levels are used. The Docker image has
 the browsers already, and `./run-all.sh` runs these tests too.
 
