@@ -91,12 +91,15 @@ pub enum Action {
     /// Play the card at `hand_index` on `target` (pays its supply cost).
     /// Fortifications and armaments in prep, tactical cards while running.
     PlayCard { hand_index: u32, target: Target },
-    /// Prep only, once per wave, before any card is played: the hand goes to
-    /// the bottom of the deck and as many cards are drawn (`mulligan_cost`).
+    /// Prep only, once per wave, before any card is played: as many cards
+    /// are drawn as the hand holds (the discard is reshuffled if the deck
+    /// runs short), then the old hand goes to the bottom of the deck
+    /// (`mulligan_cost`).
     Mulligan,
     /// Choose which unplayed cards (at most `hand_keep`) stay in hand for the
     /// next wave; the rest are discarded when its prep opens. Without a
-    /// choice, the first `hand_keep` cards of the hand stay.
+    /// choice this wave, the first `hand_keep` cards of the hand stay; an
+    /// empty list is a choice (keep nothing). The last choice counts.
     KeepCards { hand_indices: Vec<u32> },
     /// Prep only: restore a fence structure to full hp (broken cells too)
     /// for supply.
@@ -300,9 +303,26 @@ pub struct Structure {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StructureKind {
     /// Fence cells this structure built (a later fence over a broken cell
-    /// takes it over), each with `cell_hp` when intact.
-    Fence { cells: Vec<u32>, cell_hp: f32, length_m: f32 },
+    /// takes it over), each with `cell_hp` when intact. `taken_over`: the
+    /// broken cells it took from older fences, given back on pull-down.
+    Fence {
+        cells: Vec<u32>,
+        cell_hp: f32,
+        length_m: f32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        taken_over: Vec<TakenCell>,
+    },
     Garrison { buildings: Vec<u32> },
+}
+
+/// A broken fence cell a newer fence took over from an older one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TakenCell {
+    pub cell: u32,
+    /// Id of the structure that owned it.
+    pub from: u32,
+    /// Its position in that structure's `cells` before the takeover.
+    pub index: u32,
 }
 
 /// Supply granted when a prep opened.
@@ -379,6 +399,9 @@ struct CardState {
     /// `CARD_EFFECTS` stream of the current wave, re-created at Start.
     effects_rng: Pcg32,
     mulligan_used: bool,
+    /// `KeepCards` was applied since this prep opened (the keep marks are
+    /// the player's choice, even if none is set).
+    keep_chosen: bool,
     /// Cards played since this prep opened (pull-downs of same-prep plays
     /// take theirs back).
     played_this_prep: u32,
@@ -399,6 +422,7 @@ impl CardState {
             deck_rng: Pcg32::new(seed, streams::stream(streams::DECK, 0)),
             effects_rng: Pcg32::new(seed, streams::stream(streams::CARD_EFFECTS, 0)),
             mulligan_used: false,
+            keep_chosen: false,
             played_this_prep: 0,
             played_this_wave: 0,
             structures: Vec::new(),
@@ -431,6 +455,20 @@ impl CardState {
             self.hand.push(HandCard { card, keep: false });
         }
     }
+}
+
+/// One direct change to the card state (`Match::debug_edit_cards`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub enum DebugCardEdit {
+    Supply(u32),
+    /// Swap two positions (raw indices; the deck's next card is the last).
+    SwapHand(usize, usize),
+    SwapDeck(usize, usize),
+    SwapDiscard(usize, usize),
+    Keep(usize, bool),
+    KeepChosen(bool),
+    MulliganUsed(bool),
 }
 
 /// The game state a retry restores (everything but the inputs).
@@ -879,15 +917,26 @@ impl Match {
                     return Err(ActionError::Placement { reason: format!("fence is {len:.0} m, {} allows {length_m:.0} m", def.name) });
                 }
                 let cells = sim.build_fence_cells(&open, *cell_hp);
-                // A broken cell of an older fence now belongs to this one.
+                // A broken cell of an older fence now belongs to this one;
+                // remember where it came from for a pull-down.
                 let mut sorted = cells.clone();
                 sorted.sort_unstable();
+                let mut taken_over = Vec::new();
                 for st in self.state.cards.structures.iter_mut() {
+                    let from = st.id;
                     if let StructureKind::Fence { cells: old, .. } = &mut st.kind {
-                        old.retain(|c| sorted.binary_search(c).is_err());
+                        let mut index = 0u32;
+                        old.retain(|&c| {
+                            let taken = sorted.binary_search(&c).is_ok();
+                            if taken {
+                                taken_over.push(TakenCell { cell: c, from, index });
+                            }
+                            index += 1;
+                            !taken
+                        });
                     }
                 }
-                structure = Some(StructureKind::Fence { cells, cell_hp: *cell_hp, length_m: len });
+                structure = Some(StructureKind::Fence { cells, cell_hp: *cell_hp, length_m: len, taken_over });
             }
             (Effect::Garrison { buildings, weapon }, Target::Buildings(bs)) => {
                 if bs.is_empty() {
@@ -999,11 +1048,19 @@ impl Match {
         cs.supply -= cost;
         cs.mulligan_used = true;
         let n = cs.hand.len() as u32;
-        // Bottom of the deck (index 0), hand order kept: the first hand card
-        // ends up at the very bottom.
-        let back: Vec<u16> = cs.hand.drain(..).map(|h| h.card).collect();
-        cs.deck.splice(0..0, back);
+        // Draw the new hand first, the old one set aside: if the deck runs
+        // short the discard is reshuffled into it (`draw`), so an old card
+        // only comes back once every other card has been drawn.
+        let old: Vec<u16> = cs.hand.drain(..).map(|h| h.card).collect();
         cs.draw(n);
+        let short = n - cs.hand.len() as u32;
+        // Bottom of the deck (index 0), hand order kept: the first old card
+        // ends up at the very bottom.
+        cs.deck.splice(0..0, old);
+        if short > 0 {
+            // Deck and discard ran dry: the rest comes from the old hand.
+            cs.draw(short);
+        }
         Ok(())
     }
 
@@ -1024,6 +1081,7 @@ impl Match {
         for (i, h) in cs.hand.iter_mut().enumerate() {
             h.keep = idx.contains(&(i as u32));
         }
+        cs.keep_chosen = true;
         Ok(())
     }
 
@@ -1102,12 +1160,26 @@ impl Match {
         let st = self.state.cards.structures.remove(k);
         let sim = &mut self.state.sim;
         match &st.kind {
-            StructureKind::Fence { cells, .. } => {
+            StructureKind::Fence { cells, taken_over, .. } => {
                 for &c in cells {
                     let c = c as usize;
                     if sim.grid.kind[c] == FENCE {
                         sim.grid.set_kind(c, WALK);
                         sim.grid.fence_hp[c] = 0.0;
+                    }
+                }
+                // Cells taken over from older fences go back to them, broken
+                // as they were (open ground, 0 hp), at their old position.
+                // Only those this fence still holds, and only to a fence that
+                // still stands. Ascending original index rebuilds the order.
+                for t in taken_over {
+                    if !cells.contains(&t.cell) {
+                        continue;
+                    }
+                    let owner = self.state.cards.structures.iter_mut().find(|s| s.id == t.from);
+                    if let Some(Structure { kind: StructureKind::Fence { cells: old, .. }, .. }) = owner {
+                        let at = (t.index as usize).min(old.len());
+                        old.insert(at, t.cell);
                     }
                 }
             }
@@ -1219,10 +1291,10 @@ impl Match {
         if k == 1 {
             cs.shuffle_deck();
         } else {
-            let marked = cs.hand.iter().any(|h| h.keep);
+            let chosen = cs.keep_chosen;
             let mut kept = Vec::new();
             for (i, h) in cs.hand.drain(..).enumerate() {
-                let keep = if marked { h.keep } else { (i as u32) < mc.hand_keep };
+                let keep = if chosen { h.keep } else { (i as u32) < mc.hand_keep };
                 if keep && (kept.len() as u32) < mc.hand_keep {
                     kept.push(HandCard { card: h.card, keep: false });
                 } else {
@@ -1233,6 +1305,7 @@ impl Match {
         }
         cs.draw(mc.hand_draw);
         cs.mulligan_used = false;
+        cs.keep_chosen = false;
         cs.played_this_prep = 0;
         cs.played_this_wave = 0;
         let h = self.state_hash();
@@ -1513,6 +1586,20 @@ impl Match {
     pub fn debug_deck_ids(&self) -> Vec<&str> {
         self.state.cards.deck.iter().rev().map(|&c| self.card_def(c).id.as_str()).collect()
     }
+    /// Change one piece of card state directly. Tests only (hash coverage).
+    #[doc(hidden)]
+    pub fn debug_edit_cards(&mut self, edit: DebugCardEdit) {
+        let cs = &mut self.state.cards;
+        match edit {
+            DebugCardEdit::Supply(v) => cs.supply = v,
+            DebugCardEdit::SwapHand(i, j) => cs.hand.swap(i, j),
+            DebugCardEdit::SwapDeck(i, j) => cs.deck.swap(i, j),
+            DebugCardEdit::SwapDiscard(i, j) => cs.discard.swap(i, j),
+            DebugCardEdit::Keep(i, v) => cs.hand[i].keep = v,
+            DebugCardEdit::KeepChosen(v) => cs.keep_chosen = v,
+            DebugCardEdit::MulliganUsed(v) => cs.mulligan_used = v,
+        }
+    }
     /// The discard pile, oldest first (public information).
     pub fn discard_ids(&self) -> Vec<&str> {
         self.state.cards.discard.iter().map(|&c| self.card_def(c).id.as_str()).collect()
@@ -1643,7 +1730,9 @@ impl Match {
             eat_dyn(&a.to_le_bytes());
             eat_dyn(&b.to_le_bytes());
         }
-        eat_dyn(&[cs.mulligan_used as u8]);
+        // Both flags in one byte: bit 1 (keep choice) is new in the T3
+        // review fixes and 0 in every older run, so older hashes still hold.
+        eat_dyn(&[cs.mulligan_used as u8 | (cs.keep_chosen as u8) << 1]);
         for v in [cs.played_this_prep, cs.played_this_wave, cs.next_structure_id, cs.reshuffles, cs.income.base, cs.income.civilians] {
             eat_dyn(&v.to_le_bytes());
         }
@@ -1653,12 +1742,22 @@ impl Match {
             eat_dyn(&[0, st.wave]);
             eat_dyn(&st.cost.to_le_bytes());
             match &st.kind {
-                StructureKind::Fence { cells, cell_hp, length_m } => {
+                StructureKind::Fence { cells, cell_hp, length_m, taken_over } => {
                     eat_dyn(&[1]);
                     eat_dyn(&cell_hp.to_bits().to_le_bytes());
                     eat_dyn(&length_m.to_bits().to_le_bytes());
                     for c in cells {
                         eat_dyn(&c.to_le_bytes());
+                    }
+                    // Taken-over cells after a u32::MAX marker (never a cell
+                    // index), only when there are some (older hashes hold).
+                    if !taken_over.is_empty() {
+                        eat_dyn(&u32::MAX.to_le_bytes());
+                        for t in taken_over {
+                            for v in [t.cell, t.from, t.index] {
+                                eat_dyn(&v.to_le_bytes());
+                            }
+                        }
                     }
                 }
                 StructureKind::Garrison { buildings } => {

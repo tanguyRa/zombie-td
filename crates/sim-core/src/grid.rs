@@ -332,12 +332,10 @@ impl Grid {
     pub fn rasterize_polyline(&self, pts: &[[f32; 2]]) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
         let to_cell = |p: [f32; 2]| -> (i64, i64) { ((p[0] / self.cell).floor() as i64, (p[1] / self.cell).floor() as i64) };
+        // Duplicates are removed at the end (first occurrence kept).
         let push = |x: i64, y: i64, out: &mut Vec<usize>| {
             if x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h {
-                let i = y as usize * self.w + x as usize;
-                if !out.contains(&i) {
-                    out.push(i);
-                }
+                out.push(y as usize * self.w + x as usize);
             }
         };
         if pts.len() == 1 {
@@ -372,10 +370,22 @@ impl Grid {
                 push(x, y, &mut out);
             }
         }
-        out
+        dedup_keep_first(out)
     }
 
     pub fn walkable_count(&self) -> usize {
         self.kind.iter().filter(|&&k| k == WALK).count()
     }
+}
+
+/// Remove repeated values, keeping each first occurrence in place
+/// (O(n log n), no allocation proportional to the grid).
+fn dedup_keep_first(v: Vec<usize>) -> Vec<usize> {
+    let mut order: Vec<u32> = (0..v.len() as u32).collect();
+    order.sort_unstable_by_key(|&k| (v[k as usize], k));
+    let mut keep = vec![false; v.len()];
+    for (n, &k) in order.iter().enumerate() {
+        keep[k as usize] = n == 0 || v[order[n - 1] as usize] != v[k as usize];
+    }
+    v.iter().zip(&keep).filter(|(_, &k)| k).map(|(&c, _)| c).collect()
 }

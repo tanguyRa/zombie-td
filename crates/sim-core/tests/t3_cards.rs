@@ -4,7 +4,7 @@ mod common;
 use sim_core::cards::{CardDb, CardKind, DeckError, Effect, Rarity, TargetKind, STARTER_DECK};
 use sim_core::grid::{FENCE, WALK};
 use sim_core::level::LevelPack;
-use sim_core::match_::{Action, ActionError, Match, MatchError, MatchSetup, Phase, StructureKind, Target};
+use sim_core::match_::{Action, ActionError, DebugCardEdit, Match, MatchError, MatchSetup, Phase, StructureKind, TakenCell, Target};
 use sim_core::sim::{Sim, Tower, INFECTED, ZOMBIE};
 use sim_core::Config;
 
@@ -283,10 +283,13 @@ fn mulligan_and_keep_rules() {
     assert_eq!(m.apply(Action::KeepCards { hand_indices: vec![40] }), Err(ActionError::NoSuchCard { hand_index: 40 }));
     m.apply(Action::KeepCards { hand_indices: vec![2] }).unwrap();
     assert_eq!(m.hand().iter().map(|c| c.keep).collect::<Vec<_>>(), (0..m.hand_ids().len()).map(|i| i == 2).collect::<Vec<_>>());
-    // Keeping nothing discards the whole hand.
+    // Keeping nothing (an explicit empty choice) discards the whole hand.
     m.apply(Action::KeepCards { hand_indices: vec![] }).unwrap();
     fast_win(&mut m, 5);
-    // ...unless nothing is marked: then the first two stay.
+    m.apply(Action::NextWave).unwrap();
+    assert_eq!(m.hand_ids().len(), 5);
+    // With no choice this wave, the first two stay.
+    fast_win(&mut m, 5);
     m.apply(Action::NextWave).unwrap();
     assert_eq!(m.hand_ids().len(), 5 + 2);
     // Mulligan is a prep action; an empty hand can't mulligan; supply is checked.
@@ -499,7 +502,7 @@ fn fences_from_cards_have_their_length_and_hp() {
     assert_eq!(m.apply(Action::PlayCard { hand_index: s, target: Target::Point([cx, cy]) }), Err(ActionError::WrongTarget { card: "heavy_stockade".into(), expected: TargetKind::Polyline }));
     m.apply(Action::PlayCard { hand_index: s, target: Target::Polyline(line(-50.0, 30.0)) }).unwrap();
     let st = m.structures()[0].clone();
-    let StructureKind::Fence { cells, cell_hp, length_m } = &st.kind else { panic!() };
+    let StructureKind::Fence { cells, cell_hp, length_m, .. } = &st.kind else { panic!() };
     assert_eq!(*cell_hp, 2400.0);
     assert!(*length_m <= 100.0 && !cells.is_empty());
     assert!(cells.iter().all(|&c| m.sim().grid.kind[c as usize] == FENCE && m.sim().grid.fence_hp[c as usize] == 2400.0));
@@ -798,36 +801,320 @@ fn outbreaks_scale_with_squeezed_rings() {
 fn scripted_match_with_the_starter_deck() {
     // Every playable prep card each wave (fixture script), a tactical card
     // mid-wave, until the match ends or a wave is lost twice in a row.
+    let cfg = common::cfg();
+    let mc = cfg.match_.clone();
     let mut m = starter(39);
     let mut lost = 0;
+    let mut attempts = Vec::new(); // (wave, won)
+    let mut prev_end_hand: Option<usize> = None;
+    let mut spent_total = 0u32;
+    let mut earned_total = mc.supply_start + mc.supply_base_income;
+    assert_eq!(m.supply(), earned_total);
     while m.phase() != Phase::MatchWon {
+        // Hand size when the prep opens: 5 on wave 1, else up to 2 kept + 5.
+        let expect_hand = prev_end_hand.map_or(5, |n| n.min(2) + 5);
+        assert_eq!(m.hand_ids().len(), expect_hand, "wave {} prep hand", m.wave());
+        assert_eq!(all_cards(&m).len(), 20);
+        let (wave, supply0) = (m.wave(), m.supply());
+        let ids0: Vec<u32> = m.structures().iter().map(|s| s.id).collect();
         sim_core::fixture::fixture_prep_plays(&mut m);
+        let placed: Vec<_> = m.structures().iter().filter(|s| !ids0.contains(&s.id)).cloned().collect();
+        assert!(placed.iter().all(|s| s.wave == wave));
+        let cost: u32 = placed.iter().map(|s| s.cost).sum();
+        assert_eq!(m.supply(), supply0 - cost, "wave {wave}: prep plays pay their cost");
+        assert!(!placed.is_empty(), "wave {wave}: the script played something");
+        // Nothing playable is left in prep that the supply could pay for.
+        assert!(m.hand().iter().all(|c| !c.playable || c.kind == CardKind::Tactical));
         m.apply(Action::StartWave).unwrap();
+        let mut tactical = 0;
         while m.phase() == Phase::Running {
             if m.wave_tick() == 40 {
                 if let Some(c) = m.hand().into_iter().find(|c| c.playable && c.target == TargetKind::Point) {
                     let [cx, cy] = m.center();
-                    let _ = m.apply(Action::PlayCard { hand_index: c.hand_index, target: Target::Point([cx, cy]) });
+                    if m.apply(Action::PlayCard { hand_index: c.hand_index, target: Target::Point([cx, cy]) }).is_ok() {
+                        tactical += c.cost;
+                    }
                 }
             }
             m.step();
             assert!(m.wave_tick() < 20 * 1800, "wave {} stalled", m.wave());
         }
+        assert_eq!(m.supply(), supply0 - cost - tactical);
+        let r = m.results().last().unwrap().clone();
+        assert_eq!((r.wave, r.cards_played as usize), (wave, placed.len() + (tactical > 0) as usize));
+        attempts.push((wave, r.won));
         match m.phase() {
             Phase::WaveWon => {
+                // Earned: base income + one supply per N civilians saved.
+                let n = mc.supply_civilians_per_point[wave as usize - 1];
+                assert_eq!(r.supply_earned, mc.supply_base_income + r.end_civilians / n, "wave {wave}");
                 lost = 0;
+                spent_total += cost + tactical;
+                prev_end_hand = Some(m.hand_ids().len());
+                let before = m.supply();
                 m.apply(Action::NextWave).unwrap();
+                let inc = m.supply_income();
+                assert_eq!(inc.base + inc.civilians, r.supply_earned);
+                assert_eq!(m.supply(), before + r.supply_earned, "wave {}: unspent supply carries over", wave + 1);
+                earned_total += r.supply_earned;
+                assert_eq!(m.supply(), earned_total - spent_total);
             }
             Phase::WaveLost if lost < 2 => {
+                assert_eq!(r.supply_earned, 0);
                 lost += 1;
                 m.apply(Action::RetryWave).unwrap();
+                // The retry restores the prep: same supply and hand as it opened with.
+                assert_eq!(m.supply(), supply0);
+            }
+            Phase::MatchWon => {
+                assert_eq!(r.supply_earned, 0, "wave 8 earns nothing");
+                spent_total += cost + tactical;
             }
             _ => break,
         }
     }
-    let played: u32 = m.results().iter().map(|r| r.cards_played).sum();
-    assert!(played >= 8, "cards were played: {played}");
-    assert!(m.results().iter().filter(|r| r.won).count() >= 1);
+    // Seed 39 with this script: every wave held on the first try.
+    assert_eq!(attempts, (1..=8).map(|w| (w, true)).collect::<Vec<_>>());
+    assert_eq!(m.phase(), Phase::MatchWon);
+    assert_eq!(m.results().len(), 8);
+    let played: Vec<u32> = m.results().iter().map(|r| r.cards_played).collect();
+    assert_eq!(played, vec![5, 5, 3, 4, 3, 4, 4, 3], "cards played per wave");
     let total: u32 = m.deck_count() + m.discard_count() + m.hand_ids().len() as u32;
     assert_eq!(total, 20);
+}
+
+// ------------------------------------------------------------------ review fixes
+
+fn owned(v: Vec<&str>) -> Vec<String> {
+    v.into_iter().map(|s| s.to_string()).collect()
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+#[test]
+fn an_empty_keep_choice_keeps_nothing() {
+    // Explicit empty choice in prep: the whole hand is discarded.
+    let mut m = starter(5);
+    let hand = owned(m.hand_ids());
+    let h_none = m.state_hash();
+    m.apply(Action::KeepCards { hand_indices: vec![] }).unwrap();
+    assert_ne!(m.state_hash(), h_none, "the choice is part of the state");
+    fast_win(&mut m, 10);
+    m.apply(Action::NextWave).unwrap();
+    assert_eq!(m.hand_ids().len(), 5, "kept nothing, drew 5");
+    assert_eq!(owned(m.discard_ids()), hand, "the whole hand went to the discard, in hand order");
+    // The choice lasts one prep: next wave, no choice, the first two stay.
+    let hand2 = owned(m.hand_ids());
+    fast_win(&mut m, 10);
+    m.apply(Action::NextWave).unwrap();
+    assert_eq!(owned(m.hand_ids())[..2], hand2[..2]);
+    assert_eq!(m.hand_ids().len(), 7);
+    // An empty choice made on the result screen counts too, and the last choice wins.
+    m.apply(Action::KeepCards { hand_indices: vec![0, 1] }).unwrap();
+    fast_win(&mut m, 10);
+    m.apply(Action::KeepCards { hand_indices: vec![] }).unwrap();
+    m.apply(Action::NextWave).unwrap();
+    assert_eq!(m.hand_ids().len(), 5);
+}
+
+#[test]
+fn a_mulligan_on_an_empty_deck_draws_from_the_reshuffled_discard() {
+    // Starter deck: 20 cards, 5 drawn per prep, so wave 4's draw empties it.
+    let mut m = starter(5);
+    for _ in 1..=3 {
+        fast_win(&mut m, 10);
+        m.apply(Action::NextWave).unwrap();
+    }
+    assert_eq!((m.wave(), m.deck_count(), m.discard_count(), m.hand_ids().len()), (4, 0, 13, 7));
+    let old = owned(m.hand_ids());
+    let discard = sorted(owned(m.discard_ids()));
+    let (supply, reshuffles) = (m.supply(), m.reshuffles());
+    m.apply(Action::Mulligan).unwrap();
+    assert_eq!(m.supply(), supply - m.mulligan_cost());
+    assert_eq!(m.reshuffles(), reshuffles + 1, "the discard was shuffled into the deck");
+    let new = owned(m.hand_ids());
+    assert_eq!(new.len(), 7);
+    // The new hand comes from the old discard only...
+    let mut rest = discard.clone();
+    for c in &new {
+        let p = rest.iter().position(|d| d == c).unwrap_or_else(|| panic!("{c} not from the discard {discard:?}"));
+        rest.remove(p);
+    }
+    // ...and the old hand sits at the bottom of the deck, first card lowest,
+    // under the 6 discard cards not drawn.
+    let deck = owned(m.debug_deck_ids());
+    assert_eq!((deck.len(), m.discard_count()), (13, 0));
+    assert_eq!(deck.iter().rev().take(7).cloned().collect::<Vec<_>>(), old);
+    assert_eq!(sorted(deck[..6].to_vec()), sorted(rest));
+    assert_eq!(all_cards(&m), sorted(m.deck_list().to_vec()));
+    // Deterministic: same seed, same mulligan draw (DECK stream of wave 4).
+    let mut m2 = starter(5);
+    for _ in 1..=3 {
+        fast_win(&mut m2, 10);
+        m2.apply(Action::NextWave).unwrap();
+    }
+    m2.apply(Action::Mulligan).unwrap();
+    assert_eq!(m2.state_hash(), m.state_hash());
+    // A short deck (fewer cards than the hand) also draws the rest from the
+    // reshuffled discard before any old card: probe every prep of a match.
+    let mut short_decks = 0;
+    for seed in 1..=4u64 {
+        let mut p = starter(seed);
+        for _ in 1..8 {
+            let (deck_n, hand_n) = (p.deck_count() as usize, p.hand_ids().len());
+            if deck_n < hand_n && p.mulligan_available() {
+                short_decks += (deck_n > 0) as u32;
+                let (before, top) = (owned(p.hand_ids()), owned(p.debug_deck_ids()));
+                let discard = sorted(owned(p.discard_ids()));
+                p.apply(Action::Mulligan).unwrap();
+                let new = owned(p.hand_ids());
+                assert_eq!(new[..deck_n], top[..], "seed {seed}: the deck's cards first");
+                let mut pool = discard.clone();
+                for c in &new[deck_n..] {
+                    let k = pool.iter().position(|d| d == c).unwrap_or_else(|| panic!("seed {seed}: {c} not from the discard"));
+                    pool.remove(k);
+                }
+                assert_eq!(owned(p.debug_deck_ids()).iter().rev().take(before.len()).cloned().collect::<Vec<_>>(), before);
+            }
+            fast_win(&mut p, 5);
+            p.apply(Action::NextWave).unwrap();
+        }
+    }
+    assert!(short_decks > 0, "the probe met a deck with fewer cards than the hand");
+}
+
+#[test]
+fn pulling_down_a_fence_gives_taken_over_cells_back() {
+    let cfg = common::cfg();
+    let mut m = match_with(cfg, ids(&[("light_fence", 10), ("barbed_wire", 10)]), 40);
+    let [cx, cy] = m.center();
+    let line = vec![[cx - 20.0, cy - 50.0], [cx + 20.0, cy - 50.0]];
+    while !m.hand_ids().contains(&"light_fence") {
+        m.apply(Action::Mulligan).unwrap();
+    }
+    m.apply(Action::PlayCard { hand_index: hand_index_of(&m, "light_fence"), target: Target::Polyline(line.clone()) }).unwrap();
+    let fence = m.structures()[0].clone();
+    let StructureKind::Fence { cells, cell_hp, .. } = fence.kind.clone() else { panic!() };
+    assert!(cells.len() > 4);
+    fast_win(&mut m, 5);
+    m.apply(Action::NextWave).unwrap();
+    if !m.hand_ids().contains(&"barbed_wire") {
+        m.apply(Action::Mulligan).unwrap();
+    }
+    // Break the first cell, then draw barbed wire over it: it takes the cell over.
+    {
+        let s = m.debug_sim_mut();
+        s.grid.fence_hp[cells[0] as usize] = 0.0;
+        s.grid.set_kind(cells[0] as usize, WALK);
+    }
+    let before = m.structures().to_vec();
+    let repair = m.repair_cost(fence.id);
+    assert!(repair.is_some());
+    m.apply(Action::PlayCard { hand_index: hand_index_of(&m, "barbed_wire"), target: Target::Polyline(line.clone()) }).unwrap();
+    let wire = m.structures()[1].clone();
+    let StructureKind::Fence { cells: wc, taken_over, .. } = &wire.kind else { panic!() };
+    assert_eq!(wc, &vec![cells[0]]);
+    assert_eq!(taken_over, &vec![TakenCell { cell: cells[0], from: fence.id, index: 0 }]);
+    let StructureKind::Fence { cells: left, .. } = &m.structures()[0].kind else { panic!() };
+    assert_eq!(left[..], cells[1..], "the old fence lost the cell");
+    // Same-prep pull-down: the cell is broken again and back with its old fence, at its place.
+    m.apply(Action::PullDown { placement_id: wire.id }).unwrap();
+    assert_eq!(m.structures(), &before[..]);
+    assert_eq!((m.sim().grid.kind[cells[0] as usize], m.sim().grid.fence_hp[cells[0] as usize]), (WALK, 0.0));
+    assert_eq!(m.repair_cost(fence.id), repair, "the gap can be repaired again");
+    m.apply(Action::Repair { fence_id: fence.id }).unwrap();
+    assert!(cells.iter().all(|&c| m.sim().grid.kind[c as usize] == FENCE && m.sim().grid.fence_hp[c as usize] == cell_hp));
+
+    // An older fence pulled down later also gives back the cells it still holds.
+    {
+        let s = m.debug_sim_mut();
+        s.grid.fence_hp[cells[1] as usize] = 0.0;
+        s.grid.set_kind(cells[1] as usize, WALK);
+    }
+    m.apply(Action::PlayCard { hand_index: hand_index_of(&m, "barbed_wire"), target: Target::Polyline(line) }).unwrap();
+    let wire = m.structures()[1].clone();
+    let h_taken = m.state_hash();
+    fast_win(&mut m, 5);
+    m.apply(Action::NextWave).unwrap();
+    assert_ne!(h_taken, m.state_hash());
+    m.apply(Action::PullDown { placement_id: wire.id }).unwrap();
+    let StructureKind::Fence { cells: back, .. } = &m.structures()[0].kind else { panic!() };
+    assert_eq!(back, &cells);
+}
+
+#[test]
+fn huge_fence_coordinates_are_refused_quickly() {
+    let mut m = mono("light_fence", 41);
+    let [cx, cy] = m.center();
+    for far in [1e12f32, 1e30, -1e30, f32::MAX] {
+        for pts in [vec![[cx, cy], [far, cy]], vec![[far, cy], [cx, cy]], vec![[cx, cy], [cx, far]]] {
+            let t = std::time::Instant::now();
+            let e = m.apply(Action::PlayCard { hand_index: 0, target: Target::Polyline(pts.clone()) }).unwrap_err();
+            assert!(matches!(&e, ActionError::Placement { reason } if reason.contains("on the map")), "{e}");
+            assert!(m.fence_length_m(&pts).is_err());
+            assert!(t.elapsed() < std::time::Duration::from_millis(10), "{far}: {:?}", t.elapsed());
+        }
+    }
+    // On the map but absurdly long as drawn (a zigzag): refused before rasterizing.
+    let zig: Vec<[f32; 2]> = (0..400).map(|k| [cx + if k % 2 == 0 { -100.0 } else { 100.0 }, cy + 0.01 * k as f32]).collect();
+    let t = std::time::Instant::now();
+    let e = m.apply(Action::PlayCard { hand_index: 0, target: Target::Polyline(zig) }).unwrap_err();
+    assert!(matches!(&e, ActionError::Placement { reason } if reason.contains("as drawn")), "{e}");
+    assert!(t.elapsed() < std::time::Duration::from_millis(10), "{:?}", t.elapsed());
+    assert!(m.structures().is_empty() && m.log().is_empty());
+}
+
+#[test]
+fn card_state_is_in_the_state_hash() {
+    // Wave 2's prep: 7 in hand, 10 in the deck, 3 in the discard.
+    let base = || {
+        let mut m = starter(42);
+        fast_win(&mut m, 5);
+        m.apply(Action::NextWave).unwrap();
+        m
+    };
+    let h0 = base().state_hash();
+    assert_eq!(h0, base().state_hash());
+    let m = base();
+    let differing = |v: &[&str]| -> (usize, usize) {
+        let j = v.iter().position(|c| *c != v[0]).expect("two different cards");
+        (0, j)
+    };
+    let (hi, hj) = differing(&m.hand_ids());
+    let deck = m.debug_deck_ids();
+    let (di, dj) = differing(&deck);
+    let (di, dj) = (deck.len() - 1 - di, deck.len() - 1 - dj); // raw: next card last
+    let (xi, xj) = differing(&m.discard_ids());
+    let edits = [
+        ("supply", DebugCardEdit::Supply(m.supply() + 1)),
+        ("hand order", DebugCardEdit::SwapHand(hi, hj)),
+        ("deck order", DebugCardEdit::SwapDeck(di, dj)),
+        ("discard order", DebugCardEdit::SwapDiscard(xi, xj)),
+        ("keep mark", DebugCardEdit::Keep(0, true)),
+        ("keep choice", DebugCardEdit::KeepChosen(true)),
+        ("mulligan flag", DebugCardEdit::MulliganUsed(true)),
+    ];
+    for (name, e) in edits {
+        let mut m = base();
+        m.debug_edit_cards(e);
+        assert_ne!(m.state_hash(), h0, "{name} must change the hash");
+    }
+    // Same through actions: two keep choices differing in one mark.
+    let (mut a, mut b) = (base(), base());
+    a.apply(Action::KeepCards { hand_indices: vec![0] }).unwrap();
+    b.apply(Action::KeepCards { hand_indices: vec![1] }).unwrap();
+    assert_ne!(a.state_hash(), b.state_hash());
+    // Discard content (not just order): play a card on each, then undo one.
+    let (mut a, mut b) = (base(), base());
+    for m in [&mut a, &mut b] {
+        let c = m.hand().into_iter().find(|c| c.playable && c.kind == CardKind::Armament).expect("an armament");
+        m.apply(Action::PlayCard { hand_index: c.hand_index, target: Target::Buildings(free_buildings(m, 1)) }).unwrap();
+    }
+    assert_eq!(a.state_hash(), b.state_hash());
+    let id = a.structures()[0].id;
+    a.apply(Action::PullDown { placement_id: id }).unwrap();
+    assert_ne!(a.state_hash(), b.state_hash());
 }

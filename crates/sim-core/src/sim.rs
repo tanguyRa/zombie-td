@@ -17,6 +17,11 @@ pub const ABSENT: u8 = 4;
 
 const NONE: u32 = u32::MAX;
 
+/// Longest fence polyline accepted as drawn, before clipping (meters). Caps
+/// the rasterization work of one fence action (DoS guard for replays); far
+/// above any card (400 m placed) even when most of the line is clipped.
+pub const MAX_FENCE_DRAWN_M: f32 = 10_000.0;
+
 /// 16 unit directions for the random walk (precomputed, no trig at runtime).
 const WANDER_DIRS: [[f32; 2]; 16] = [
     [1.0, 0.0],
@@ -571,7 +576,8 @@ impl Sim {
     }
 
     /// The placed length (meters) and open cells of a fence polyline (sim
-    /// coordinates), without placing it. Cells on buildings or the map edge
+    /// coordinates, every point on the map, at most `MAX_FENCE_DRAWN_M` as
+    /// drawn), without placing it. Cells on buildings or the map edge
     /// are clipped away: a fence drawn from wall to wall seals the street,
     /// and only the share of the line actually placed counts.
     pub fn fence_preview(&self, pts: &[[f32; 2]]) -> Result<(f32, Vec<usize>), String> {
@@ -581,6 +587,12 @@ impl Sim {
         if pts.iter().any(|p| !p[0].is_finite() || !p[1].is_finite()) {
             return Err("fence points must be finite".into());
         }
+        // Bounds first, so rasterizing costs at most the drawn length in
+        // cells (no walk through off-map cells, no i64 overflow).
+        let (gw, gh) = (self.grid.w as f32 * self.grid.cell, self.grid.h as f32 * self.grid.cell);
+        if pts.iter().any(|p| p[0] < 0.0 || p[1] < 0.0 || p[0] > gw || p[1] > gh) {
+            return Err("fence points must be on the map".into());
+        }
         let length: f32 = pts
             .windows(2)
             .map(|s| {
@@ -588,6 +600,9 @@ impl Sim {
                 (dx * dx + dy * dy).sqrt()
             })
             .sum();
+        if length > MAX_FENCE_DRAWN_M {
+            return Err(format!("a fence line can be at most {MAX_FENCE_DRAWN_M:.0} m long as drawn"));
+        }
         let cells = self.grid.rasterize_polyline(pts);
         let open: Vec<usize> = cells.iter().copied().filter(|&c| self.grid.kind[c] == WALK || self.grid.kind[c] == FENCE).collect();
         if open.is_empty() {
@@ -972,13 +987,19 @@ impl Sim {
     /// Like `nearest_of_state`, ignoring agents closer than `min_r`. With
     /// `min_r == 0` the result is the same (`d2 >= 0` always holds).
     fn nearest_of_state_beyond(&self, x: f32, y: f32, r: f32, min_r: f32, state: u8, skip: usize) -> Option<(usize, f32)> {
+        self.nearest_slot_beyond(x, y, r, min_r, state, skip).map(|(j, d2, _)| (j, d2))
+    }
+
+    /// `nearest_of_state_beyond` plus the agent's spatial-hash slot (its
+    /// hash-time position is `hx[slot]`, `hy[slot]`).
+    fn nearest_slot_beyond(&self, x: f32, y: f32, r: f32, min_r: f32, state: u8, skip: usize) -> Option<(usize, f32, usize)> {
         let min2 = min_r * min_r;
         let bm = self.bucket_m;
         let bx0 = (((x - r) / bm).max(0.0)) as usize;
         let by0 = (((y - r) / bm).max(0.0)) as usize;
         let bx1 = (((x + r) / bm) as usize).min(self.hash_w - 1);
         let by1 = (((y + r) / bm) as usize).min(self.hash_h - 1);
-        let mut best: Option<(usize, f32)> = None;
+        let mut best: Option<(usize, f32, usize)> = None;
         let r2 = r * r;
         for by in by0..=by1 {
             for bx in bx0..=bx1 {
@@ -996,8 +1017,8 @@ impl Sim {
                         continue;
                     }
                     let d2 = dx * dx + dy * dy;
-                    if d2 <= r2 && d2 >= min2 && best.map_or(true, |(bj, bd)| d2 < bd || (d2 == bd && j < bj)) {
-                        best = Some((j, d2));
+                    if d2 <= r2 && d2 >= min2 && best.map_or(true, |(bj, bd, _)| d2 < bd || (d2 == bd && j < bj)) {
+                        best = Some((j, d2, k));
                     }
                 }
             }
@@ -1598,14 +1619,14 @@ impl Sim {
             }
             let (tx, ty) = (self.towers[t].x, self.towers[t].y);
             let w = self.towers[t].weapon;
-            if let Some((j, _)) = self.nearest_of_state_beyond(tx, ty, w.range_m, w.min_range_m, ZOMBIE, usize::MAX) {
+            if let Some((j, _, slot)) = self.nearest_slot_beyond(tx, ty, w.range_m, w.min_range_m, ZOMBIE, usize::MAX) {
                 self.towers[t].shots += 1;
                 self.towers[t].cooldown = w.period_ticks;
                 if w.splash_m > 0.0 {
-                    self.zombies_within(self.x[j], self.y[j], w.splash_m, &mut hits);
-                    if !hits.contains(&j) {
-                        hits.push(j);
-                    }
+                    // Centred on the target's hash-time position, like the
+                    // scan itself, so the target is always among the hits.
+                    self.zombies_within(self.hx[slot], self.hy[slot], w.splash_m, &mut hits);
+                    debug_assert!(hits.contains(&j));
                     for k in 0..hits.len() {
                         if self.hit_zombie(hits[k], w.damage, dead_ticks) {
                             self.towers[t].kills += 1;
@@ -1807,5 +1828,39 @@ fn clamp_speed(vx: f32, vy: f32, max: f32) -> (f32, f32) {
         (vx * k, vy * k)
     } else {
         (vx, vy)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The splash is centred on the target's hash-time position (where the
+    /// scan found it), not where it moved to during this tick's integrate.
+    #[test]
+    fn splash_is_centred_on_the_hash_time_position() {
+        let path = format!("{}/../../levels/paris-marais.json", env!("CARGO_MANIFEST_DIR"));
+        let level = LevelPack::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut cfg = Config::default_config();
+        cfg.zombie_speed = 0.0;
+        cfg.civilian_wander_speed = 0.0;
+        cfg.civilian_flee_speed = 0.0;
+        let mut sim = Sim::new(&level, cfg, 40, 31);
+        let db = crate::cards::CardDb::default_cards();
+        let crate::cards::Effect::Garrison { weapon, .. } = db.get("mortar").unwrap().effect.clone() else { panic!() };
+        let w = weapon.weapon(&sim.cfg);
+        assert_eq!(w.splash_m, 8.0);
+        let [tx, ty] = sim.to_sim(0.0, 0.0);
+        sim.towers.push(Tower::garrison(0, tx, ty, w));
+        sim.force_zombie(0, tx, ty + 50.0); // the target
+        sim.force_zombie(1, tx + 6.0, ty + 50.0); // 6 m from where it was hashed
+        sim.force_zombie(2, tx - 12.0, ty + 50.0); // 6 m from where it moves to
+        sim.rebuild_hash();
+        // The target moves 6 m west between the hash and the towers phase.
+        sim.x[0] -= 6.0;
+        sim.fire_towers();
+        let hp = sim.cfg.zombie_hp - w.damage;
+        assert_eq!(sim.towers[0].shots, 1);
+        assert_eq!((sim.hp[0], sim.hp[1], sim.hp[2]), (hp, hp, sim.cfg.zombie_hp));
     }
 }

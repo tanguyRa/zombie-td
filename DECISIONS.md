@@ -435,8 +435,10 @@ Every choice the spec left open, and every simplification, in one place.
   the same. Each prep then:
   1. gets its supply income;
   2. keeps up to `hand_keep` (2) unplayed cards and discards the rest in
-     hand order. The kept cards are those marked by `KeepCards`, or the
-     first two in hand order if none are marked;
+     hand order. If `KeepCards` was applied since the last prep opened
+     (`keep_chosen`, reset at every prep), the marked cards stay: an empty
+     list is a choice and keeps nothing, and the last choice counts.
+     Without a choice, the first two in hand order stay;
   3. draws `hand_draw` (5) on top, so a hand holds up to 7.
 
   The draw pile is a stack. When it is empty at a draw, the whole discard
@@ -444,11 +446,20 @@ Every choice the spec left open, and every simplification, in one place.
   in `reshuffles`). Played cards go to the discard right away, and their
   structures stay on the map.
 - **Mulligan:** prep only, once per wave, only before any card is played
-  this prep, costs `mulligan_cost` (1). The hand goes to the bottom of the
-  deck in hand order (no RNG) and the same number is drawn. Putting the
-  cards at the bottom instead of discarding them keeps them in this pass of
-  the deck; requiring "before any play" keeps the pull-down rule below
-  simple.
+  this prep, costs `mulligan_cost` (1). The hand is set aside, the same
+  number of cards is drawn (with the usual reshuffle of the discard,
+  from the current prep's `DECK` stream and counted in `reshuffles`, if the
+  deck runs out), and then the old hand goes to the bottom of the deck in
+  hand order (no RNG), first card lowest. So an old card can only come
+  back once every other card in the deck and discard has been drawn (with
+  20 cards and a 7-card hand that never happens). Putting the cards at the
+  bottom instead of discarding them keeps them in this pass of the deck;
+  requiring "before any play" keeps the pull-down rule below simple.
+  - The first version put the hand at the bottom and then drew. With an
+    empty deck, which happens at every wave-4 prep with the starter deck
+    (20 − 4 × 5 = 0), the same 7 cards came back and the supply was still
+    paid (T3 review). When the deck holds at least the hand size, both
+    orders draw the same cards, so the match fixture did not change.
 - **Supply:** wave 1's prep grants `supply_start + supply_base_income`
   (8 + 6). A won wave k earns `supply_base_income + floor(civilians alive
   at the end / supply_civilians_per_point[k])`, with N = 150, 200, 250,
@@ -485,6 +496,13 @@ Every choice the spec left open, and every simplification, in one place.
   {buildings}}`. Ids are never reused (the counter is part of the state, so
   a retry gives the same ids). A new fence over broken cells of an older
   fence takes those cells over, so each cell has one owner for repairs.
+  The new fence records them in `taken_over` (`TakenCell {cell, from,
+  index}`: the old owner and the cell's position in its list). Pulling the
+  new fence down (in the same prep or later) gives each cell it still holds
+  back to its old owner, if that fence still stands, at its old position
+  and broken as it was (open ground, 0 hp), so the gap can be repaired
+  again. Before this fix a same-prep undo left a permanent gap with no
+  owner (T3 review).
 - **Repair:** costs `max(1, ceil(card cost × repair_cost_factor (0.5) ×
   damaged share))`. The damaged share is missing hp over full hp, and a
   broken cell counts as fully missing. Every cell goes back to full hp,
@@ -504,9 +522,12 @@ Every choice the spec left open, and every simplification, in one place.
   - Targeting is the same nearest-zombie search with a minimum distance.
     A minimum of 0 accepts every `d² >= 0`, so the plain towers give the
     same floats as before.
-  - Splash hits every zombie within `splash_m` of the target's position.
-    It uses the spatial hash (bucket order, hash-time positions) and
-    includes the target.
+  - Splash hits every zombie within `splash_m` of the target's hash-time
+    position (where the targeting scan found it, not where it moved in
+    this tick's integrate). It uses the spatial hash (bucket order,
+    hash-time positions), so the target is always among the hits. (The
+    first version centred on the current position and added the target by
+    hand; T3 review.)
   - Strikes are `Sim::effects` (`AreaEffect`), pulsed in the towers phase
     after the towers.
   - Delays count from the play: an action applied before tick t with a
@@ -532,10 +553,31 @@ Every choice the spec left open, and every simplification, in one place.
 - **`Match::state_hash`** now also covers every shooter's position, weapon,
   activation tick, kills and route, the strikes, and the card state:
   supply, hand (ids and keep marks), deck order, discard, both RNG
-  positions, the mulligan flag, play counters, income, reshuffles and the
-  structures.
+  positions, the mulligan flag, the keep choice, play counters, income,
+  reshuffles and the structures (with taken-over cells). A test changes
+  each piece of card state alone (`Match::debug_edit_cards`, hidden) and
+  checks the hash changes.
+  - The keep choice shares the mulligan flag's byte (bit 1), and the
+    taken-over cells follow a fence's cells after a `u32::MAX` marker
+    (never a cell index), only when there are some. Both add nothing when
+    unset, so runs without them hash as before.
+- **Fence input limits** (T3 review, a guard for the server-side replay
+  verifier): `Sim::fence_preview` (cards, `fence_length_m` and the
+  single-wave `place_fence`) refuses a point off the map (outside `[0, w ×
+  cell] × [0, h × cell]`, "fence points must be on the map") and a polyline
+  longer than `MAX_FENCE_DRAWN_M` (10 km) as drawn, before rasterizing. That
+  is far above any card (400 m placed) even when most of the line is
+  clipped. `rasterize_polyline` removes repeated cells with a sort
+  (first occurrence kept, so the cell order is unchanged) instead of an
+  O(n²) `contains`. Previously `[1e12, y]` walked ~5e11 off-map cells and
+  `1e30` overflowed the i64 Bresenham. Both are now refused in microseconds
+  (tested under 10 ms). Points outside the revealed disc are still
+  accepted and clipped, since cells outside it are walls.
 - **Match fixture changed on purpose:** `4909c13c5beea4e9` →
-  **`e1061f2da92f6c9f`** (native = WASM under Node, tested). The fixture
+  **`e1061f2da92f6c9f`** (native = WASM under Node, tested). The T3
+  review fixes leave it unchanged: its only mulligan has 10 cards in the
+  deck, it never uses `KeepCards` or a takeover, and the mortar's
+  hash-time splash centre does not change its run. The fixture
   now plays cards: every playable prep card via
   `fixture::fixture_prep_plays`, a tactical card at tick 20 of wave 1, and
   a mulligan in wave 2. It also runs on the T3 defaults (population,
@@ -584,6 +626,8 @@ Every choice the spec left open, and every simplification, in one place.
     with no retry (a test checks it). A retry replays the same draws, so
     a wave-1 hand that can't hold stays lost unless the player
     mulligans; the script only mulligans a hand with no armament.
+    Rerun after the T3 review fixes (mulligan order, keep choice, splash
+    centre): the same 13/16 and 12/16, with the same retries per seed.
   - Tactical cards barely change the scripted results. With
     `--no-tactical`, seeds 1–16 still give 13/16 and 12/16; only seed 5
     needs 2 retries instead of 0. The script plays them late, on the
