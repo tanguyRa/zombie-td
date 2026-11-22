@@ -28,8 +28,9 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .phase[data-phase="wave_won"], .phase[data-phase="match_won"] { background: #1d3550; color: #a9d4ff; }
 .phase[data-phase="wave_lost"] { background: #50361d; color: #ffd2a0; }
 label { color: var(--text-2); display: flex; align-items: center; gap: 6px; }
-select, input[type="number"] { background: #1b1d21; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; font: inherit; }
+select, input[type="number"], #seed { background: #1b1d21; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; font: inherit; }
 input[type="number"] { width: 60px; }
+#seed { width: 92px; }
 button {
   background: #23262b; color: var(--text); border: 1px solid var(--line); border-radius: 7px;
   padding: 6px 10px; font: inherit; cursor: pointer;

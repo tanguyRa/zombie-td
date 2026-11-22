@@ -63,6 +63,7 @@ test("full 8-wave match through the UI verifies headless", async ({ page }, info
   expect(log.counts.tactical).toBeGreaterThanOrEqual(1);
   expect(log.counts.keeps).toBeGreaterThanOrEqual(8);
   expect(log.counts.uiPlays).toBe(3); // armament clicks, fence drag, tactical click
+  expect(log.counts.uiRepairs).toBe(1); // a damaged fence clicked, then Repair
 
   // The match result panel.
   await expect(page.locator("#result")).toBeVisible();

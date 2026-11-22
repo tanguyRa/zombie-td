@@ -29,6 +29,16 @@ pub enum CardKind {
     Tactical,
 }
 
+impl std::fmt::Display for CardKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CardKind::Fortification => "fortification",
+            CardKind::Armament => "armament",
+            CardKind::Tactical => "tactical",
+        })
+    }
+}
+
 /// What a card's target must be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +46,17 @@ pub enum TargetKind {
     Buildings,
     Polyline,
     Point,
+}
+
+impl std::fmt::Display for TargetKind {
+    /// What the player must click: "must target buildings / a line / a point".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TargetKind::Buildings => "buildings",
+            TargetKind::Polyline => "a line",
+            TargetKind::Point => "a point",
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

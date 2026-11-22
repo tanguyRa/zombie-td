@@ -20,13 +20,27 @@ export async function openLevel(page: Page, preset: string, seed: number) {
   await page.getByRole("button", { name: preset }).click();
   await expect.poll(() => hook(page, (h) => h.phase), { timeout: LOAD_WAIT_MS }).toBe("prep");
   if (seed !== 1) {
-    // Blurring commits the value: one `change` event, one new match (the
+    // Enter commits the seed (in prep, no confirmation): one new match (the
     // page drops the old status at once, so the poll below waits for the new).
     await page.locator("#seed").fill(String(seed));
-    await page.locator("#seed").blur();
+    await page.locator("#seed").press("Enter");
     await expect.poll(() => hook(page, (h) => (h.phase === "prep" ? h.hand.length : 0)), { timeout: LOAD_WAIT_MS }).toBe(5);
   }
   await waitMapIdle(page);
+}
+
+/** Run the current wave until match tick `tick` (test-only fast mode), paused there. */
+export async function runTo(page: Page, tick: number) {
+  await hookWith(
+    page,
+    (h, t) => {
+      h.pauseAt(t);
+      h.speed(0);
+      h.pause(false);
+    },
+    tick,
+  );
+  await expect.poll(() => hookWith(page, (h, t) => h.phase !== "running" || (h.perf!.paused && h.tick >= t), tick), { timeout: 120_000 }).toBe(true);
 }
 
 export async function waitMapIdle(page: Page) {
@@ -174,6 +188,25 @@ export function pageApi(page: Page, opts: { onWave?: (s: Status) => void; deadli
           await expect(page.locator("#i-pull")).toHaveText(/^Pull down \(\+\d+ supply\)$/);
           await page.locator("#i-pull").click();
         }),
+      // Click the fence, check the panel shows the worker's current cost,
+      // then the panel's Repair button.
+      repair: (id) =>
+        uiAction(page, async () => {
+          const s = (await hook(page, (h) => h.structures)).find((x) => x.id === id)!;
+          if (s.kind.type !== "fence") throw new Error("repair: fences only");
+          const c = s.kind.cells[Math.floor(s.kind.cells.length / 2)];
+          const [x, y] = await hookWith(page, (h, k) => [((k % h.level!.gridW) + 0.5) * h.level!.cell, (Math.floor(k / h.level!.gridW) + 0.5) * h.level!.cell], c);
+          await clickSim(page, x, y);
+          await expect(page.locator("#inspect")).toBeVisible();
+          await expect(page.locator("#inspect")).toHaveAttribute("data-structure", String(id));
+          const pick = await hookWith(page, (h, p) => h.pick(p[0], p[1]), [x, y]);
+          expect(pick.structure).toBe(id);
+          const cost = pick.repairCost;
+          expect(cost).toBeGreaterThan(0);
+          await expect(page.locator("#i-repair")).toHaveText(`Repair (${cost} supply)`);
+          await expect(page.locator("#i-repair")).toBeEnabled();
+          await page.locator("#i-repair").click();
+        }),
       playTactical: (i, p) =>
         uiAction(page, async () => {
           await clickCard(page, i);
@@ -190,11 +223,14 @@ export function pageApi(page: Page, opts: { onWave?: (s: Status) => void; deadli
         if (indices.length === 0) return hookWith(page, (h, a) => h.keep(a).then((e) => (e ? e.message : null)), indices);
         return null;
       },
-      // Start paused: the wave then waits for runWave, which knows the tick.
+      // Start paused (test-only `startPaused`: every prep starts unpaused,
+      // and a pause belongs to its wave): the wave then waits for runWave,
+      // which knows the tick.
       startWave: async () => {
-        await hook(page, (h) => h.pause(true));
-        await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(true);
-        return uiAction(page, () => page.locator("#start").click());
+        await hook(page, (h) => h.startPaused());
+        const e = await uiAction(page, () => page.locator("#start").click());
+        if (e === null) await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(true);
+        return e;
       },
       nextWave: async () => {
         await expect(page.locator("#result")).toBeVisible();

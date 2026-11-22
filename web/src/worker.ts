@@ -69,6 +69,12 @@ const queue: { id: number; action: Action }[] = [];
 
 const post = (msg: FromWorker, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, transfer);
 
+const ABORTED: ActionError = { error: "aborted", message: "the match was stopped" };
+/** Settle every queued action with `aborted` (stop, re-init): nothing waits forever. */
+function abortQueue() {
+  for (const { id, action } of queue.splice(0)) post({ type: "action", id, action, error: ABORTED });
+}
+
 function status(): MatchStatus {
   return JSON.parse(m!.status_json());
 }
@@ -170,7 +176,14 @@ function afterChange() {
   const st = status();
   if (st.phase !== lastPhase) {
     if (st.phase === "prep" || lastPhase === null) sendGeometryIfChanged();
-    if (st.phase === "prep") tickMs = [];
+    if (st.phase === "prep") {
+      tickMs = [];
+      // Every prep starts unpaused: a pause belongs to the wave it was
+      // pressed in, not to the next one or a retry. (Tests that need a wave
+      // to start paused set `pause_at` to the prep's tick.)
+      paused = false;
+      pauseAt = null;
+    }
     lastPhase = st.phase;
     // Both interpolation slots hold the new positions (a reveal or a
     // retry moves everyone at once).
@@ -224,8 +237,10 @@ function loop(gen: number) {
   if (acc > 250) acc = 250; // don't spiral after a stall
   let stepped = false;
   const runnable = () => !paused && m!.phase() === "running";
+  // `pause_at` is only consumed while a wave runs, so a test can set it to
+  // the prep's tick to have the wave start paused.
   const hitPauseAt = () => {
-    if (pauseAt !== null && Number(m!.tick()) >= pauseAt) {
+    if (pauseAt !== null && m!.phase() === "running" && Number(m!.tick()) >= pauseAt) {
       paused = true;
       pauseAt = null;
       return true;
@@ -270,25 +285,26 @@ function query(q: Query): QueryResult {
   switch (q.q) {
     case "pick": {
       const building = w.building_at(q.x, q.y);
-      // A fence cell at the point or within ~3 m (cells are 2 m: a click
-      // needn't hit the exact cell), nearest first.
+      // A click inside a garrisoned building means that garrison, even with
+      // a fence just outside its wall. Otherwise a fence cell at the point or
+      // within ~3 m (cells are 2 m: a click needn't hit the exact cell),
+      // nearest first.
       let structure = -1;
+      const garrison = building >= 0 ? structures.find((s) => s.kind.type === "garrison" && s.kind.buildings.includes(building)) : undefined;
+      if (garrison) structure = garrison.id;
       const r = 3;
       let best = Infinity;
-      for (let dy = -r; dy <= r; dy += 1)
-        for (let dx = -r; dx <= r; dx += 1) {
-          const d = dx * dx + dy * dy;
-          if (d > r * r || d >= best) continue;
-          const s = w.structure_at(q.x + dx, q.y + dy);
-          if (s >= 0) {
-            structure = s;
-            best = d;
+      if (!garrison)
+        for (let dy = -r; dy <= r; dy += 1)
+          for (let dx = -r; dx <= r; dx += 1) {
+            const d = dx * dx + dy * dy;
+            if (d > r * r || d >= best) continue;
+            const s = w.structure_at(q.x + dx, q.y + dy);
+            if (s >= 0) {
+              structure = s;
+              best = d;
+            }
           }
-        }
-      if (structure < 0 && building >= 0) {
-        const g = structures.find((s) => s.kind.type === "garrison" && s.kind.buildings.includes(building));
-        if (g) structure = g.id;
-      }
       const pick: Pick = {
         building,
         structure,
@@ -312,6 +328,10 @@ function query(q: Query): QueryResult {
         return { q: "fence_length", length: null, error: msg };
       }
     }
+    case "costs": {
+      const exists = structures.some((s) => s.id === q.id);
+      return { q: "costs", exists, repairCost: exists ? w.repair_cost(q.id) : -1, refund: exists ? w.pull_down_refund(q.id) : -1 };
+    }
     case "agents": {
       w.pack();
       const n = w.count();
@@ -331,7 +351,7 @@ async function initMatch(msg: Extract<ToWorker, { type: "init" }>) {
   memory = wasm.memory;
   if (m) m.free();
   m = null;
-  queue.length = 0;
+  abortQueue();
   testMode = !!msg.test;
   try {
     m = new WasmMatch(msg.levelJson, JSON.stringify(msg.setup));
@@ -386,17 +406,25 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     if (loopTimer) clearTimeout(loopTimer);
     m?.free();
     m = null;
-    queue.length = 0;
+    abortQueue();
     return;
   }
-  if (!m) return;
+  if (!m) {
+    // No match (stopped, or the first init is still loading): answer every
+    // request so its promise settles.
+    if (msg.type === "action") post({ type: "action", id: msg.id, action: msg.action, error: ABORTED });
+    else if (msg.type === "query" || msg.type === "record" || msg.type === "hash") post({ type: msg.type, id: msg.id, aborted: true } as FromWorker);
+    return;
+  }
   switch (msg.type) {
     case "action":
       // Applied at the next tick boundary (the start of the next loop turn).
       queue.push({ id: msg.id, action: msg.action });
       break;
     case "pause":
-      paused = msg.paused;
+      // Only a running wave can be paused (prep and the result screens
+      // never step anyway); entering prep clears it.
+      if (m.phase() === "running") paused = msg.paused;
       sendStatus();
       break;
     case "speed":
@@ -409,7 +437,10 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       sendStatus();
       break;
     case "query":
-      if (msg.query.q === "agents" && !testMode) return;
+      if (msg.query.q === "agents" && !testMode) {
+        post({ type: "query", id: msg.id, aborted: true });
+        break;
+      }
       post({ type: "query", id: msg.id, result: query(msg.query) });
       break;
     case "record":

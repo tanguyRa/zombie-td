@@ -987,11 +987,15 @@ Every choice the spec left open, and every simplification, in one place.
 - **The worker owns a `WasmMatch`** built with `Match::new` on the whole
   level pack (the built-in levels and the live ones, as before; streaming
   comes with T6b) and the starter deck (`setup` without `deck`; the deck
-  builder is T7b). The seed is sent as a decimal string.
+  builder is T7b). The seed is sent as a decimal string, end to end: the
+  input is a text field parsed with `BigInt` (`web/src/seed.ts`, 0 to
+  2^64 - 1, never through `Number`), so seeds above 2^53 are exact (a test
+  checks the record's `setup.seed` for 2^53 + 1).
 - **Protocol** (`web/src/protocol.ts`). To the worker: `init {levelJson,
   setup {seed, deck?}, test?}`, `stop`, `action {id, action}`, `pause`,
   `speed`, `pause_at {tick}` (test only), `query {id, query}` (`pick`
-  at a point, `fence_length` of a polyline, `agents` (test only)),
+  at a point, `fence_length` of a polyline, `costs` of a structure id,
+  `agents` (test only)),
   `record {id}`, `field`, `hash` (test only). From the worker: `ready
   {level, shared}`, `geometry` (applied buildings, sent again when a reveal
   adds some), `frame` (fallback mode), `status` (the `status_json` HUD
@@ -1000,6 +1004,13 @@ Every choice the spec left open, and every simplification, in one place.
   with their hp share), `action {id, action, error}`, `query`, `record`,
   `error`, `field`, `hash`. Actions are JSON `Action`s (sim-core's serde
   format) and refusals the `ActionError` JSON with its `message`.
+- **Every request settles (T5 review).** On `stop` or a re-`init` the
+  worker answers each queued action with an `aborted` error, and with no
+  match it answers actions the same way and queries, records and hashes
+  with `{aborted: true}` (also an `agents` query outside test mode). The
+  page resolves the action promise with that error (no toast) and rejects
+  the others with "aborted", so nothing waits forever and the pending maps
+  don't grow.
 - **Actions apply at a tick boundary.** The worker queues them and applies
   the queue at the start of its next loop turn, before stepping; the loop
   is the only place that steps, so that is always between two ticks (as the
@@ -1019,15 +1030,21 @@ Every choice the spec left open, and every simplification, in one place.
   which never steps prep. The cost is a frozen crowd during prep.
 - **Pause and speed never reach the sim.** They only decide how many ticks
   the worker steps per 50 ms of wall time (1, 2 or 4; result screens and
-  prep step none). A test checks it: the same seed and actions run once
+  prep step none). A pause belongs to its wave (T5 review): `pause` is
+  ignored unless a wave runs, and entering prep (next wave, retry,
+  restart) clears both the pause and `pause_at`, so a wave never starts
+  paused because the previous one was. A test checks it: the same seed and actions run once
   with button clicks at 1×, paused, then 4×, and once as fast as possible,
   hash the same at the same wave tick.
 - **Test-only speeds:** with `?test=1` (the page sends `test: true` in
   `init`; the worker refuses them otherwise) the speed may also be 16
   ticks per 50 ms or 0, "as fast as possible": the worker steps for 40 ms
   slices and yields between them so messages get through. `pause_at` makes
-  the worker pause itself on a given match tick, so a test can act at an
-  exact tick whatever the browser's speed. Both are clock controls: they
+  the worker pause itself on a given match tick while a wave runs, so a
+  test can act at an exact tick whatever the browser's speed; set to the
+  prep's tick (the hook's `startPaused`), the next wave starts paused on
+  its first tick. That replaced the tests' "pause in prep, then Start",
+  which relied on the pause carrying over. Both are clock controls: they
   change when ticks run, never what a tick does.
 - **Triple-buffered rendering is unchanged**, but the slots now hold the
   capacity (`max_population`, 100k: ~2.7 MB for the three slots) and a new
@@ -1048,7 +1065,51 @@ Every choice the spec left open, and every simplification, in one place.
   cost. Repair and pull-down: a click with no card selected asks the worker
   for the structure within 3 m of the point (fence cells are 2 m, so a
   click needn't hit the exact cell) or the garrison on the clicked
-  building, with its repair cost and refund.
+  building, with its repair cost and refund. A click inside a garrisoned
+  building picks that garrison even with a fence within 3 m (T5 review).
+- **Building picks (T5 review).** An armament only takes highlighted
+  buildings (`validBuildings`); a click on any other building leaves the
+  picks as they are and says why ("Not available: already garrisoned",
+  "outside the revealed area", "too small to garrison"). A play the core
+  refuses keeps the card selected (the picks too; a line draft is
+  dropped), so the player fixes the target instead of starting over.
+  While a play waits for its answer, clicks and drags are ignored.
+- **A selection lives in one hand and one phase (T5 review).** It is
+  dropped (with the targeting panel, hint, cursor, map-panning lock and
+  line draft) when the card at its hand position is no longer the same
+  card, on every phase change, and on a retry or restart, including one
+  that stays in prep (the status's `retries`/`restarts` counters moved).
+  Before, the selection silently became whatever card took the position,
+  so the next map press could draft and play a fence nobody chose.
+- **Phase buttons are one at a time (T5 review).** Start / Next wave,
+  Retry, Restart (toolbar and result panel) and Mulligan are disabled while
+  one of those actions waits for its answer, so a double click sends one
+  action (no second retry, no refused second Start and its toast). Retry
+  is disabled in prep: there it would only count a retry.
+- **The inspect panel asks again (T5 review).** It holds the structure id
+  and asks the worker for that id's repair cost and refund (`costs`) on
+  every `state`, `placements` (fence damage, every 250 ms while a wave
+  runs) and phase change, one query at a time. It closes when the
+  structure is gone and on every retry or restart, since structure ids are
+  reused after a restart. Its element carries `data-structure` for tests.
+- **Seed changes commit on Enter or "New match" only** (a blur does
+  nothing), and ask for confirmation while a wave runs or a result panel
+  is up. The download name uses the seed of the match on screen, not the
+  input.
+- **Keep clicks build on each other.** The page keeps the list it last
+  sent until every pending `keep_cards` is answered, so two quick clicks
+  keep both cards; a refused toggle is taken back from that list.
+- **Keyboard:** a focused hand card is selected with Enter or Space (it
+  keeps the focus across the hand's re-render); Space on a focused card or
+  button only activates that control, never also the pause shortcut.
+- **Error wording (T5 review).** `ActionError`'s `Display` is player
+  facing: `Phase`, `CardKind` and `TargetKind` have their own `Display`
+  ("prep", "a wave in progress", "tactical", "a line", ...), action names
+  read as words ("pull down is not allowed during a wave in progress"),
+  and no building, fence, structure or hand index appears. Errors keep the
+  card id (the error carries no card database); the page swaps a leading
+  id for the card's name. Messages are not hashed: no fixture, golden
+  record or hash changed.
 - **Fog** is drawn from `radius_m` and `next_radius_m`: the next ring gets
   a light dark veil, everything past it a darker one. No agent can be in
   the fog (cells outside the revealed disc are walls; a test checks it), so
@@ -1076,14 +1137,17 @@ Every choice the spec left open, and every simplification, in one place.
   `startWave`, `nextWave`, `retryWave`, `restartMatch`) that go through the
   same `act` function as the UI controls, read-only queries (`pick`,
   `fenceLength`, `agents`, `zombies`), the clock (`pause`, `speed` with
-  the test-only 16 and 0, `pauseAt`), and screen helpers. `uiActions`
+  the test-only 16 and 0, `pauseAt`, `startPaused`), the inspect panel
+  (`inspected`), and screen helpers. `uiActions`
   counts the actions the UI controls sent and keeps the last refusal, so a
   test can wait for a click's outcome.
 - **The full-match test** (`web/e2e/match.spec.ts`) plays a scripted
   scenario (`e2e/scenario.ts`) on the Marais with seed 2: wave 1 lost with
   no defence and retried, a mulligan in wave 2, keep choices every wave,
   one armament by building clicks, one fence by a drag pulled down again
-  by a click on it, the first tactical card by a click on the map, and a
+  by a click on it, the first repair by a click on the damaged fence and
+  the panel's Repair button (after checking the panel shows the worker's
+  current cost), the first tactical card by a click on the map, and a
   bot (`e2e/bot.ts`, a TypeScript port of `sim-headless match`'s
   strategy) for the rest. While a tactical card is playable it pauses on
   every 40th wave tick (`pause_at`), like the Node check, so the browser

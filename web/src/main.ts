@@ -9,6 +9,7 @@ import suburbUrl from "../../levels/suburb.json?url";
 import cardsJson from "../../cards.json?raw";
 import { Place, createExplore } from "./explore";
 import { generateLevel } from "./levelgen";
+import { parseSeed } from "./seed";
 import {
   Action,
   ActionError,
@@ -119,10 +120,22 @@ interface Selection {
   picked: number[]; // buildings
   draft: number[][] | null; // polyline being dragged
   draftInfo: { length: number | null; error: string | null } | null;
+  /** A play of this selection is waiting for the core's answer: clicks and
+   *  drags are ignored meanwhile. */
+  busy: boolean;
 }
 let sel: Selection | null = null;
-// A structure being inspected (repair / pull down).
-let inspected: { id: number; pick: Pick } | null = null;
+// A structure being inspected (repair / pull down) and its current costs
+// (asked again after every state, placements and phase change).
+let inspected: { id: number; repairCost: number; refund: number } | null = null;
+// A phase-changing action (start, next, retry, restart, mulligan) is in
+// flight: those buttons are disabled until it is answered.
+let phaseBusy = false;
+// Keep marks clicked but not answered yet (the whole list each click sends),
+// so quick clicks build on each other instead of on the last state.
+let keepPending: { list: number[]; inFlight: number } | null = null;
+// The seed of the match on screen (a decimal string: u64, exact).
+let matchSeed = "1";
 
 // Interpolation buffers (alternated so deck.gl sees a new array each frame).
 let posBufs: F32[] = [new Float32Array(0), new Float32Array(0)];
@@ -139,8 +152,11 @@ let fbSeq = 0;
 // ---------------------------------------------------------------- worker requests
 let nextId = 1;
 const pendingActions = new Map<number, (e: ActionError | null) => void>();
-const pendingQueries = new Map<number, (r: QueryResult) => void>();
-const pendingRecords = new Map<number, (json: string) => void>();
+// Queries and records reject with ABORTED when the worker has no match to
+// ask (stopped or re-initialised); actions resolve with an `aborted` error.
+const ABORTED = "aborted";
+const pendingQueries = new Map<number, { ok: (r: QueryResult) => void; fail: (e: Error) => void }>();
+const pendingRecords = new Map<number, { ok: (json: string) => void; fail: (e: Error) => void }>();
 
 /** Send an action; resolves with the core's refusal or null once applied.
  *  Every UI control and every test-hook helper goes through here. */
@@ -154,20 +170,22 @@ function act(action: Action): Promise<ActionError | null> {
 
 function query(q: Query): Promise<QueryResult> {
   const id = nextId++;
-  return new Promise((resolve) => {
-    pendingQueries.set(id, resolve);
+  return new Promise((ok, fail) => {
+    pendingQueries.set(id, { ok, fail });
     send({ type: "query", id, query: q });
   });
 }
 /** What is at a map point (building, structure, costs): read-only. */
 const pickAt = async (x: number, y: number) => ((await query({ q: "pick", x, y })) as Extract<QueryResult, { q: "pick" }>).pick;
+/** Repair cost and refund of a structure now (-1: none). */
+const costsOf = async (id: number) => (await query({ q: "costs", id })) as Extract<QueryResult, { q: "costs" }>;
 /** Placed length of a polyline, or why it can't be placed. */
 const fenceLength = async (pts: number[]) => (await query({ q: "fence_length", pts })) as Extract<QueryResult, { q: "fence_length" }>;
 
 function fetchRecord(): Promise<string> {
   const id = nextId++;
-  return new Promise((resolve) => {
-    pendingRecords.set(id, resolve);
+  return new Promise((ok, fail) => {
+    pendingRecords.set(id, { ok, fail });
     send({ type: "record", id });
   });
 }
@@ -187,12 +205,27 @@ async function uiAct(action: Action): Promise<ActionError | null> {
   let e = await act(action);
   if (e) {
     e = { ...e, message: errorText(e) };
-    toast(e.message);
+    // A stopped match answers `aborted`: nothing to tell the player.
+    if (e.error !== ABORTED) toast(e.message);
   }
   uiActions.count++;
   uiActions.type = action.type;
   uiActions.error = e;
   return e;
+}
+
+/** A phase-changing action from a button: one at a time (a double click
+ *  sends one action, never a second retry or a refused second start). */
+async function phaseAct(action: Action): Promise<void> {
+  if (phaseBusy) return;
+  phaseBusy = true;
+  updateControls();
+  try {
+    await uiAct(action);
+  } finally {
+    phaseBusy = false;
+    updateControls();
+  }
 }
 
 // ---------------------------------------------------------------- map + deck overlay
@@ -282,10 +315,12 @@ if (TEST_MODE) {
       drawn: () => structuredClone(drawn),
       hint: () => $("hint").textContent ?? "",
       selection: () => (sel ? { handIndex: sel.handIndex, card: sel.card.card, picked: [...sel.picked] } : null),
+      inspected: () => (inspected ? { ...inspected } : null),
       toSim,
       toLngLat,
       enterPreset: (i) => enterGame(PRESETS[i]),
       newMatch: (seed) => {
+        // The seed input plus Enter, without the confirmation.
         ($("seed") as HTMLInputElement).value = String(seed);
         newMatch();
       },
@@ -308,44 +343,90 @@ map.on("click", (e) => {
 
 async function onMapClick(x: number, y: number) {
   if (sel) {
-    const c = sel.card;
+    const s = sel;
+    if (s.busy) return;
+    const c = s.card;
     if (c.target === "point") {
-      const hi = sel.handIndex;
-      clearSelection();
-      await uiAct({ type: "play_card", hand_index: hi, target: { point: [x, y] } });
+      await playSelection(s, { point: [x, y] });
     } else if (c.target === "buildings") {
-      const pick = await pickAt(x, y);
-      if (!sel || sel.card.target !== "buildings") return;
+      let pick: Pick;
+      try {
+        pick = await pickAt(x, y);
+      } catch {
+        return; // the match stopped
+      }
+      if (sel !== s || s.busy) return;
+      const max = CARDS.get(c.card)?.effect.buildings ?? 1;
+      const i = s.picked.indexOf(pick.building);
       if (pick.building < 0) {
-        setHint("Click a building (inside the revealed area)");
+        setHint("Click a building (inside the revealed area)", true);
         return;
       }
-      const i = sel.picked.indexOf(pick.building);
-      if (i >= 0) sel.picked.splice(i, 1);
-      else sel.picked.push(pick.building);
-      const max = CARDS.get(c.card)?.effect.buildings ?? 1;
-      if (sel.picked.length >= max) await playSelection();
+      if (i >= 0) {
+        s.picked.splice(i, 1);
+        updateTargeting();
+        return;
+      }
+      // Only highlighted buildings: anything else leaves the picks as they are.
+      const why = unavailable(pick.building);
+      if (why) {
+        setHint(`Not available: ${why}. ${s.picked.length}/${max} picked.`, true);
+        return;
+      }
+      if (s.picked.length >= max) {
+        setHint(`Already ${max} picked: click one to drop it, or Place.`, true);
+        return;
+      }
+      s.picked.push(pick.building);
+      if (s.picked.length >= max) await playSelection(s);
       else updateTargeting();
     }
     return;
   }
   // No card selected: inspect a structure (repair / pull down).
-  const pick = await pickAt(x, y);
-  if (pick.structure >= 0) {
-    inspected = { id: pick.structure, pick };
-  } else inspected = null;
+  let pick: Pick;
+  try {
+    pick = await pickAt(x, y);
+  } catch {
+    return;
+  }
+  if (sel) return; // a card was selected meanwhile
+  inspected = pick.structure >= 0 ? { id: pick.structure, repairCost: pick.repairCost, refund: pick.refund } : null;
   updateInspect();
 }
 
-async function playSelection() {
-  if (!sel) return;
-  const s = sel;
+/** Why building `b` can't take an armament now, or null if it can (the
+ *  highlighted `validBuildings`). */
+function unavailable(b: number): string | null {
+  if (validBuildings().some((v) => v.index === b)) return null;
+  for (let i = 0; i < towers.length; i += 5) if (towers[i] === b) return "already garrisoned";
+  const bld = buildings[b];
+  if (bld && bld.cells === 0) return "too small to garrison";
+  return "outside the revealed area";
+}
+
+/** Play the selected card on `target` (default: the picked buildings or the
+ *  drawn line). A refused play keeps the card selected (and the picks), so
+ *  the player can fix the target and try again. */
+async function playSelection(s: Selection | null = sel, given?: Target) {
+  if (!s || s !== sel || s.busy) return;
   let target: Target;
-  if (s.card.target === "buildings") target = { buildings: [...s.picked] };
+  if (given) target = given;
+  else if (s.card.target === "buildings") target = { buildings: [...s.picked] };
   else if (s.card.target === "polyline" && s.draft) target = { polyline: s.draft.map((p) => [p[0], p[1]] as [number, number]) };
   else return;
-  clearSelection();
-  await uiAct({ type: "play_card", hand_index: s.handIndex, target });
+  s.busy = true;
+  updateTargeting();
+  const e = await uiAct({ type: "play_card", hand_index: s.handIndex, target });
+  s.busy = false;
+  if (sel !== s) return; // cleared meanwhile (the card left the hand, the phase changed)
+  if (e) {
+    clearTimeout(trailingMeasure);
+    s.draft = null;
+    s.draftInfo = null;
+    updateTargeting();
+    if (s.card.target !== "polyline") setHint(e.message, true);
+  } else clearSelection();
 }
 
 // Line drag for polyline cards (fortifications, convoy routes): map panning
@@ -353,7 +434,7 @@ async function playSelection() {
 let lastLengthQuery = 0;
 let trailingMeasure = 0;
 map.on("mousedown", (e) => {
-  if (!inGame() || !sel || sel.card.target !== "polyline" || e.originalEvent.button !== 0) return;
+  if (!inGame() || !sel || sel.busy || sel.card.target !== "polyline" || e.originalEvent.button !== 0) return;
   const p = toSim(e.lngLat);
   if (!p) return;
   sel.draft = [p];
@@ -361,7 +442,7 @@ map.on("mousedown", (e) => {
   updateTargeting();
 });
 map.on("mousemove", (e) => {
-  if (!sel?.draft) return;
+  if (!sel?.draft || sel.busy) return;
   const p = toSim(e.lngLat);
   if (!p) return;
   const last = sel.draft[sel.draft.length - 1];
@@ -377,7 +458,7 @@ map.on("mousemove", (e) => {
   updateTargeting();
 });
 window.addEventListener("mouseup", () => {
-  if (!sel?.draft) return;
+  if (!sel?.draft || sel.busy) return;
   if (sel.draft.length >= 2) void playSelection();
   else {
     sel.draft = null;
@@ -389,7 +470,12 @@ async function measureDraft() {
   const s = sel;
   if (!s?.draft) return;
   const points = s.draft.length;
-  const r = await fenceLength(s.draft.flat());
+  let r: Awaited<ReturnType<typeof fenceLength>>;
+  try {
+    r = await fenceLength(s.draft.flat());
+  } catch {
+    return;
+  }
   if (sel === s && s.draft && s.draft.length === points) {
     s.draftInfo = { length: r.length, error: r.error };
     updateTargeting();
@@ -412,7 +498,7 @@ function selectCard(i: number) {
   }
   inspected = null;
   updateInspect();
-  sel = { handIndex: i, card: c, picked: [], draft: null, draftInfo: null };
+  sel = { handIndex: i, card: c, picked: [], draft: null, draftInfo: null, busy: false };
   if (c.target === "polyline") map.dragPan.disable();
   else map.dragPan.enable();
   map.getCanvas().style.cursor = c.target === "polyline" ? "crosshair" : "pointer";
@@ -420,8 +506,11 @@ function selectCard(i: number) {
   renderHand();
 }
 
+/** Drop the selection and everything that goes with it: targeting panel,
+ *  hint, cursor, map panning, line draft. */
 function clearSelection() {
   sel = null;
+  clearTimeout(trailingMeasure);
   map.dragPan.enable();
   map.getCanvas().style.cursor = "";
   updateTargeting();
@@ -446,7 +535,7 @@ function updateTargeting() {
     const max = def?.effect.buildings ?? 1;
     setHint(`Click up to ${max} highlighted building${max > 1 ? "s" : ""} (${sel.picked.length}/${max})`);
     place.textContent = `Place (${sel.picked.length}/${max})`;
-    place.disabled = sel.picked.length === 0;
+    place.disabled = sel.picked.length === 0 || sel.busy;
   } else if (c.target === "polyline") {
     const limit = def?.effect.length_m;
     if (!sel.draft) setHint(limit ? `Drag a line on open ground (up to ${limit} m)` : "Drag the route");
@@ -475,7 +564,8 @@ function updateInspect() {
   }
   const name = CARDS.get(s.card)?.name ?? s.card;
   const prep = phase() === "prep";
-  const { repairCost, refund } = inspected.pick;
+  const { repairCost, refund } = inspected;
+  $("inspect").dataset.structure = String(s.id);
   $("i-name").textContent = `${name} (wave ${s.wave})`;
   const what = s.kind.type === "fence" ? `${s.kind.length_m.toFixed(0)} m of fence` : `${s.kind.buildings.length} building${s.kind.buildings.length > 1 ? "s" : ""}`;
   $("i-info").textContent = prep ? what : `${what} · repair and pull-down in prep only`;
@@ -488,21 +578,86 @@ function updateInspect() {
   pull.disabled = !prep || refund < 0;
 }
 
-async function refreshInspect() {
-  if (!inspected) return;
-  // Costs change with damage and phase: ask again for the same spot's numbers.
-  const s = structures.find((x) => x.id === inspected!.id);
-  if (!s) {
-    inspected = null;
-    updateInspect();
-    return;
-  }
+function closeInspect() {
+  inspected = null;
   updateInspect();
 }
 
+// Costs change with damage and phase: ask the worker again for the
+// inspected structure's numbers (one query at a time; a change meanwhile
+// asks once more).
+let inspectAsking = false;
+let inspectAgain = false;
+async function refreshInspect() {
+  if (!inspected) return;
+  if (inspectAsking) {
+    inspectAgain = true;
+    return;
+  }
+  inspectAsking = true;
+  try {
+    do {
+      inspectAgain = false;
+      const ins: typeof inspected = inspected;
+      if (!ins) break;
+      if (!structures.some((x) => x.id === ins.id)) {
+        closeInspect();
+        break;
+      }
+      let c: Awaited<ReturnType<typeof costsOf>>;
+      try {
+        c = await costsOf(ins.id);
+      } catch {
+        break; // the match stopped
+      }
+      if (inspected !== ins) continue;
+      if (!c.exists) {
+        closeInspect();
+        break;
+      }
+      ins.repairCost = c.repairCost;
+      ins.refund = c.refund;
+      updateInspect();
+    } while (inspectAgain);
+  } finally {
+    inspectAsking = false;
+  }
+}
+
 // ---------------------------------------------------------------- hand
+/** The keep marks as they will be once the pending clicks are answered. */
+function keptNow(): number[] {
+  return keepPending ? [...keepPending.list] : hand.filter((h) => h.keep).map((h) => h.hand_index);
+}
+
+async function toggleKeep(i: number) {
+  const list = keptNow();
+  const at = list.indexOf(i);
+  if (at >= 0) list.splice(at, 1);
+  else list.push(i);
+  keepPending = { list, inFlight: (keepPending?.inFlight ?? 0) + 1 };
+  renderHand();
+  const e = await uiAct({ type: "keep_cards", hand_indices: [...list] });
+  const p = keepPending;
+  if (!p) return;
+  p.inFlight--;
+  if (e) {
+    // Refused: take this toggle back from what later clicks build on.
+    const k = p.list.indexOf(i);
+    if (at >= 0 && k < 0) p.list.push(i);
+    else if (at < 0 && k >= 0) p.list.splice(k, 1);
+  }
+  if (p.inFlight === 0) keepPending = null;
+  renderHand();
+}
+
 function renderHand() {
   const el = $("hand");
+  // Keep the keyboard focus on the same card across the rebuild.
+  const focused = el.contains(document.activeElement) ? (document.activeElement as HTMLElement) : null;
+  const focusIndex = focused?.closest<HTMLElement>(".hcard")?.dataset.index;
+  const focusKeep = !!focused?.classList.contains("c-keep");
+  const kept = keptNow();
   el.replaceChildren();
   for (const c of hand) {
     const def = CARDS.get(c.card);
@@ -521,18 +676,26 @@ function renderHand() {
     (b.querySelector(".c-rarity") as HTMLElement).textContent = c.rarity;
     (b.querySelector(".c-text") as HTMLElement).textContent = def?.text ?? "";
     b.addEventListener("click", () => selectCard(c.hand_index));
+    // Enter or Space on the focused card selects it (and Space does not
+    // also reach the window's pause shortcut).
+    b.addEventListener("keydown", (ev) => {
+      if (ev.target !== b || (ev.key !== "Enter" && ev.key !== " ")) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      selectCard(c.hand_index);
+    });
+    const isKept = kept.includes(c.hand_index);
     const keep = document.createElement("button");
-    keep.className = `c-keep${c.keep ? " on" : ""}`;
-    keep.textContent = c.keep ? "Kept for next wave" : "Keep";
+    keep.className = `c-keep${isKept ? " on" : ""}`;
+    keep.textContent = isKept ? "Kept for next wave" : "Keep";
     keep.title = "Keep this card for the next wave (up to 2); the others are discarded";
     keep.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      const kept = hand.filter((h) => h.keep).map((h) => h.hand_index);
-      const next = c.keep ? kept.filter((k) => k !== c.hand_index) : [...kept, c.hand_index];
-      void uiAct({ type: "keep_cards", hand_indices: next });
+      void toggleKeep(c.hand_index);
     });
     b.appendChild(keep);
     el.appendChild(b);
+    if (focusIndex === String(c.hand_index)) (focusKeep ? keep : b).focus();
   }
 }
 
@@ -914,13 +1077,17 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     return;
   }
   if (m.type === "query") {
-    pendingQueries.get(m.id)?.(m.result);
+    const p = pendingQueries.get(m.id);
     pendingQueries.delete(m.id);
+    if ("aborted" in m) p?.fail(new Error(ABORTED));
+    else p?.ok(m.result);
     return;
   }
   if (m.type === "record") {
-    pendingRecords.get(m.id)?.(m.json);
+    const p = pendingRecords.get(m.id);
     pendingRecords.delete(m.id);
+    if ("aborted" in m) p?.fail(new Error(ABORTED));
+    else p?.ok(m.json);
     return;
   }
   if (document.body.dataset.screen !== "game") return; // late messages after "← Map"
@@ -953,15 +1120,17 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       fbSeq++;
       break;
     case "status": {
-      const was = status?.phase;
-      const wave = status?.wave;
+      const prev = status;
       status = m.status;
       perf = m.perf;
-      if (!fitted || (wave !== undefined && wave !== status.wave)) {
+      if (!fitted || (prev && prev.wave !== status.wave)) {
         fitView(fitted);
         fitted = true;
       }
-      if (was !== status.phase) onPhaseChange();
+      // A retry or a restart (even one that stays in prep) is a new prep:
+      // structure ids may be reused, the hand is new.
+      const reset = !!prev && (prev.retries !== status.retries || prev.restarts !== status.restarts);
+      if (prev?.phase !== status.phase || reset) onPhaseChange(reset);
       updateControls();
       updateHud();
       break;
@@ -971,8 +1140,13 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       structures = m.structures;
       results = m.results;
       attempts = m.attempts;
-      if (sel && !hand[sel.handIndex]) clearSelection();
-      else if (sel) sel.card = hand[sel.handIndex];
+      if (sel) {
+        // The card at the selected position changed (played, retried,
+        // redrawn): the selection was for another card, drop it.
+        const c = hand[sel.handIndex];
+        if (!c || c.card !== sel.card.card) clearSelection();
+        else sel.card = c;
+      }
       renderHand();
       void refreshInspect();
       updateControls();
@@ -980,6 +1154,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "placements":
       towers = m.towers;
       fences = m.fences;
+      // Fence damage changes the inspected fence's repair cost and refund.
+      void refreshInspect();
       break;
     case "error":
       if (m.fatal) prepError(m.message);
@@ -1015,13 +1191,30 @@ function toast(msg: string) {
   (t as unknown as { _h: number })._h = window.setTimeout(() => (t.hidden = true), 3200);
 }
 
-function seed(): string {
-  return String(Math.max(0, Math.floor(Number(($("seed") as HTMLInputElement).value) || 0)));
+/** The seed input's "New match" (Enter or the button): asks first when it
+ *  would throw away a running wave or a result on screen. */
+function requestNewMatch() {
+  if (!currentLevelJson) return;
+  const seed = parseSeed(($("seed") as HTMLInputElement).value);
+  if (seed === null) {
+    toast("The seed must be a whole number from 0 to 18446744073709551615");
+    return;
+  }
+  const p = phase();
+  if ((p === "running" || shownResult !== null) && !confirm(`Start a new match with seed ${seed}? The current match will be lost.`)) return;
+  newMatch();
 }
 
 /** A new match on the current level (the seed input's seed, starter deck). */
 function newMatch() {
   if (!currentLevelJson) return;
+  const seed = parseSeed(($("seed") as HTMLInputElement).value);
+  if (seed === null) {
+    toast("The seed must be a whole number from 0 to 18446744073709551615");
+    return;
+  }
+  matchSeed = seed;
+  ($("seed") as HTMLInputElement).value = seed;
   prepStatus("Preparing the match…");
   status = null;
   hand = [];
@@ -1032,10 +1225,11 @@ function newMatch() {
   fences = new Float32Array(0);
   buildings = [];
   inspected = null;
+  keepPending = null;
   clearSelection();
   updateControls();
   // The starter deck ("Civil Defence Issue") until the deck builder (T7b).
-  send({ type: "init", levelJson: currentLevelJson, setup: { seed: seed() }, test: TEST_MODE });
+  send({ type: "init", levelJson: currentLevelJson, setup: { seed }, test: TEST_MODE });
 }
 
 // ---------------------------------------------------------------- screens
@@ -1123,16 +1317,18 @@ const PHASE_LABEL: Record<string, string> = { prep: "Prep", running: "Outbreak",
 function updateControls() {
   const p = phase();
   const startBtn = $("start") as HTMLButtonElement;
-  startBtn.disabled = p !== "prep" && p !== "wave_won";
+  startBtn.disabled = phaseBusy || (p !== "prep" && p !== "wave_won");
   startBtn.textContent = p === "wave_won" ? "Next wave" : "Start wave";
   ($("pause") as HTMLButtonElement).disabled = p !== "running";
   $("pause").textContent = perf?.paused ? "Resume" : "Pause";
   for (const s of [1, 2, 4]) $(`speed-${s}`).classList.toggle("on", perf?.speed === s);
-  ($("retry") as HTMLButtonElement).disabled = !p || p === "match_won";
-  ($("restart") as HTMLButtonElement).disabled = !p;
+  // Retry in prep would only count a retry: the prep is already the start.
+  ($("retry") as HTMLButtonElement).disabled = phaseBusy || !p || p === "prep" || p === "match_won";
+  ($("restart") as HTMLButtonElement).disabled = phaseBusy || !p;
+  for (const id of ["r-next", "r-retry", "r-restart"]) ($(id) as HTMLButtonElement).disabled = phaseBusy;
   const mull = $("mulligan") as HTMLButtonElement;
   mull.textContent = `Mulligan (${status?.mulligan_cost ?? 1} supply)`;
-  mull.disabled = !status?.mulligan_available;
+  mull.disabled = phaseBusy || !status?.mulligan_available;
   $("phase").textContent = !p ? "Loading" : perf?.paused && p === "running" ? "Paused" : PHASE_LABEL[p];
   $("phase").dataset.phase = p ?? "";
   $("t-title").textContent = p === "running" ? "Wave" : p === "prep" ? "Prep" : "Between waves";
@@ -1177,9 +1373,16 @@ function updateHud() {
 // ---------------------------------------------------------------- results
 let shownResult: string | null = null;
 
-function onPhaseChange() {
+/** The phase changed, or a retry or restart opened a new prep (`reset`). */
+function onPhaseChange(reset = false) {
   const p = phase();
-  if (sel && !(p === "prep" || p === "running")) clearSelection();
+  // A selection belongs to one phase: the card's rules, the hint and the
+  // hand all change with it.
+  if (sel) clearSelection();
+  // Structure ids are reused after a restart, and a retry puts the
+  // structures back: an open inspect panel would show another structure.
+  if (reset) closeInspect();
+  else void refreshInspect();
   // The worker sends the state (hand, results) before the status that
   // changed the phase, so the results are already here.
   if (p === "wave_won" || p === "wave_lost" || p === "match_won") showResult(p);
@@ -1254,7 +1457,7 @@ async function downloadRecord() {
   const a = document.createElement("a");
   const place = (currentPlace?.name ?? "match").normalize("NFKD").replace(/[^\w]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
   a.href = URL.createObjectURL(blob);
-  a.download = `zombie-td-run-${place}-seed${seed()}.json`;
+  a.download = `zombie-td-run-${place}-seed${matchSeed}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1266,27 +1469,34 @@ $("back").addEventListener("click", backToMap);
 $("prep-back").addEventListener("click", backToMap);
 $("r-map").addEventListener("click", backToMap);
 $("prep-retry").addEventListener("click", () => currentPlace && enterGame(currentPlace));
-$("seed").addEventListener("change", () => newMatch());
-$("start").addEventListener("click", () => void uiAct({ type: phase() === "wave_won" ? "next_wave" : "start_wave" }));
+// The seed only commits on Enter or New match (a blur alone does nothing).
+$("seed").addEventListener("keydown", (e) => {
+  if ((e as KeyboardEvent).key === "Enter") requestNewMatch();
+});
+$("new-match").addEventListener("click", requestNewMatch);
+$("start").addEventListener("click", () => void phaseAct({ type: phase() === "wave_won" ? "next_wave" : "start_wave" }));
 $("pause").addEventListener("click", () => send({ type: "pause", paused: !perf?.paused }));
 for (const s of [1, 2, 4]) $(`speed-${s}`).addEventListener("click", () => send({ type: "speed", speed: s }));
-$("retry").addEventListener("click", () => void uiAct({ type: "retry_wave" }));
-$("restart").addEventListener("click", () => void uiAct({ type: "restart_match" }));
+/** Retry and restart drop the selection and the inspect panel at once. */
+function resetAct(action: Action) {
+  clearSelection();
+  closeInspect();
+  void phaseAct(action);
+}
+$("retry").addEventListener("click", () => resetAct({ type: "retry_wave" }));
+$("restart").addEventListener("click", () => resetAct({ type: "restart_match" }));
 $("mulligan").addEventListener("click", () => {
   clearSelection();
-  void uiAct({ type: "mulligan" });
+  void phaseAct({ type: "mulligan" });
 });
 $("sel-place").addEventListener("click", () => void playSelection());
 $("sel-cancel").addEventListener("click", () => clearSelection());
-$("i-repair").addEventListener("click", () => inspected && void uiAct({ type: "repair", fence_id: inspected.id }).then(() => (inspected = null, updateInspect())));
-$("i-pull").addEventListener("click", () => inspected && void uiAct({ type: "pull_down", placement_id: inspected.id }).then(() => (inspected = null, updateInspect())));
-$("i-close").addEventListener("click", () => {
-  inspected = null;
-  updateInspect();
-});
-$("r-next").addEventListener("click", () => void uiAct({ type: "next_wave" }));
-$("r-retry").addEventListener("click", () => void uiAct({ type: "retry_wave" }));
-$("r-restart").addEventListener("click", () => void uiAct({ type: "restart_match" }));
+$("i-repair").addEventListener("click", () => inspected && void uiAct({ type: "repair", fence_id: inspected.id }).then(closeInspect));
+$("i-pull").addEventListener("click", () => inspected && void uiAct({ type: "pull_down", placement_id: inspected.id }).then(closeInspect));
+$("i-close").addEventListener("click", closeInspect);
+$("r-next").addEventListener("click", () => void phaseAct({ type: "next_wave" }));
+$("r-retry").addEventListener("click", () => resetAct({ type: "retry_wave" }));
+$("r-restart").addEventListener("click", () => resetAct({ type: "restart_match" }));
 $("r-download").addEventListener("click", () => void downloadRecord());
 $("r-close").addEventListener("click", () => ($("result").hidden = true));
 $("fit").addEventListener("click", () => fitView());
@@ -1300,13 +1510,15 @@ for (const k of ["none", "chase", "flee"] as const) {
 }
 $("hash-toggle").addEventListener("change", (e) => (showHash = (e.target as HTMLInputElement).checked));
 window.addEventListener("keydown", (e) => {
-  if ((e.target as HTMLElement).tagName === "INPUT") return;
+  const t = e.target as HTMLElement;
+  if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return;
   if (e.key === "Escape") {
     clearSelection();
     inspected = null;
     updateInspect();
   }
-  if (e.key === " " && phase() === "running") {
+  // Space on a focused button or card activates that control only.
+  if (e.key === " " && phase() === "running" && !t.closest("button, [role=button]")) {
     e.preventDefault();
     send({ type: "pause", paused: !perf?.paused });
   }

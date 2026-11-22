@@ -39,6 +39,8 @@ export interface ScenarioApi extends BotApi {
     playFence?(handIndex: number, pts: [number, number][]): Promise<string | null>;
     /** Pull down structure `id` (a fence) by clicking it. */
     pullDown?(id: number): Promise<string | null>;
+    /** Repair fence `id` by clicking it, then the panel's Repair button. */
+    repair?(id: number): Promise<string | null>;
     playTactical?(handIndex: number, p: [number, number]): Promise<string | null>;
     mulligan?(): Promise<string | null>;
     keep?(handIndices: number[]): Promise<string | null>;
@@ -50,7 +52,7 @@ export interface ScenarioApi extends BotApi {
 }
 
 export interface ScenarioLog {
-  counts: { mulligans: number; keeps: number; tactical: number; pullDowns: number; repairs: number; lost: number; uiPlays: number };
+  counts: { mulligans: number; keeps: number; tactical: number; pullDowns: number; repairs: number; uiRepairs: number; lost: number; uiPlays: number };
   waves: { wave: number; attempt: number; result: string; ticks: number }[];
 }
 
@@ -59,7 +61,7 @@ const MAX_RETRIES_PER_WAVE = 4;
 export async function runScenario(api: ScenarioApi, cardsJson: { cards: ({ id: string } & CardInfo)[] }, say: (s: string) => void = () => {}): Promise<ScenarioLog> {
   const cards: Record<string, CardInfo> = {};
   for (const c of cardsJson.cards) cards[c.id] = c;
-  const log: ScenarioLog = { counts: { mulligans: 0, keeps: 0, tactical: 0, pullDowns: 0, repairs: 0, lost: 0, uiPlays: 0 }, waves: [] };
+  const log: ScenarioLog = { counts: { mulligans: 0, keeps: 0, tactical: 0, pullDowns: 0, repairs: 0, uiRepairs: 0, lost: 0, uiPlays: 0 }, waves: [] };
   const ui = api.ui ?? {};
   const must = async (what: string, r: Promise<string | null>) => {
     const e = await r;
@@ -158,11 +160,17 @@ export async function runScenario(api: ScenarioApi, cardsJson: { cards: ({ id: s
       }
     }
     await playPrep(api, cards, variant, { a: 0.37 * attempt });
-    // Repair damaged fences with what supply is left.
+    // Repair damaged fences with what supply is left (the first one
+    // through the UI: a click on the fence, then Repair).
     for (const s of await api.structures()) {
       if (s.kind.type !== "fence") continue;
       const cost = await api.repairCost(s.id);
-      if (cost > 0 && cost <= (await api.status()).supply && (await api.apply({ type: "repair", fence_id: s.id })) === null) log.counts.repairs++;
+      if (cost <= 0 || cost > (await api.status()).supply) continue;
+      const viaUi = !!ui.repair && log.counts.uiRepairs === 0;
+      if ((await (viaUi ? ui.repair!(s.id) : api.apply({ type: "repair", fence_id: s.id }))) === null) {
+        log.counts.repairs++;
+        if (viaUi) log.counts.uiRepairs++;
+      }
     }
     // Keep the tactical cards (the first keep choice through the UI).
     if (ui.keep && log.counts.keeps === 1) {

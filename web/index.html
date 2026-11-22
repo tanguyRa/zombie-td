@@ -31,7 +31,8 @@
       <div class="brand">Zombie&nbsp;TD <span id="phase" class="phase">Loading</span></div>
       <button id="back" title="Back to the map">← Map</button>
       <span id="place" class="place"></span>
-      <label title="Match seed: the same seed and the same actions give the same match">Seed <input id="seed" type="number" min="0" value="1" /></label>
+      <label title="Match seed: the same seed and the same actions give the same match. Press Enter or New match to start it.">Seed <input id="seed" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" spellcheck="false" value="1" /></label>
+      <button id="new-match" title="A new match on this level with the seed on the left">New match</button>
       <div class="group">
         <button id="start" class="primary">Start wave</button>
         <button id="pause">Pause</button>

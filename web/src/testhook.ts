@@ -7,8 +7,10 @@
 // goes through main.ts's `act`, exactly like the UI controls: a worker
 // `action` message applied at the next tick boundary. Nothing here touches
 // sim state directly. The only test-only powers are speeds 16 and 0 ("as
-// fast as possible"), `pauseAt`, and the `agents` query; the worker
-// accepts them only from a page opened with `?test=1`.
+// fast as possible"), `pauseAt` (and `startPaused`, built on it), and the
+// `agents` query; the worker accepts them only from a page opened with
+// `?test=1`. Queries, records and hashes reject with "aborted" when there
+// is no match (after "← Map"); actions resolve with an `aborted` error.
 import type { Map as MlMap } from "maplibre-gl";
 import type {
   Action,
@@ -68,11 +70,14 @@ export interface TestHookDeps {
   drawn(): { layers: string[]; fogRadius: { revealed: number; next: number }; agents: number };
   hint(): string;
   selection(): { handIndex: number; card: string; picked: number[] } | null;
+  /** The inspect panel's structure and the costs it shows, or null. */
+  inspected(): { id: number; repairCost: number; refund: number } | null;
   toSim(ll: { lng: number; lat: number }): number[] | null;
   toLngLat(x: number, y: number): { lng: number; lat: number } | null;
   enterPreset(i: number): void;
-  /** Same as changing the Seed input: a new match on the current level. */
-  newMatch(seed: number): void;
+  /** Same as typing a seed and pressing Enter (without the confirmation):
+   *  a new match on the current level. A string keeps seeds above 2^53 exact. */
+  newMatch(seed: number | string): void;
 }
 
 export interface TestHook {
@@ -103,6 +108,7 @@ export interface TestHook {
    *  disc, next ring) and the number of agents drawn. */
   readonly drawn: { layers: string[]; fogRadius: { revealed: number; next: number }; agents: number };
   readonly selection: { handIndex: number; card: string; picked: number[] } | null;
+  readonly inspected: { id: number; repairCost: number; refund: number } | null;
   readonly mapIdle: boolean;
   stateHash(): Promise<{ tick: number; hash: string }>;
   /** The run record JSON (`WasmMatch.record()`), as the Download button saves it. */
@@ -128,14 +134,18 @@ export interface TestHook {
   pause(paused: boolean): void;
   /** 1, 2, 4, or test-only 16 and 0 (= as fast as possible). */
   speed(s: number): void;
-  /** Pause by itself once the match tick reaches `tick` (null clears). */
+  /** Pause by itself once the match tick reaches `tick` while a wave runs
+   *  (null clears; entering prep clears it). */
   pauseAt(tick: number | null): void;
+  /** In prep: the next wave starts paused on its first tick (`pauseAt` the
+   *  prep's tick; `pause` itself only works while a wave runs). */
+  startPaused(): void;
   // Geometry helpers.
   buildingPoint(i: number): [number, number] | null;
   toScreen(x: number, y: number): { x: number; y: number } | null;
   toSimPoint(clientX: number, clientY: number): [number, number] | null;
   enterPreset(i: number): void;
-  newMatch(seed: number): void;
+  newMatch(seed: number | string): void;
   debug: { map: MlMap; overlay: unknown };
 }
 
@@ -152,7 +162,7 @@ function inside(p: [number, number], poly: number[][]): boolean {
 /** Installs `window.__zt` and returns the worker-message tap main.ts must call. */
 export function installTestHook(d: TestHookDeps): (m: FromWorker) => boolean {
   let nextId = 1;
-  const waiting = new Map<number, (r: { tick: number; hash: string }) => void>();
+  const waiting = new Map<number, { ok: (r: { tick: number; hash: string }) => void; fail: (e: Error) => void }>();
   const clone = <T>(v: T): T => structuredClone(v);
 
   const hook: TestHook = {
@@ -231,13 +241,16 @@ export function installTestHook(d: TestHookDeps): (m: FromWorker) => boolean {
     get selection() {
       return d.selection();
     },
+    get inspected() {
+      return d.inspected();
+    },
     get mapIdle() {
       return !d.map.isMoving();
     },
     stateHash() {
       const id = nextId++;
-      return new Promise((resolve) => {
-        waiting.set(id, resolve);
+      return new Promise((ok, fail) => {
+        waiting.set(id, { ok, fail });
         d.send({ type: "hash", id });
       });
     },
@@ -262,6 +275,7 @@ export function installTestHook(d: TestHookDeps): (m: FromWorker) => boolean {
     pause: (paused) => d.send({ type: "pause", paused }),
     speed: (s) => d.send({ type: "speed", speed: s }),
     pauseAt: (tick) => d.send({ type: "pause_at", tick }),
+    startPaused: () => d.send({ type: "pause_at", tick: d.status()?.tick ?? 0 }),
     // An interior point of building i (vertex mean if inside, else the
     // first inside point on a coarse scan of its bounding box).
     buildingPoint(i) {
@@ -302,8 +316,10 @@ export function installTestHook(d: TestHookDeps): (m: FromWorker) => boolean {
 
   return (m) => {
     if (m.type !== "hash") return false;
-    waiting.get(m.id)?.({ tick: m.tick, hash: m.hash });
+    const w = waiting.get(m.id);
     waiting.delete(m.id);
+    if ("aborted" in m) w?.fail(new Error("aborted"));
+    else w?.ok({ tick: m.tick, hash: m.hash });
     return true;
   };
 }

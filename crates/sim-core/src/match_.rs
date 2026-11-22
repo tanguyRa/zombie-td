@@ -57,6 +57,20 @@ pub enum Phase {
     MatchWon,
 }
 
+impl std::fmt::Display for Phase {
+    /// The phase as the player sees it ("not during prep", "... during a
+    /// wave in progress").
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Phase::Prep => "prep",
+            Phase::Running => "a wave in progress",
+            Phase::WaveWon => "the won wave's result",
+            Phase::WaveLost => "the lost wave's result",
+            Phase::MatchWon => "the won match's result",
+        })
+    }
+}
+
 /// What a card is played on. Serialised externally tagged:
 /// `{"buildings": [3, 4]}`, `{"polyline": [[x, y], ...]}`, `{"point": [x, y]}`
 /// (sim coordinates).
@@ -176,30 +190,34 @@ pub enum ActionError {
 }
 
 impl std::fmt::Display for ActionError {
+    /// Player-facing wording: phases and kinds by their names in the game,
+    /// no building, fence or structure indices (the player can't know them).
+    /// Card ids stay (the error carries no card database); the browser
+    /// replaces a leading id with the card's name.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ActionError::WrongPhase { action, phase } => write!(f, "{action} is not allowed during {phase:?}"),
+            ActionError::WrongPhase { action, phase } => write!(f, "{} is not allowed during {phase}", action.replace('_', " ")),
             ActionError::RingNotLoaded { wave } => write!(f, "the district of wave {wave} is still loading"),
-            ActionError::NotRevealed { building } => write!(f, "building {building} is not in the revealed area"),
+            ActionError::NotRevealed { .. } => write!(f, "that building is not in the revealed area"),
             ActionError::Placement { reason } => write!(f, "{reason}"),
-            ActionError::NoSuchCard { hand_index } => write!(f, "no card at hand position {hand_index}"),
+            ActionError::NoSuchCard { .. } => write!(f, "that card is no longer in the hand"),
             ActionError::CardWrongPhase { card, kind, phase } => {
                 let when = if *kind == CardKind::Tactical { "during a wave" } else { "during prep" };
-                write!(f, "{card} is a {kind:?} card: it can only be played {when}, not during {phase:?}")
+                write!(f, "{card} is a {kind} card: it can only be played {when}, not during {phase}")
             }
             ActionError::NotEnoughSupply { need, have } => write!(f, "needs {need} supply, you have {have}"),
-            ActionError::WrongTarget { card, expected } => write!(f, "{card} must target {expected:?}"),
+            ActionError::WrongTarget { card, expected } => write!(f, "{card} must target {expected}"),
             ActionError::TooManyBuildings { card, max } => write!(f, "{card} equips at most {max} buildings"),
-            ActionError::AlreadyGarrisoned { building } => write!(f, "building {building} already has a garrison"),
+            ActionError::AlreadyGarrisoned { .. } => write!(f, "that building already has a garrison"),
             ActionError::OutsideRevealed => write!(f, "the target is outside the revealed area"),
             ActionError::MulliganUsed => write!(f, "only one mulligan per wave"),
             ActionError::MulliganAfterPlay => write!(f, "mulligan only before playing a card"),
             ActionError::EmptyHand => write!(f, "the hand is empty"),
             ActionError::TooManyKept { max } => write!(f, "keep at most {max} cards"),
-            ActionError::DuplicateIndex { hand_index } => write!(f, "hand position {hand_index} listed twice"),
-            ActionError::NoSuchStructure { placement_id } => write!(f, "no structure {placement_id}"),
-            ActionError::NoSuchFence { fence_id } => write!(f, "no fence {fence_id}"),
-            ActionError::NothingToRepair { fence_id } => write!(f, "fence {fence_id} is not damaged"),
+            ActionError::DuplicateIndex { .. } => write!(f, "the same card is listed twice"),
+            ActionError::NoSuchStructure { .. } => write!(f, "that structure is gone"),
+            ActionError::NoSuchFence { .. } => write!(f, "that fence is gone"),
+            ActionError::NothingToRepair { .. } => write!(f, "that fence is not damaged"),
         }
     }
 }

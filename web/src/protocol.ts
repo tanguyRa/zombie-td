@@ -124,11 +124,15 @@ export interface Pick {
 export type Query =
   | { q: "pick"; x: number; y: number }
   | { q: "fence_length"; pts: number[] }
+  /** Repair cost and pull-down refund of structure `id` now (the inspect panel). */
+  | { q: "costs"; id: number }
   | { q: "agents" }; // test hook only: positions and render states of the agents in play
 
 export type QueryResult =
   | { q: "pick"; pick: Pick }
   | { q: "fence_length"; length: number | null; error: string | null }
+  /** -1: nothing to repair (or not a fence) / no refund. */
+  | { q: "costs"; exists: boolean; repairCost: number; refund: number }
   | { q: "agents"; pts: number[]; states: number[] };
 
 // ------------------------------------------------------------ messages
@@ -140,10 +144,13 @@ export type ToWorker =
   | { type: "stop" }
   /** Queued and applied at the next tick boundary; answered by `action`. */
   | { type: "action"; id: number; action: Action }
+  /** Only while a wave runs (ignored otherwise); every prep starts unpaused. */
   | { type: "pause"; paused: boolean }
   /** 1, 2 or 4; with `test` also 16, and 0 = as fast as possible. */
   | { type: "speed"; speed: number }
-  /** Test only: pause by itself once the match tick reaches `tick` (null clears). */
+  /** Test only: pause by itself once the match tick reaches `tick` while a
+   *  wave runs (null clears; entering prep clears it too). Set to the prep's
+   *  tick, the next wave starts paused. */
   | { type: "pause_at"; tick: number | null }
   | { type: "query"; id: number; query: Query }
   | { type: "field"; kind: "chase" | "flee" }
@@ -189,11 +196,16 @@ export type FromWorker =
   /** Shooters [building or -1, x, y, range, kills] and fence cells [x, y, hp share]. */
   | { type: "placements"; towers: Float32Array; fences: Float32Array }
   | { type: "action"; id: number; action: Action; error: ActionError | null }
+  /** `aborted` instead of a result when there is no match to ask (stopped,
+   *  re-initialised) or the query is not allowed: the request settles. */
   | { type: "query"; id: number; result: QueryResult }
+  | { type: "query"; id: number; aborted: true }
   | { type: "record"; id: number; json: string }
+  | { type: "record"; id: number; aborted: true }
   | { type: "error"; message: string; fatal?: boolean }
   | { type: "field"; kind: "chase" | "flee"; data: Int32Array; w: number; h: number }
-  | { type: "hash"; id: number; tick: number; hash: string };
+  | { type: "hash"; id: number; tick: number; hash: string }
+  | { type: "hash"; id: number; aborted: true };
 
 // ---- shared buffer: header, then 3 slots of (positions f32 x,y; render u8) ----
 // Triple buffering: the worker writes slot (latest + 1) % 3 while the main

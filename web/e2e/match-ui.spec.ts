@@ -2,23 +2,9 @@
 // and their messages, phase rules, keep marks, fog, and that pause and speed
 // never change the simulation.
 import { expect, hook, hookWith, test } from "./offline";
-import { centreOn, clickCard, clickSim, openLevel, uiAction } from "./ui";
+import { centreOn, clickCard, clickSim, openLevel, runTo, uiAction } from "./ui";
 
 const MARAIS = "Paris — Le Marais";
-
-/** Run the current wave until match tick `tick` (test-only fast mode), paused there. */
-async function runTo(page: import("@playwright/test").Page, tick: number) {
-  await hookWith(
-    page,
-    (h, t) => {
-      h.pauseAt(t);
-      h.speed(0);
-      h.pause(false);
-    },
-    tick,
-  );
-  await expect.poll(() => hookWith(page, (h, t) => h.phase !== "running" || (h.perf!.paused && h.tick >= t), tick), { timeout: 120_000 }).toBe(true);
-}
 
 test("HUD and hand show the match state", async ({ page }) => {
   await openLevel(page, MARAIS, 1);
@@ -52,7 +38,7 @@ test("HUD and hand show the match state", async ({ page }) => {
   }
 
   // Start (through the button) and run 200 ticks: the HUD follows.
-  await hook(page, (h) => h.pause(true));
+  await hook(page, (h) => h.startPaused());
   expect(await uiAction(page, () => page.locator("#start").click())).toBeNull();
   const t0 = await hook(page, (h) => h.tick);
   await runTo(page, t0 + 200);
@@ -120,6 +106,8 @@ test("invalid plays are refused with the core's reason", async ({ page }) => {
     const err = await uiAction(page, () => page.mouse.up());
     expect(err).toMatch(/^fence is \d+ m, Heavy stockade allows 100 m$/);
   }
+  // A refused play keeps the card selected (the line is dropped): fix it and try again.
+  expect(await hook(page, (h) => h.selection)).toEqual({ handIndex: 0, card: "heavy_stockade", picked: [] });
   await expect(page.locator("#toast")).toHaveText(/Heavy stockade allows 100 m/);
   expect(await hook(page, (h) => h.structures.length)).toBe(0);
 
@@ -128,7 +116,7 @@ test("invalid plays are refused with the core's reason", async ({ page }) => {
   const outer = (await hook(page, (h) => h.buildings.find((x) => x.cells > 0 && x.wave === 2)?.index))!;
   expect(outer).toBeGreaterThanOrEqual(0);
   const e1 = await hookWith(page, (h, k) => h.playCard(2, { buildings: [k] }), outer);
-  expect(e1).toMatchObject({ error: "not_revealed", message: `building ${outer} is not in the revealed area` });
+  expect(e1).toMatchObject({ error: "not_revealed", message: "that building is not in the revealed area" });
 
   // Rifles on 4 buildings: at most 3.
   const inner = await hook(page, (h) => h.buildings.filter((x) => x.cells > 0 && x.wave === 1 && x.area > 50).slice(0, 4).map((x) => x.index));
@@ -171,7 +159,7 @@ test("tactical cards: refused in prep with a message, played mid-wave with a cli
     await expect(page.locator("#hint")).toHaveText("Click a point in the revealed area (during the wave)");
     await clickSim(page, cx, cy);
   });
-  expect(err).toBe("Grenades is a Tactical card: it can only be played during a wave, not during Prep");
+  expect(err).toBe("Grenades is a tactical card: it can only be played during a wave, not during prep");
   await expect(page.locator("#toast")).toHaveText(err!);
   expect(await hook(page, (h) => h.supply)).toBe(14);
 
@@ -184,7 +172,7 @@ test("tactical cards: refused in prep with a message, played mid-wave with a cli
   expect(await hook(page, (h) => h.hand.filter((c) => c.keep).map((c) => c.hand_index))).toEqual(tac);
 
   // Mid-wave: Grenades on the zombies, through the UI.
-  await hook(page, (h) => h.pause(true));
+  await hook(page, (h) => h.startPaused());
   expect(await uiAction(page, () => page.locator("#start").click())).toBeNull();
   const t0 = await hook(page, (h) => h.tick);
   await runTo(page, t0 + 60);
@@ -203,9 +191,9 @@ test("tactical cards: refused in prep with a message, played mid-wave with a cli
   const fi = await hook(page, (h) => h.hand.findIndex((c) => c.kind === "fortification"));
   const e = await hookWith(page, (h, i) => h.playCard(i, { polyline: [[0, 0], [10, 0]] }), fi);
   expect(e).toMatchObject({ error: "card_wrong_phase" });
-  expect(e!.message).toMatch(/can only be played during prep, not during Running$/);
+  expect(e!.message).toMatch(/^[a-z_]+ is a fortification card: it can only be played during prep, not during a wave in progress$/);
   // Repair and pull-down are prep only.
-  expect(await hook(page, (h) => h.pullDown(0))).toMatchObject({ error: "wrong_phase" });
+  expect(await hook(page, (h) => h.pullDown(0))).toMatchObject({ error: "wrong_phase", message: "pull down is not allowed during a wave in progress" });
 });
 
 test("fog: the next ring is darkened and holds no agents", async ({ page }) => {
@@ -231,7 +219,7 @@ test("fog: the next ring is darkened and holds no agents", async ({ page }) => {
       r,
     );
   expect(await outside(st.radius_m + 2)).toBe(0);
-  await hook(page, (h) => h.pause(true));
+  await hook(page, (h) => h.startPaused());
   await hook(page, (h) => h.startWave());
   await runTo(page, st.tick + 400);
   expect(await outside(st.radius_m + 2)).toBe(0);
@@ -244,7 +232,7 @@ test("pause and speed never change the simulation", async ({ page }) => {
     const b = await hook(page, (h) => h.buildings.filter((x) => x.cells > 0 && x.wave === 1 && x.area > 80).slice(0, 5).map((x) => x.index));
     expect(await hookWith(page, (h, k) => h.playCard(0, { buildings: k.slice(0, 2) }), b)).toBeNull();
     expect(await hookWith(page, (h, k) => h.playCard(1, { buildings: k.slice(2, 5) }), b)).toBeNull();
-    await hook(page, (h) => h.pause(true));
+    await hook(page, (h) => h.startPaused());
     expect(await hook(page, (h) => h.startWave())).toBeNull();
     return hook(page, (h) => h.tick);
   };
