@@ -199,6 +199,10 @@ describe("sanitizePlace, defence in depth (T7a review 2)", () => {
     expect(sanitizePlace("Soi 11")).toBe("");
     expect(sanitizePlace("Street 12")).toBe("");
     expect(placeLabel("Praha 1", "Praha")).toBe("Praha");
+    // Vietnamese numbered divisions: the bare division word names nothing.
+    for (const d of ["Quận 1", "Phường 12", "Huyện 3", "quan 7"]) expect(sanitizePlace(d), d).toBe("");
+    expect(placeLabel("Quận 1", "Thành phố Hồ Chí Minh")).toBe("Thành phố Hồ Chí Minh");
+    expect(sanitizePlace("Quận Ba Đình")).toBe("Quận Ba Đình");
   });
 
   it("the city field keeps real towns that start with a street word (must-keep list)", () => {
@@ -223,6 +227,12 @@ describe("sanitizePlace, defence in depth (T7a review 2)", () => {
     }
     expect(sanitizePlace("Praha 1", "city")).toBe("Praha");
     expect(sanitizePlace("Wien 3", "city")).toBe("Wien");
+    // "Ave" starts a street only when dotted in the city mode: "Ave Maria" is a town.
+    expect(sanitizePlace("Ave Maria", "city")).toBe("Ave Maria");
+    expect(sanitizePlace("Ave. Maria", "city")).toBe("");
+    expect(sanitizePlace("Ave. Foch, Paris", "city")).toBe("Paris");
+    expect(sanitizePlace("Ave Maria, Florida", "city")).toBe("Ave Maria");
+    expect(sanitizePlace("Ave Maria")).toBe("");
     expect(placeLabel("", "Piazza Armerina")).toBe("Piazza Armerina");
   });
 

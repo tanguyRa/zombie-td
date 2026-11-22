@@ -1097,8 +1097,10 @@ later).
   address pasted in by mistake) is ignored, not stored in the match
   history, and the city is keyed on its sanitised name. `placeFromGeocoder`
   sets `cityId` only from a city-level result with `osm_type ===
-  "relation"` (and, when given, an `addresstype` of city, town, village or
-  municipality).
+  "relation"` and an `addresstype` of city, town, village or
+  municipality. Fail-closed: a result without `addresstype` (Photon, older
+  Nominatim `format=json`) gives no `cityId`, since a building
+  multipolygon relation would pin the player's address.
 - **Stamp sanitiser** (`sanitizePlace(raw, field)`): defence in depth, not
   a complete street detector. Two modes. `"district"` (default) is strict:
   a street-looking segment is dropped, privacy before a pretty name.
@@ -1108,7 +1110,9 @@ later).
   still go, a segment with a street abbreviation or a hyphenated street
   suffix ("Main St", "ul. Długa", "Teheran-ro") still goes, and a
   street-looking segment is skipped only when another segment is left
-  ("Rue de Rivoli, Paris" → "Paris"; "Piazza Armerina" stays). The city
+  ("Rue de Rivoli, Paris" → "Paris"; "Piazza Armerina" stays). In the
+  city mode `Ave` starts a street only with a dot ("Ave. Foch" goes, the
+  town "Ave Maria" stays). The city
   mode keeps a parenthesised qualifier, so the city key tells "Halle
   (Saale)" from "Halle (Westf.)". A numbered district that is the whole
   field, `<one word> <1–2 digits>`, keeps its name ("Praha 1" → "Praha",
@@ -1151,6 +1155,8 @@ later).
   and when one goes the division word next to it goes with it ("Paris 4e
   Arrondissement" → "Paris", "1st Arrondissement" → "", so the stamp falls
   back to the city), rather than a mangled "Paris Arrondissement".
+  Vietnamese `Quận`, `Phường`, `Huyện` are division words too ("Quận 1"
+  → "", the stamp falls back to the city).
   A street word alone is a town ("Rue", "Largo"), and "St" counts only in
   last position ("St Albans" stays). Accepted false positives: areas named
   after a street ("Earls Court", "Jalan Besar") fall back to the city in
@@ -1276,7 +1282,11 @@ later).
   `checkSummary` with the same radius bound and card list as `claimMatch`,
   `cleared` a boolean, `claimedAt` an ISO date, `payout` five counts).
   Instance, deck, ticket, crate, match and cell ids must be unique, and
-  the export's `schema` must equal `state.schema`. Anything malformed is
+  the export's `schema` must equal `state.schema`. The place contract
+  holds for imports too: a match `cityId` that fails `isCityId` is
+  dropped, `summary.city` and `summary.district` are sanitised again
+  (city and district mode), and every coverage city key must match
+  `^(id:osm:relation:\d{1,12}|name:.+)$`. Anything malformed is
   `bad_import` and the current profile is left untouched (so a summary
   without `savedPerWave` can't be imported and crash
   `claimHometownCrate`). A valid export round-trips, fresh and after

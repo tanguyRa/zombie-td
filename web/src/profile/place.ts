@@ -38,7 +38,11 @@ export const DISTRICT_FIELDS = ["suburb", "city_district", "borough", "quarter",
 
 /// The city-level search result, when the UI has it (a Nominatim result
 /// whose `addresstype` is the city, or a lookup of the city itself). Only
-/// `osm_type === "relation"` with a numeric `osm_id` gives a `cityId`.
+/// `osm_type === "relation"` with a numeric `osm_id` and an `addresstype` of
+/// city, town, village or municipality gives a `cityId`. Fail-closed: a
+/// result without `addresstype` (Photon, older Nominatim `format=json`) may
+/// be a building multipolygon relation, whose id would pin the address, so it
+/// gives none.
 export interface CityResult {
   osm_type?: unknown;
   osm_id?: unknown;
@@ -53,7 +57,7 @@ const CITY_ADDRESSTYPES = new Set(["city", "town", "village", "municipality"]);
 /// district field that sanitises to a name different from the city ("" if
 /// none). `road`, `house_number`, `postcode` and every other key are never
 /// read. `cityResult`: the city-level result, for `cityId` (see `CityResult`);
-/// when it has an `addresstype`, that must be a city level.
+/// its `addresstype` must be present and a city level, else no `cityId`.
 export function placeFromGeocoder(address: Record<string, string>, cityResult?: CityResult): { city: string; district: string; cityId?: string } {
   const a: Record<string, unknown> = address && typeof address === "object" ? address : {};
   const pick = (keys: readonly string[], field: "city" | "district", not?: string) => {
@@ -69,7 +73,7 @@ export function placeFromGeocoder(address: Record<string, string>, cityResult?: 
   const district = pick(DISTRICT_FIELDS, "district", city);
   const out: { city: string; district: string; cityId?: string } = { city, district };
   const r = cityResult;
-  if (city && r && r.osm_type === "relation" && (r.addresstype === undefined || (typeof r.addresstype === "string" && CITY_ADDRESSTYPES.has(r.addresstype)))) {
+  if (city && r && r.osm_type === "relation" && typeof r.addresstype === "string" && CITY_ADDRESSTYPES.has(r.addresstype)) {
     const id = typeof r.osm_id === "number" && Number.isInteger(r.osm_id) && r.osm_id > 0 ? String(r.osm_id) : typeof r.osm_id === "string" ? r.osm_id : "";
     const cityId = `osm:relation:${id}`;
     if (isCityId(cityId)) out.cityId = cityId;

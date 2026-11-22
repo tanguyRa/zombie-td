@@ -16,7 +16,9 @@
 // the second commit sees a newer revision, aborts and the service retries
 // on fresh data, so a match can't be paid twice from two tabs.
 
+import { isCityId } from "./place";
 import { checkSummary } from "./rewards";
+import { sanitizePlace } from "./sanitize";
 import { TIERS, type CoverageCell, type MatchRecord, type ProfileState } from "./types";
 
 export const DB_NAME = "zt-profile";
@@ -317,6 +319,12 @@ export const MIGRATIONS: Record<number, Migration> = {};
 /// is checked in full (`checkSummary` with `maxRadiusM` and `isCard`, plus
 /// `cleared`, `claimedAt` and `payout`), and ids must be unique (instances,
 /// decks, tickets, crates, matches, cells).
+///
+/// The place contract (place.ts) holds for imported data too, so `b` is
+/// normalised in place: a match `cityId` that fails `isCityId` is dropped
+/// (as `claimMatch` ignores it), `summary.city` and `summary.district` are
+/// sanitised again (city and district mode), and every coverage city key
+/// must be `id:osm:relation:<1-12 digits>` or `name:<non-empty>`.
 export function validateBundle(b: Bundle, opts: { maxRadiusM: number; isCard?: (id: string) => boolean }): void {
   const fail = (m: string): never => {
     throw new ProfileError("bad_import", `not a valid profile: ${m}`);
@@ -360,7 +368,12 @@ export function validateBundle(b: Bundle, opts: { maxRadiusM: number; isCard?: (
     if (typeof m.cleared !== "boolean") fail(`matches[${i}].cleared is not a boolean`);
     if (!isIso(m.claimedAt)) fail(`matches[${i}].claimedAt is not an ISO date`);
     if (!isPayout(m.payout)) fail(`matches[${i}].payout is malformed`);
+    const sm = m.summary;
+    if ("cityId" in sm && !isCityId(sm.cityId)) delete sm.cityId;
+    sm.city = sanitizePlace(sm.city, "city");
+    sm.district = sanitizePlace(sm.district);
   });
+  const CITY_KEY_RE = /^(id:osm:relation:\d{1,12}|name:.+)$/;
   const fin = (v: unknown) => typeof v === "number" && Number.isFinite(v);
   arrayOf(
     b.coverage,
@@ -372,6 +385,7 @@ export function validateBundle(b: Bundle, opts: { maxRadiusM: number; isCard?: (
       isTier(x.tier) &&
       isObj(x.cities) &&
       Object.values(x.cities).every(isTier) &&
+      Object.keys(x.cities).every((k) => CITY_KEY_RE.test(k)) &&
       fin(x.areaM2) &&
       isObj(x.bounds) &&
       ["south", "west", "north", "east"].every((k) => fin((x.bounds as Record<string, unknown>)[k])),

@@ -566,6 +566,36 @@ describe("export and import", () => {
     expect((await p.listMatches()).length).toBe(1);
   });
 
+  it("an import applies the place contract (hand-edited export)", async () => {
+    const { p } = await fresh();
+    await p.claimMatch(summary({ cityId: "osm:relation:7444" }), { r: 1 });
+    const good = JSON.parse(JSON.stringify(await p.exportProfile())) as ProfileExport;
+    expect(good.matches[0].summary.cityId).toBe("osm:relation:7444");
+    expect(Object.keys(good.coverage[0].cities)).toEqual(["id:osm:relation:7444"]);
+    const edited = JSON.parse(JSON.stringify(good)) as ProfileExport;
+    edited.matches[0].summary.cityId = "osm:way:12345";
+    edited.matches[0].summary.city = "Rue de Rivoli 12, Paris";
+    edited.matches[0].summary.district = "12 Rue de Rivoli";
+    const q = await memoryProfile({ clock: new FakeClock(T0), seed: 1n });
+    await q.importProfile(edited);
+    const [{ summary: m }] = await q.listMatches();
+    expect(m.cityId).toBeUndefined();
+    expect("cityId" in m).toBe(false);
+    expect(m.city).toBe("Paris");
+    expect(m.district).toBe("");
+    // A coverage city key that is neither an accepted id nor a name is refused.
+    for (const key of ["id:osm:way:12345", "osm:relation:7444", "name:", "12 Rue de Rivoli", "id:osm:relation:1234567890123"]) {
+      const bad = JSON.parse(JSON.stringify(good)) as ProfileExport;
+      bad.coverage[0].cities = { [key]: "recruit" };
+      await expect(q.importProfile(bad), key).rejects.toMatchObject({ code: "bad_import" });
+    }
+    // The valid export still round-trips unchanged.
+    await q.importProfile(good);
+    expect(await q.listMatches()).toEqual(await p.listMatches());
+    const world = { south: -90, west: -180, north: 90, east: 180 };
+    expect(await q.coverageInBox(world)).toEqual(await p.coverageInBox(world));
+  });
+
   it("exports state, matches and coverage from one transaction", async () => {
     const idb = new IDBFactory();
     const a = await LocalProfileService.open({ indexedDB: idb, clock: new FakeClock(T0), seed: 1n });

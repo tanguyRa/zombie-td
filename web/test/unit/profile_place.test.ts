@@ -140,14 +140,25 @@ describe("placeFromGeocoder (the input contract)", () => {
   it("gives a cityId only from a city-level admin relation", () => {
     const addr = { city: "Paris", suburb: "Le Marais" };
     expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: 7444, addresstype: "city" }).cityId).toBe("osm:relation:7444");
-    expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: "7444" }).cityId).toBe("osm:relation:7444");
+    expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: "7444", addresstype: "municipality" }).cityId).toBe("osm:relation:7444");
     expect(placeFromGeocoder(addr, { osm_type: "node", osm_id: 17807753, addresstype: "city" }).cityId).toBeUndefined();
     expect(placeFromGeocoder(addr, { osm_type: "way", osm_id: 4372 }).cityId).toBeUndefined();
     expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: 123, addresstype: "road" }).cityId).toBeUndefined();
     expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: "12 Rue de Rivoli" }).cityId).toBeUndefined();
     expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: 1e13 }).cityId).toBeUndefined();
     expect(placeFromGeocoder(addr).cityId).toBeUndefined();
-    expect(placeFromGeocoder({ road: "Baker Street" }, { osm_type: "relation", osm_id: 65606 }).cityId).toBeUndefined();
+    expect(placeFromGeocoder({ road: "Baker Street" }, { osm_type: "relation", osm_id: 65606, addresstype: "city" }).cityId).toBeUndefined();
+  });
+
+  it("gives no cityId from a relation without an addresstype (fail-closed)", () => {
+    // A building multipolygon relation from Photon or Nominatim format=json
+    // has no addresstype: its id would pinpoint the address.
+    const addr = { city: "Paris", suburb: "Le Marais" };
+    expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: 3417226 }).cityId).toBeUndefined();
+    expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: "7444" }).cityId).toBeUndefined();
+    expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: 7444, addresstype: null }).cityId).toBeUndefined();
+    expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: 7444, addresstype: "building" }).cityId).toBeUndefined();
+    expect(placeFromGeocoder(addr, { osm_type: "relation", osm_id: "7444", addresstype: "town" }).cityId).toBe("osm:relation:7444");
   });
 });
 

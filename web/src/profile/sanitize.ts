@@ -152,8 +152,9 @@ const ADMIN_NAMES = new Set(["landstrasse", "neustadt an der weinstrasse"]);
 
 /// Generic words of an administrative division. When the ordinal before
 /// one is dropped ("Paris 4e Arrondissement"), the word goes too: alone it
-/// names nothing ("Paris Arrondissement").
-const DIVISION_WORDS = new Set(["arrondissement", "arrondissements", "arr", "district", "bezirk", "gemeindebezirk", "ward", "sector", "sektor", "distrito", "municipio", "kerulet", "obvod"]);
+/// names nothing ("Paris Arrondissement"). Vietnamese `quận`, `phường`,
+/// `huyện` (folded): "Quận 1" is "", not "Quận".
+const DIVISION_WORDS = new Set(["arrondissement", "arrondissements", "arr", "district", "bezirk", "gemeindebezirk", "ward", "sector", "sektor", "distrito", "municipio", "kerulet", "obvod", "quan", "phuong", "huyen"]);
 
 /// House-number markers dropped as tokens.
 const NUMBER_MARKERS = new Set(["no", "nº", "n°", "nr", "num", "numero", "number", "bis", "ter", "quater", "#"]);
@@ -198,7 +199,9 @@ function isAdminSegment(seg: string): boolean {
 /// A street abbreviation ("Main St", "Bd Haussmann", "ul. Długa", "Váci u.")
 /// or a hyphenated street suffix ("Teheran-ro", "Meiji-dori"). Strong
 /// evidence: no town is written that way, so the city mode drops these too.
-function hasStreetAbbrev(seg: string): boolean {
+/// `cityMode`: "ave" starts a street only with a dot ("Ave. Foch"), so the
+/// town "Ave Maria" stays.
+function hasStreetAbbrev(seg: string, cityMode = false): boolean {
   const { raw, words } = wordsOf(seg);
   for (const w of words) {
     const hp = w.split("-").filter((p) => p.length > 0);
@@ -208,15 +211,15 @@ function hasStreetAbbrev(seg: string): boolean {
   if (STREET_ABBREV_LAST.has(words[words.length - 1])) return true;
   const last = raw[raw.length - 1];
   if (last.endsWith(".") && STREET_ABBREV_LAST_DOT.has(last.slice(0, -1))) return true;
-  if (STREET_ABBREV_FIRST.has(words[0])) return true;
   const first = raw[0];
+  if (STREET_ABBREV_FIRST.has(words[0]) && !(cityMode && words[0] === "ave" && !first.startsWith("ave."))) return true;
   if (STREET_ABBREV_DOTTED.has(first.replace(/\.$/, ""))) return true;
   if (first.endsWith(".") && STREET_ABBREV_FIRST_DOT.has(first.slice(0, -1))) return true;
   if (first.includes(".") && STREET_ABBREV_FIRST_DOT.has(first.split(".")[0])) return true;
   return false;
 }
 
-function isStreetSegment(seg: string): boolean {
+function isStreetSegment(seg: string, cityMode = false): boolean {
   if (isAdminSegment(seg)) return false;
   const { words, parts } = wordsOf(seg);
   if (words.length === 0) return false;
@@ -233,7 +236,7 @@ function isStreetSegment(seg: string): boolean {
   for (const w of parts) {
     for (const suf of STREET_SUFFIXES) if (w.length > suf.length + 2 && w.endsWith(suf)) return true;
   }
-  return hasStreetAbbrev(seg);
+  return hasStreetAbbrev(seg, cityMode);
 }
 
 /// Any street word on its own (a numbered "Soi 11" is not a district "Soi").
@@ -309,11 +312,11 @@ function sanitizeCity(text: string): string {
       })
       .replace(/[()]/g, " ")
       .trim();
-    if (!base || hasStreetAbbrev(base)) continue;
+    if (!base || hasStreetAbbrev(base, true)) continue;
     const clean = cleanSegment(base, segments.length === 1);
-    if (!clean || hasStreetAbbrev(clean) || isLoneAbbrev(clean)) continue;
+    if (!clean || hasStreetAbbrev(clean, true) || isLoneAbbrev(clean)) continue;
     const out = trimLen(quals.length ? `${clean} (${quals[0]})` : clean);
-    if (!isStreetSegment(base) && !isStreetSegment(clean)) return out;
+    if (!isStreetSegment(base, true) && !isStreetSegment(clean, true)) return out;
     // A street-looking segment is kept only when nothing better is left:
     // the city field is an admin name ("Strada in Chianti").
     if (!fallback) fallback = out;
