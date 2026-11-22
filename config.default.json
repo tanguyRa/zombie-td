@@ -7,9 +7,9 @@
   "outbreak_min_separation_m": 150.0,
   "outbreak_min_per_cluster": 5,
   "infection_delay_ticks": 20,
-  "civilian_wander_speed": 0.6,
-  "civilian_flee_speed": 2.2,
-  "zombie_speed": 2.5,
+  "civilian_wander_speed": 1.2,
+  "civilian_flee_speed": 4.4,
+  "zombie_speed": 7.5,
   "zombie_hp": 100,
   "bite_radius_m": 0.8,
   "bite_cooldown_ticks": 20,
@@ -38,5 +38,5 @@
   "separation_radius_m": 0.6,
   "separation_max_neighbors": 8,
   "separation_max_scan": 48,
-  "dead_visible_seconds": 3.0
+  "kill_flash_seconds": 1.0
 }

@@ -9,13 +9,13 @@
   --civ: #4aa3ff;
   --inf: #ffd23f;
   --zom: #ff3b3b;
-  --dead: #555555;
+  --dead: #9b6be0;
   --warn: #ff6b6b;
   font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
-#map { position: absolute; inset: 52px 0 0 0; }
+#map { position: absolute; inset: 0; }
 #topbar {
   position: absolute; top: 0; left: 0; right: 0; height: 52px; z-index: 5;
   display: flex; align-items: center; gap: 10px; padding: 0 12px;
@@ -67,11 +67,45 @@ dt small { font-size: 10px; }
 dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .dot.civ { background: var(--civ); } .dot.inf { background: var(--inf); } .dot.zom { background: var(--zom); } .dot.dead { background: var(--dead); }
+.place { color: var(--text-2); max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 
 .modal { position: absolute; inset: 0; z-index: 10; display: grid; place-items: center; background: rgba(0, 0, 0, 0.45); }
-.modal[hidden], #toast[hidden], #loading[hidden], .badge[hidden] { display: none; }
+.modal[hidden], #toast[hidden], #loading[hidden], .badge[hidden], .row[hidden] { display: none; }
 .card { background: #1b1d21; border: 1px solid var(--line); border-radius: 14px; padding: 22px 24px; min-width: 300px; }
 .card h2 { margin: 0 0 14px; font-size: 22px; }
 .card dl { margin-bottom: 18px; font-size: 15px; }
 #toast { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 11; background: #3a1f1f; border: 1px solid #6b2f2f; color: #ffd0d0; padding: 8px 14px; border-radius: 8px; }
-#loading { position: absolute; inset: 52px 0 0 0; display: grid; place-items: center; color: var(--text-2); z-index: 3; pointer-events: none; }
+#loading { position: absolute; inset: 52px 0 0 0; display: grid; place-items: center; color: var(--text-2); z-index: 6; background: rgba(17, 18, 20, 0.3); pointer-events: none; }
+#loading .card { pointer-events: auto; }
+.prep { min-width: 320px; max-width: 420px; text-align: center; }
+.prep p { margin: 12px 0; color: var(--text); }
+.prep .row { justify-content: center; }
+.spinner { width: 28px; height: 28px; margin: 0 auto; border-radius: 50%; border: 3px solid #333840; border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
+.spinner[hidden] { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- screens ---------- */
+body[data-screen="explore"] > :not(#explore):not(#toast):not(#map) { display: none !important; }
+body[data-screen="game"] > #explore { display: none; }
+#explore { position: absolute; inset: 0; pointer-events: none; }
+#explore > * { pointer-events: auto; }
+.explore-panel { position: absolute; top: 16px; left: 16px; width: min(420px, calc(100vw - 32px)); z-index: 2; }
+.searchbox { display: flex; background: #fff; border-radius: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.25); overflow: hidden; }
+.searchbox input { flex: 1; border: 0; padding: 12px 18px; font: inherit; font-size: 15px; color: #202124; background: transparent; outline: none; min-width: 0; }
+.searchbox button { border: 0; border-radius: 0; background: #1a73e8; color: #fff; padding: 0 18px; font-weight: 600; }
+.searchbox button:hover:not(:disabled) { background: #1765cc; }
+#results { list-style: none; margin: 6px 0 0; padding: 6px 0; background: #fff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.25); max-height: 50vh; overflow: auto; }
+#results[hidden] { display: none; }
+#results li.muted { padding: 8px 18px; color: #5f6368; }
+#results button { display: flex; flex-direction: column; align-items: flex-start; width: 100%; border: 0; border-radius: 0; background: transparent; color: #202124; padding: 8px 18px; text-align: left; }
+#results button:hover { background: #f1f3f4; }
+#results button span { color: #5f6368; font-size: 12px; }
+.pick-card { position: absolute; left: 16px; bottom: 32px; width: min(360px, calc(100vw - 32px)); z-index: 2; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.35); }
+.brand-lg { font-weight: 800; font-size: 20px; }
+.pick-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-2); }
+.pick-name { font-size: 16px; font-weight: 600; min-height: 22px; }
+.pick-note { margin: 0; font-size: 12px; color: var(--text-2); }
+.big-btn { padding: 10px 14px; font-size: 15px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border-radius: 999px; font-size: 12px; padding: 5px 10px; }
+.maplibregl-ctrl-attrib { color: #333; }

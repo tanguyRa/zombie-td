@@ -960,9 +960,13 @@ impl Sim {
         let max_hits = self.cfg.separation_max_neighbors;
         let max_scan = self.cfg.separation_max_scan;
         let bm = self.bucket_m;
-        for i in 0..self.n {
-            self.sep_x[i] = 0.0;
-            self.sep_y[i] = 0.0;
+        self.sep_x[..self.n].fill(0.0);
+        self.sep_y[..self.n].fill(0.0);
+        // Visit agents in spatial-hash order so neighbouring agents (and their
+        // buckets) are processed together: same per-agent result, far fewer
+        // cache misses than index order.
+        for k0 in 0..self.n {
+            let i = self.agent_ids[k0] as usize;
             if self.step_mul[i] == 0 || self.state[i] == DEAD {
                 continue;
             }
@@ -1049,7 +1053,7 @@ impl Sim {
         let range = self.cfg.tower_range_m;
         let period = self.cfg.tower_period_ticks();
         let dmg = self.cfg.tower_damage;
-        let dead_ticks = (self.cfg.dead_visible_seconds * self.cfg.tick_hz as f32) as u16;
+        let dead_ticks = (self.cfg.kill_flash_seconds * self.cfg.tick_hz as f32) as u16;
         for t in 0..self.towers.len() {
             if self.towers[t].cooldown > 0 {
                 self.towers[t].cooldown -= 1;

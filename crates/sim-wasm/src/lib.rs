@@ -18,8 +18,10 @@ impl Clock for PerfClock {
     }
 }
 
-/// Render state per agent: 0 civilian, 1 infected, 2 zombie, 3 dead (visible), 4 hidden.
-pub const HIDDEN: u8 = 4;
+/// Render state per agent: 0 civilian, 1 infected, 2 zombie, 3 corpse,
+/// 4 hidden (unused), 5 fresh kill (the first `kill_flash_seconds` after a
+/// tower kill). Corpses stay on the map for the rest of the game.
+pub const FRESH_KILL: u8 = 5;
 
 #[wasm_bindgen]
 pub struct WasmSim {
@@ -59,7 +61,7 @@ impl WasmSim {
         for i in 0..s.n {
             self.pos[2 * i] = s.x[i];
             self.pos[2 * i + 1] = s.y[i];
-            self.render[i] = if s.state[i] == DEAD && s.timer[i] == 0 { HIDDEN } else { s.state[i] };
+            self.render[i] = if s.state[i] == DEAD && s.timer[i] > 0 { FRESH_KILL } else { s.state[i] };
         }
     }
     pub fn positions_ptr(&self) -> *const f32 {

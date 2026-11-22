@@ -1,9 +1,13 @@
-// Main thread: renders the level and agents with deck.gl, handles input and UI.
+// Main thread: renders the level and agents with deck.gl on top of the street
+// map, handles input and UI.
 // All game logic runs in the worker (WASM sim-core).
-import { Deck, OrthographicView } from "@deck.gl/core";
+import { COORDINATE_SYSTEM } from "@deck.gl/core";
+import { MapboxOverlay } from "@deck.gl/mapbox";
 import { BitmapLayer, LineLayer, PathLayer, PolygonLayer, ScatterplotLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import parisUrl from "../../levels/paris-marais.json?url";
 import suburbUrl from "../../levels/suburb.json?url";
+import { Place, createExplore } from "./explore";
+import { generateLevel } from "./levelgen";
 import {
   FromWorker,
   H_INTERVAL,
@@ -21,18 +25,21 @@ import {
 } from "./protocol";
 import "./style.css";
 
-const LEVELS: Record<string, { url: string; label: string }> = {
-  "paris-marais": { url: parisUrl, label: "Paris — Le Marais" },
-  suburb: { url: suburbUrl, label: "Suburb — Le Vésinet" },
-};
+// Built-in levels (committed level packs, no download needed).
+const PRESETS: Place[] = [
+  { name: "Paris — Le Marais", lat: 48.858, lon: 2.358, presetUrl: parisUrl },
+  { name: "Le Vésinet (suburb)", lat: 48.8935, lon: 2.133, presetUrl: suburbUrl },
+];
 
-// Agent colours (RGBA) indexed by render state: civilian, infected, zombie, dead, hidden.
+// Agent colours (RGBA) indexed by render state: civilian, infected, zombie,
+// corpse, hidden, fresh kill (flashes for kill_flash_seconds, then corpse).
 const COLORS: [number, number, number, number][] = [
   [0x4a, 0xa3, 0xff, 255],
   [0xff, 0xd2, 0x3f, 255],
   [0xff, 0x3b, 0x3b, 255],
-  [0x55, 0x55, 0x55, 255],
+  [0x9b, 0x6b, 0xe0, 255],
   [0, 0, 0, 0],
+  [0xf3, 0xe8, 0xff, 255],
 ];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -42,6 +49,10 @@ const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "modu
 const send = (m: ToWorker) => worker.postMessage(m);
 
 let level: StaticLevel | null = null;
+let currentPlace: Place | null = null;
+let currentLevelJson = "";
+const levelCache = new Map<string, string>();
+let prepAbort: AbortController | null = null;
 let shared: SharedArrayBuffer | null = null;
 let n = 0;
 let stats: Stats | null = null;
@@ -70,57 +81,85 @@ let fbPrev: { pos: F32; render: U8; time: number } | null = null;
 let fbCur: { pos: F32; render: U8; time: number } | null = null;
 let fbSeq = 0;
 
-// ---------------------------------------------------------------- deck
-const deck = new Deck({
-  parent: $<HTMLDivElement>("map"),
-  views: new OrthographicView({ id: "map", flipY: false, controller: true }),
-  initialViewState: { target: [0, 0, 0], zoom: 0 },
-  controller: { dragPan: true, scrollZoom: true, doubleClickZoom: false, dragRotate: false },
-  layers: [],
-  getCursor: ({ isDragging }) => (tool === "fence" ? "crosshair" : tool === "tower" ? "pointer" : isDragging ? "grabbing" : "grab"),
-  onClick: (info) => {
-    if (tool === "tower" && info.coordinate && stats?.phase === 0) {
-      send({ type: "tower", x: info.coordinate[0], y: info.coordinate[1] });
-    }
-  },
-});
+// ---------------------------------------------------------------- map + deck overlay
+// The street map from the map screen stays on screen; deck.gl draws the game
+// on top of it. The sim works in local meters (grid origin at a corner), the
+// level pack in meters around (lat0, lon0) with an equirectangular projection.
+// Layers keep their data in sim meters and a model matrix turns them into
+// lng/lat offsets from (lon0, lat0), the exact inverse of that projection, so
+// footprints land on the map's buildings.
+const explore = createExplore({ presets: PRESETS, onStart: enterGame });
+const map = explore.map;
+const overlay = new MapboxOverlay({ interleaved: false, layers: [] });
+map.addControl(overlay);
 
-if (import.meta.env.DEV) (window as unknown as { __zt: unknown }).__zt = { deck, get level() { return level; }, get buildings() { return buildings; } };
+let geo: { lat0: number; lon0: number; kx: number; ky: number } | null = null;
+let geoProps: Record<string, unknown> = {};
 
-function fitView() {
-  if (!level) return;
-  const el = $("map");
-  const size = Math.min(el.clientWidth, el.clientHeight - 60);
-  const zoom = Math.log2(size / (2 * level.radius * 1.04));
-  deck.setProps({ initialViewState: { target: [level.center[0], level.center[1], 0], zoom, minZoom: zoom - 2, maxZoom: zoom + 6 } as never });
+function setGeo(lat0: number, lon0: number) {
+  geo = { lat0, lon0, kx: Math.cos((lat0 * Math.PI) / 180) * 111320, ky: 110540 };
 }
 
-function unproject(clientX: number, clientY: number): number[] | null {
-  const vp = deck.getViewports()[0];
-  if (!vp) return null;
-  const r = $("map").getBoundingClientRect();
-  return vp.unproject([clientX - r.left, clientY - r.top]);
+function updateGeoProps() {
+  if (!geo || !level) return;
+  const sx = 1 / geo.kx;
+  const sy = 1 / geo.ky;
+  const [cx, cy] = level.center;
+  geoProps = {
+    coordinateSystem: COORDINATE_SYSTEM.LNGLAT_OFFSETS,
+    coordinateOrigin: [geo.lon0, geo.lat0, 0],
+    // column-major: translate by -center (sim → pack meters), then meters → degrees
+    modelMatrix: [sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, 1, 0, -cx * sx, -cy * sy, 0, 1],
+  };
 }
 
-// Fence drawing: click-drag while the Fence tool is active.
-const mapEl = $("map");
-mapEl.addEventListener("pointerdown", (e) => {
-  if (tool !== "fence" || stats?.phase !== 0 || e.button !== 0) return;
-  const p = unproject(e.clientX, e.clientY);
-  if (!p) return;
-  fenceDraft = [[p[0], p[1]]];
-  mapEl.setPointerCapture(e.pointerId);
-  e.stopPropagation();
+function toSim(ll: { lng: number; lat: number }): number[] | null {
+  if (!geo || !level) return null;
+  return [(ll.lng - geo.lon0) * geo.kx + level.center[0], (ll.lat - geo.lat0) * geo.ky + level.center[1]];
+}
+
+function fitView(animate = true) {
+  if (!geo) return;
+  const r = level?.radius ?? 400;
+  const dlon = r / geo.kx;
+  const dlat = r / geo.ky;
+  map.fitBounds(
+    [
+      [geo.lon0 - dlon, geo.lat0 - dlat],
+      [geo.lon0 + dlon, geo.lat0 + dlat],
+    ],
+    { padding: { top: 68, bottom: 16, left: 228, right: 264 }, duration: animate ? 1200 : 0 },
+  );
+}
+
+if (import.meta.env.DEV) (window as unknown as { __zt: unknown }).__zt = { map, overlay, toSim, get level() { return level; }, get buildings() { return buildings; } };
+
+const inGame = () => document.body.dataset.screen === "game";
+
+map.on("click", (e) => {
+  if (!inGame() || tool !== "tower" || stats?.phase !== 0) return;
+  const p = toSim(e.lngLat);
+  if (p) send({ type: "tower", x: p[0], y: p[1] });
 });
-mapEl.addEventListener("pointermove", (e) => {
-  if (!fenceDraft) return;
-  const p = unproject(e.clientX, e.clientY);
+
+// Fence drawing: click-drag while the Fence tool is active (map panning is
+// disabled meanwhile, see setTool).
+map.on("mousedown", (e) => {
+  if (!inGame() || tool !== "fence" || stats?.phase !== 0 || e.originalEvent.button !== 0) return;
+  const p = toSim(e.lngLat);
   if (!p) return;
-  const last = fenceDraft[fenceDraft.length - 1];
-  if (Math.hypot(p[0] - last[0], p[1] - last[1]) >= 2) fenceDraft.push([p[0], p[1]]);
+  fenceDraft = [p];
   updateFenceHint();
 });
-mapEl.addEventListener("pointerup", () => {
+map.on("mousemove", (e) => {
+  if (!fenceDraft) return;
+  const p = toSim(e.lngLat);
+  if (!p) return;
+  const last = fenceDraft[fenceDraft.length - 1];
+  if (Math.hypot(p[0] - last[0], p[1] - last[1]) >= 2) fenceDraft.push(p);
+  updateFenceHint();
+});
+window.addEventListener("mouseup", () => {
   if (!fenceDraft) return;
   if (fenceDraft.length >= 2) send({ type: "fence", pts: fenceDraft.flat() });
   fenceDraft = null;
@@ -149,8 +188,9 @@ function updateFenceHint() {
 
 // ---------------------------------------------------------------- frame
 function fenceColor(hp: number): [number, number, number, number] {
+  // Intact fences are near-black (readable on the light map), red when nearly broken.
   const t = Math.max(0, Math.min(1, hp));
-  return [255, Math.round(255 * t), Math.round(255 * t), 255];
+  return [Math.round(230 - 190 * t), Math.round(40 + 0 * t), Math.round(40 + 12 * t), 255];
 }
 
 function buildFieldImage(data: Int32Array, w: number, h: number): HTMLCanvasElement {
@@ -286,60 +326,83 @@ function agentData(pos: F32, col: U8) {
   return agentDataObj;
 }
 
+// Darkens everything outside the play area: a big square with the circle as a hole.
+let maskCache: { key: string; poly: number[][][] } | null = null;
+function maskPolygon(): number[][][] {
+  if (!level) return [];
+  const [cx, cy] = level.center;
+  const key = `${cx},${cy},${level.radius}`;
+  if (maskCache?.key !== key) {
+    const R = 20000;
+    const outer = [[cx - R, cy - R], [cx + R, cy - R], [cx + R, cy + R], [cx - R, cy + R]];
+    const hole: number[][] = [];
+    for (let i = 0; i < 96; i++) {
+      const t = (-i / 96) * 2 * Math.PI;
+      hole.push([cx + level.radius * Math.cos(t), cy + level.radius * Math.sin(t)]);
+    }
+    maskCache = { key, poly: [outer, hole] };
+  }
+  return maskCache.poly;
+}
+
 function render_layers(pos: F32, col: U8) {
-  if (!level) return;
+  if (!level || !geo) return;
   const { garrisonData, towerData, fenceData } = placementData();
   const half = level.cell / 2;
+  const g = geoProps;
   const layers: unknown[] = [
-    new ScatterplotLayer({
-      id: "boundary",
-      data: [level.center],
-      getPosition: (d: number[]) => d as [number, number],
-      getRadius: level.radius,
-      radiusUnits: "common",
-      stroked: true,
-      filled: true,
-      getFillColor: [22, 24, 28, 255],
-      getLineColor: [70, 74, 82, 255],
-      lineWidthMinPixels: 1,
+    new SolidPolygonLayer({
+      ...g,
+      id: "outside",
+      data: [maskPolygon()],
+      getPolygon: (d: number[][][]) => d as never,
+      getFillColor: [16, 18, 22, 150],
     }),
     fieldImage &&
       new BitmapLayer({
+        ...g,
         id: "field",
         image: fieldImage,
         bounds: [0, 0, level.gridW * level.cell, level.gridH * level.cell],
+        opacity: 0.75,
         textureParameters: { minFilter: "nearest", magFilter: "nearest" },
       }),
     new PolygonLayer({
+      ...g,
       id: "buildings",
       data: buildings,
       getPolygon: (d: { polygon: number[][] }) => d.polygon,
-      getFillColor: [58, 60, 66, 255],
-      stroked: false,
-      updateTriggers: {},
+      getFillColor: [70, 62, 56, 40],
+      getLineColor: [70, 62, 56, 90],
+      lineWidthMinPixels: 0.5,
+      stroked: true,
     }),
     new PolygonLayer({
+      ...g,
       id: "garrisons",
       data: garrisonData,
       getPolygon: (d: { polygon: number[][] }) => d.polygon,
-      filled: false,
+      filled: true,
       stroked: true,
-      getLineColor: [60, 220, 120, 255],
+      getFillColor: [30, 170, 90, 110],
+      getLineColor: [20, 140, 70, 255],
       lineWidthMinPixels: 2,
     }),
     new ScatterplotLayer({
+      ...g,
       id: "ranges",
       data: towerData,
       getPosition: (d: { x: number; y: number }) => [d.x, d.y],
       getRadius: level.towerRange,
-      radiusUnits: "common",
+      radiusUnits: "meters",
       stroked: true,
-      getFillColor: [60, 220, 120, 18],
-      getLineColor: [60, 220, 120, 90],
-      lineWidthMinPixels: 1,
+      getFillColor: [30, 170, 90, 28],
+      getLineColor: [20, 140, 70, 160],
+      lineWidthMinPixels: 1.5,
     }),
     showHash && hashLayer(),
     new SolidPolygonLayer({
+      ...g,
       id: "fences",
       data: fenceData,
       getPolygon: (d: { x: number; y: number }) => [
@@ -351,27 +414,33 @@ function render_layers(pos: F32, col: U8) {
       getFillColor: (d: { hp: number }) => fenceColor(d.hp),
     }),
     new ScatterplotLayer({
+      ...g,
       id: "agents",
       data: agentData(pos, col) as never,
       updateTriggers: { getPosition: frameId, getFillColor: lastSeq },
-      radiusUnits: "common",
+      radiusUnits: "meters",
       getRadius: 0.8,
-      radiusMinPixels: 1.5,
-      stroked: false,
+      radiusMinPixels: 1.8,
+      // A dark rim keeps the dots readable on the light street map.
+      stroked: true,
+      getLineColor: [20, 20, 24, 170],
+      lineWidthUnits: "pixels",
+      getLineWidth: 0.6,
       parameters: { depthCompare: "always" },
     }),
     fenceDraft &&
       new PathLayer({
+        ...g,
         id: "draft",
         data: [fenceDraft],
         getPath: (d: number[][]) => d as [number, number][],
-        getColor: draftLength() > (stats?.fenceLeft ?? 0) ? [255, 80, 80, 255] : [255, 255, 255, 230],
+        getColor: draftLength() > (stats?.fenceLeft ?? 0) ? [230, 40, 40, 255] : [40, 40, 48, 230],
         getWidth: level.cell,
-        widthUnits: "common",
+        widthUnits: "meters",
         widthMinPixels: 2,
       }),
   ].filter(Boolean);
-  deck.setProps({ layers: layers as never });
+  overlay.setProps({ layers: layers as never });
 }
 
 let hashLines: { s: number[]; t: number[] }[] = [];
@@ -383,11 +452,12 @@ function hashLayer() {
     for (let y = 0; y <= hh; y++) hashLines.push({ s: [0, y * b], t: [hw * b, y * b] });
   }
   return new LineLayer({
+    ...geoProps,
     id: "hash",
     data: hashLines,
     getSourcePosition: (d: { s: number[] }) => d.s as [number, number],
     getTargetPosition: (d: { t: number[] }) => d.t as [number, number],
-    getColor: [255, 255, 255, 28],
+    getColor: [0, 0, 0, 40],
     getWidth: 1,
   });
 }
@@ -395,6 +465,7 @@ function hashLayer() {
 // ---------------------------------------------------------------- worker messages
 worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   const m = ev.data;
+  if (document.body.dataset.screen !== "game") return; // late messages after "← Map"
   switch (m.type) {
     case "ready": {
       level = m.level;
@@ -417,6 +488,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       }
       $("fallback").hidden = !!shared;
       $("result").hidden = true;
+      maskCache = null;
+      updateGeoProps();
       if (!fitted) {
         fitView();
         fitted = true;
@@ -450,7 +523,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       fences = m.fences;
       break;
     case "error":
-      toast(m.message);
+      if (m.fatal) prepError(m.message);
+      else toast(m.message);
       break;
     case "field":
       fieldImage = buildFieldImage(m.data, m.w, m.h);
@@ -469,27 +543,104 @@ function toast(msg: string) {
 
 function settings() {
   return {
-    level: ($("level") as HTMLSelectElement).value,
     population: Number(($("pop") as HTMLInputElement).value),
     seed: Math.max(0, Math.floor(Number(($("seed") as HTMLInputElement).value) || 0)),
   };
 }
 
 function reset(replay?: Placement[]) {
+  if (!currentLevelJson) return;
   const s = settings();
-  $("loading").hidden = false;
+  prepStatus(`Spawning ${s.population.toLocaleString()} civilians…`);
   stats = null;
   towers = new Float32Array(0);
   fences = new Float32Array(0);
   history = [];
   updateControls();
-  send({ type: "init", levelUrl: LEVELS[s.level].url, population: s.population, seed: s.seed, replay });
+  send({ type: "init", levelJson: currentLevelJson, population: s.population, seed: s.seed, replay });
+}
+
+// ---------------------------------------------------------------- screens
+function prepStatus(msg: string) {
+  $("loading").hidden = false;
+  $("prep-spin").hidden = false;
+  $("prep-actions").hidden = true;
+  $("prep-msg").textContent = msg;
+}
+
+function prepError(msg: string) {
+  $("loading").hidden = false;
+  $("prep-spin").hidden = true;
+  $("prep-actions").hidden = false;
+  $("prep-msg").textContent = msg;
+}
+
+const placeKey = (p: Place) => p.presetUrl ?? `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;
+
+async function enterGame(place: Place) {
+  document.body.dataset.screen = "game";
+  explore.setActive(false);
+  overlay.setProps({ layers: [] });
+  setGeo(place.lat, place.lon);
+  fitView(); // fly to the spot while the buildings download
+  currentPlace = place;
+  $("place").textContent = place.name;
+  $("place").title = place.name;
+  $("result").hidden = true;
+  level = null;
+  n = 0;
+  stats = null;
+  updateControls();
+  prepAbort?.abort();
+  const abort = new AbortController();
+  prepAbort = abort;
+  try {
+    let json = levelCache.get(placeKey(place));
+    if (!json) {
+      if (place.presetUrl) {
+        prepStatus("Loading level…");
+        json = await (await fetch(place.presetUrl, { signal: abort.signal })).text();
+      } else {
+        const pack = await generateLevel(place.name, place.lat, place.lon, prepStatus, abort.signal);
+        json = JSON.stringify(pack);
+      }
+      levelCache.set(placeKey(place), json);
+    }
+    if (abort.signal.aborted) return;
+    const meta = JSON.parse(json) as { radius_m: number; center_lat: number; center_lon: number; buildings: unknown[] };
+    const radius = meta.radius_m;
+    const count = meta.buildings.length;
+    setGeo(meta.center_lat, meta.center_lon);
+    $("place").title = `${place.name} · ${count} buildings · radius ${radius} m`;
+    currentLevelJson = json;
+    fitted = false;
+    reset();
+  } catch (e) {
+    if (abort.signal.aborted) return;
+    prepError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+function backToMap() {
+  prepAbort?.abort();
+  send({ type: "stop" });
+  level = null;
+  n = 0;
+  stats = null;
+  currentLevelJson = "";
+  $("result").hidden = true;
+  setTool("pan");
+  document.body.dataset.screen = "explore";
+  overlay.setProps({ layers: [] });
+  explore.setActive(true);
 }
 
 function setTool(t: typeof tool) {
   tool = t;
   for (const id of ["tool-pan", "tool-tower", "tool-fence"]) $(id).classList.toggle("on", id === `tool-${t}`);
-  deck.setProps({ controller: { dragPan: t !== "fence", scrollZoom: true, doubleClickZoom: false, dragRotate: false } as never });
+  if (t === "fence") map.dragPan.disable();
+  else map.dragPan.enable();
+  map.getCanvas().style.cursor = t === "fence" ? "crosshair" : t === "tower" ? "pointer" : "";
   updateFenceHint();
 }
 
@@ -543,18 +694,10 @@ function showResult() {
   $("result").hidden = false;
 }
 
-// Level picker
-const levelSel = $("level") as HTMLSelectElement;
-for (const [k, v] of Object.entries(LEVELS)) {
-  const o = document.createElement("option");
-  o.value = k;
-  o.textContent = v.label;
-  levelSel.appendChild(o);
-}
-levelSel.addEventListener("change", () => {
-  fitted = false;
-  reset();
-});
+$("back").addEventListener("click", backToMap);
+$("prep-back").addEventListener("click", backToMap);
+$("r-map").addEventListener("click", backToMap);
+$("prep-retry").addEventListener("click", () => currentPlace && enterGame(currentPlace));
 const pop = $("pop") as HTMLInputElement;
 const popLabel = () => ($("pop-label").textContent = `${(Number(pop.value) / 1000).toFixed(0)}k`);
 pop.addEventListener("input", popLabel);
@@ -574,7 +717,7 @@ $("replay").addEventListener("click", () => {
   reset(history);
 });
 $("r-close").addEventListener("click", () => ($("result").hidden = true));
-$("fit").addEventListener("click", fitView);
+$("fit").addEventListener("click", () => fitView());
 for (const k of ["none", "chase", "flee"] as const) {
   $(`field-${k}`).addEventListener("click", () => {
     fieldKind = k;
@@ -596,5 +739,4 @@ window.addEventListener("keydown", (e) => {
 
 popLabel();
 setTool("pan");
-reset();
 requestAnimationFrame(frame);

@@ -94,6 +94,9 @@ Every choice the spec left open, and every simplification, in one place.
   overlapping neighbours or 48 scanned candidates, and is clamped to one
   radius per tick. It reads the hash-time state, so a civilian bitten this
   tick still pushes during this tick.
+- **Separation visits agents in spatial-hash order** (not index order), so
+  neighbouring agents are processed together. Each agent's push is computed
+  exactly as before, so the state hash is unchanged.
 - **Spatial hash:** besides `bucket_start` / `agent_ids`, the counting sort
   stores civilians first inside each bucket, plus bucket-ordered copies of x,
   y and state. Bites scan only civilians and towers only non-civilians. This
@@ -107,8 +110,15 @@ Every choice the spec left open, and every simplification, in one place.
   stack.
 - **Towers fire immediately** when a target first appears, then every 10
   ticks (2 shots/s), so a zombie at 30 m dies on ticks 0, 10, 20 (1 s).
-- **Dead zombies** keep their slot with state Dead and a 60-tick timer used
-  only for rendering (grey for 3 s, then hidden).
+- **Speeds (owner request, after the first hand-back):** civilians 2× (wander
+  1.2 m/s, flee 4.4 m/s), zombies 3× (7.5 m/s) compared with the spec. Zombies
+  now outrun fleeing civilians by 3.1 m/s instead of 0.3 m/s, so chases end
+  quickly and games last minutes instead of timing out. A zombie still moves
+  0.375 m per tick, well under one 2 m cell.
+- **Dead zombies stay on the map.** A killed zombie keeps its slot with state
+  Dead. For `kill_flash_seconds` (1 s) it renders as a pale "fresh kill",
+  then as a violet corpse until the end of the game, so tower kills stay
+  visible. Corpses don't move, push or block.
 - **Determinism** relies on f32 arithmetic with no FMA contraction, no
   trig, sqrt only, PCG32, and index-order iteration. The fixture run (Paris,
   5k agents, seed 2026, one tower, one fence, 400 ticks) hashes identically
@@ -169,3 +179,44 @@ Every choice the spec left open, and every simplification, in one place.
 - **Replay same seed** re-creates the sim with the same level, population and
   seed, re-applies the placement history and starts immediately.
 - **Debug heatmaps** are refreshed once per second while enabled.
+
+## Map screen and live levels
+
+- **Base map:** MapLibre GL 5.24 with the OpenFreeMap "liberty" style (free,
+  no API key, CORS headers so it works under COEP `require-corp`).
+- **Search:** Nominatim, one request per submit (its usage policy forbids
+  search-as-you-type). Clicking the map drops a pin and asks Nominatim's
+  reverse endpoint for a street name.
+- **Play area preview:** the dashed circle on the map is the maximum query
+  radius (600 m). The real radius is chosen after the download.
+- **Live level generation** (`web/src/levelgen.ts`) follows `levelgen.py`:
+  one Overpass query at 600 m, radius grown from 100 m in 50 m steps until
+  600–1,200 buildings, same kinds, floors and 15 m² minimum. Sparse places
+  use the full 600 m; fewer than 40 buildings is refused with a message. It
+  differs in clipping: without shapely, footprints crossing the circle are
+  clipped with Sutherland–Hodgman against a 64-gon, so a footprint cut into
+  pieces stays one polygon joined along the edge (those cells are walls
+  anyway), and invalid rings are not repaired. If overpass-api.de fails, a
+  second public instance (overpass.private.coffee) is tried.
+- **Built-in levels** stay as presets on the map screen and need no network.
+- **Downloaded levels are cached in memory** for the session, so going back
+  to the map and starting the same pin again doesn't re-query Overpass. The
+  last started place is remembered in `localStorage` (map position only).
+- **One map for both screens.** The MapLibre map from the map screen stays
+  on screen during setup and play; deck.gl draws the game on it through
+  `MapboxOverlay` (non-interleaved: its own canvas on top, map events passed
+  through). In game mode every `symbol` layer of the style (street names,
+  POI icons, road shields) is hidden; buildings, roads, water and parks stay.
+  A darkened mask covers everything outside the play circle. Map rotation is
+  disabled.
+- **Map ↔ sim coordinates.** The level pack uses an equirectangular
+  projection around (lat0, lon0). Layers keep their data in sim meters and use
+  `LNGLAT_OFFSETS` with a model matrix (translate by the grid centre, scale by
+  1/(cos lat0 · 111320) and 1/110540), the exact inverse, so footprints sit on
+  the map's buildings without per-frame conversion of 100k positions. Clicks
+  and fence drags convert the map's lng/lat back the same way.
+- **Our building footprints** are drawn only as a faint tint and outline,
+  since the base map already draws the buildings. Fences are near-black
+  (white vanished on the light map) and turn red as they take damage.
+- **Replay** passes the level JSON itself to the worker, so replays never
+  re-download.

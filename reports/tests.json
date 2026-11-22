@@ -86,17 +86,17 @@
   },
   {
     "group": "M3 tools",
+    "name": "zombies_detour_through_a_gap",
+    "ok": true
+  },
+  {
+    "group": "M3 tools",
     "name": "placement_budgets_and_undo",
     "ok": true
   },
   {
     "group": "M3 tools",
     "name": "fence_break_reopens_cell_and_recomputes_fields_same_tick",
-    "ok": true
-  },
-  {
-    "group": "M3 tools",
-    "name": "zombies_detour_through_a_gap",
     "ok": true
   },
   {

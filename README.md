@@ -1,7 +1,7 @@
 # Zombie TD — proof of concept
 
-A real neighbourhood turned into a zombie-outbreak tower defense. Buildings
-come from OpenStreetMap. Up to 100,000 agents are simulated at 20 ticks/s by
+A real neighbourhood turned into a zombie-outbreak tower defense. Pick any
+place on a street map; its buildings are downloaded from OpenStreetMap. Up to 100,000 agents are simulated at 20 ticks/s by
 one Rust core that runs natively (headless tests, scenarios, benchmarks) and
 as WASM in the browser.
 
@@ -9,7 +9,8 @@ as WASM in the browser.
 
 *Paris Le Marais, 20k agents, two rifle garrisons (green) and a fence, two
 minutes in. Civilians are blue, zombies red. The "Render fps 1" in this
-capture comes from the hidden preview pane it was taken in, not from the app.*
+capture comes from the hidden preview pane it was taken in, not from the app.
+Taken before the map screen, the faster agents and the corpses were added.*
 
 ## Prerequisites
 
@@ -24,7 +25,7 @@ Everything else lives in the dev image (`Dockerfile`):
 | wasm-pack / wasm-bindgen | 0.13.1 / 0.2.100 |
 | Node.js / npm | 22.23 / 10.9 |
 | Python (level tool), requests, shapely | 3.11.2, 2.28, 1.8.5 |
-| Web: Vite, TypeScript, deck.gl | 6.4.6, 5.9.3, 9.4.1 |
+| Web: Vite, TypeScript, deck.gl, MapLibre GL | 6.4.6, 5.9.3, 9.4.1, 5.24.0 |
 
 `./dev.sh <command>` runs a command in that container with this folder
 mounted at `/work`. `./dev.sh` alone opens a shell. Rust build output and
@@ -52,35 +53,49 @@ Useful extras:
   fast report (2 seeds, no S5, short benchmarks) for iteration. It is marked
   "QUICK MODE".
 - `./dev.sh python3 tools/levelgen/levelgen.py --name paris-marais --lat 48.8580 --lon 2.3580 --query-radius 500`
-  regenerates a level from Overpass (one query). Nothing else touches the
-  network.
+  regenerates a committed level from Overpass (one query).
 
 The generated report is committed in [`reports/`](reports/headless-report.md),
 so you can read the results without running anything.
 
 ## Playing
 
-1. **Setup.** Pick a level, population (5k–100k) and seed. Civilians wander;
-   the outbreak locations are hidden.
-2. **Tower** (8 available): click a building to garrison it. It shoots the
+1. **Map.** Browse the street map, search an address (press Enter) or click
+   to drop a pin, then **Start here**. The game downloads the buildings around
+   the pin from OpenStreetMap (one Overpass query) and grows the play area
+   until it holds 600–1,200 buildings, up to 600 m. The two built-in levels
+   (Paris Le Marais, Le Vésinet) start without any download. The last place
+   you started is remembered.
+2. **Setup.** The street map stays on screen: the game is drawn on top of it,
+   with street names and icons hidden and everything outside the play area
+   darkened. Pick a population (5k–100k) and seed. Civilians wander; the
+   outbreak locations are hidden. **← Map** goes back to choose another place.
+3. **Tower** (8 available): click a building to garrison it. It shoots the
    nearest zombie within 40 m, 2 shots/s, 3 hits to kill.
-3. **Fence** (400 m): drag on the ground. The parts that fall on buildings
+4. **Fence** (400 m): drag on the ground. The parts that fall on buildings
    are clipped off, so a line drawn from wall to wall seals a street. Zombies
    detour when a cheap way around exists and otherwise break through
    (300 hp per 2 m cell, 10 hp/s per zombie). Civilians never cross fences.
-4. **Undo** (also Ctrl/⌘-Z) and **Clear** while in setup.
-5. **Start.** The outbreak begins in 3 clusters. **Pause** (Space), speed
+5. **Undo** (also Ctrl/⌘-Z) and **Clear** while in setup.
+6. **Start.** The outbreak begins in 3 clusters. **Pause** (Space), speed
    1× / 2× / 4×, **Reset**.
-6. The game ends when no zombies or infected are left (**win**), no civilians
+7. The game ends when no zombies or infected are left (**win**), no civilians
    are left (**loss**), or after 10 minutes (**timeout**). Score = surviving
    civilians. **Replay same seed** re-runs the same setup and gives the same
-   result.
+   result. **New location** returns to the map.
 
-Pan by dragging, zoom with the wheel, **Frame level** to re-centre. The debug
+Pan by dragging the map (except with the Fence tool), zoom with the wheel or
+the +/− buttons, **Frame level** to re-centre. The debug
 panel shows the chase or flee field as a heatmap and the spatial-hash grid.
 
-Colours: civilians blue, infected (1 s before turning) yellow, zombies red,
-dead grey, fences white fading to red as they take damage.
+Colours: civilians blue, infected (1 s before turning) yellow, zombies red
+(all with a thin dark rim so they read on the map), garrisons green, fences
+near-black turning red as they take damage. A zombie killed by a
+garrison flashes pale for 1 s and then stays on the map as a violet corpse,
+so you can see where the garrisons are working.
+
+Speeds: civilians wander at 1.2 m/s and flee at 4.4 m/s; zombies run at
+7.5 m/s. An undefended 20k game in Paris is over in about 3 minutes.
 
 ## Results
 
@@ -89,35 +104,33 @@ on the Apple M1 Pro inside the Docker dev container (Linux VM, one thread).
 
 | Check | Target | Measured | Result |
 |---|---|---|---|
-| Native p95 tick, 100k agents | ≤ 15 ms | 13.21 ms | PASS |
-| Native max tick, 100k agents | ≤ 30 ms | 19.80 ms | PASS |
-| WASM (Node) p95 tick, 100k agents | ≤ 25 ms | 16.63 ms | PASS |
-| WASM (Node) max tick, 100k agents | ≤ 45 ms | 20.28 ms | PASS |
+| Native p95 tick, 100k agents | ≤ 15 ms | 21.16 ms | **FAIL** |
+| Native max tick, 100k agents | ≤ 30 ms | 29.95 ms | PASS |
+| WASM (Node) p95 tick, 100k agents | ≤ 25 ms | 26.48 ms | **FAIL** |
+| WASM (Node) max tick, 100k agents | ≤ 45 ms | 38.93 ms | PASS |
 | Tests (24, incl. native = WASM hash) | all pass | 24/24 | PASS |
 
-Separation is the biggest cost (about half the tick), then the flow fields
-(about 18%). About 77% of civilians are dormant on average over the first
-150 s.
+**The p95 targets fail since the speed change** (civilians 2×, zombies 3×).
+Before it, native p95 was 13.21 ms and WASM 16.63 ms. Faster zombies convert
+nearly everyone within the 150 s benchmark and then run in dense columns, so
+separation (pushing overlapping agents apart) now takes 59% of the tick:
+about 8 ms at 100k, against about 4 ms before. Lowering the scan cap from 48
+to 24 only brings native p95 to 17.9 ms, so meeting the target needs a
+reworked separation pass (for example a finer grid sized to the 0.6 m
+radius).
 
-**Browser, measured on this machine (Apple M1 Pro, Chrome-based preview):**
-at 100k agents the sim keeps real time at 9.7 ms last / 18.6–19.3 ms p95
-per tick (target: under 50 ms), with no fallback mode. A full game at 20k
-agents with 2 garrisons and a fence ended Loss at 9:42 with 249 zombies
-killed, three times in a row (two fresh page loads and one "Replay same
-seed").
+**Browser, measured before the speed change (Apple M1 Pro, Chrome-based
+preview):** at 100k agents the sim kept real time at 9.7 ms last /
+18.6–19.3 ms p95 per tick (target: under 50 ms), with no fallback mode.
 
-**Not verified: the 60 fps render target.** The preview window used during
-development was hidden, so the browser throttled it to about 1 fps and frame
-rate couldn't be measured. deck.gl reports no per-frame attribute rebuilds,
-and the main thread only interpolates positions (one pass over 200k floats)
-per frame. Check the "Render fps" line in the HUD in a normal browser window
-at 100k agents and record it here.
+**Render fps:** the owner checked the HUD's "Render fps" at 100k agents in a
+normal browser window and found it smooth. No exact number was recorded.
 
-Scenario highlights (5 seeds each): without defense, Paris loses half its
-civilians after about 342 s (S1). Eight central garrisons kill about 820
-zombies but barely move the outcome (S2). The fence ring in S3 is first
-breached after 18 s. The suburb falls faster than Paris (S4, half lost at
-193 s), and 100k agents in Paris behave like 20k but faster (S5).
+Scenario highlights (5 seeds each, new speeds): every scenario now ends in a
+loss. Without defense, Paris loses half its civilians after about 91 s (S1)
+and 90% after about 136 s. Eight central garrisons kill about 183 zombies but
+don't change the outcome (S2). The fence ring in S3 is first breached after
+10 s. The suburb falls faster than Paris (S4, half lost at 59 s).
 
 ## How it works
 
@@ -135,7 +148,12 @@ breached after 18 s. The suburb falls faster than Paris (S4, half lost at
   (COOP/COEP headers set by Vite). If the page is not cross-origin isolated,
   it posts transferable snapshots instead and shows a "fallback mode" badge.
   The main thread interpolates between the last two ticks and renders with
-  deck.gl (`OrthographicView`, meters as units).
+  deck.gl as an overlay on the MapLibre street map (`@deck.gl/mapbox`).
+  Layer data stays in sim meters; a model matrix turns it into lng/lat
+  offsets from the level centre, the exact inverse of the level projection.
+- **`web/src/explore.ts`, `web/src/levelgen.ts`**: the map screen
+  (MapLibre GL with OpenFreeMap tiles, Nominatim search) and a browser port
+  of the level generator.
 - **`tools/levelgen`**: Overpass → level pack JSON. Committed levels:
   `levels/paris-marais.json` (659 buildings, r = 400 m) and
   `levels/suburb.json` (Le Vésinet, 375 buildings, r = 250 m).

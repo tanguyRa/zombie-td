@@ -43,7 +43,7 @@ pub struct Config {
     pub separation_radius_m: f32,
     pub separation_max_neighbors: u32,
     pub separation_max_scan: u32,
-    pub dead_visible_seconds: f32,
+    pub kill_flash_seconds: f32,
 }
 
 /// The repository's `config.default.json`, embedded so tests and the WASM

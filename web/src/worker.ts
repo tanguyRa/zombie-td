@@ -141,14 +141,20 @@ function apply(p: Placement): string | null {
 }
 
 async function initSim(msg: Extract<ToWorker, { type: "init" }>) {
-  generation++;
+  const myGen = ++generation;
   if (loopTimer) clearTimeout(loopTimer);
   if (!wasmReady) wasmReady = init();
   const wasm = (await wasmReady) as { memory: WebAssembly.Memory };
+  if (myGen !== generation) return; // a newer init or a stop arrived meanwhile
   memory = wasm.memory;
-  const levelJson = await (await fetch(msg.levelUrl)).text();
   if (sim) sim.free();
-  sim = new WasmSim(levelJson, configJson, msg.population, msg.seed);
+  sim = null;
+  try {
+    sim = new WasmSim(msg.levelJson, configJson, msg.population, msg.seed);
+  } catch (e) {
+    post({ type: "error", message: `Could not build the level: ${String(e)}`, fatal: true });
+    return;
+  }
   n = sim.count();
   history = [];
   const replayed: Placement[] = [];
@@ -194,6 +200,13 @@ async function initSim(msg: Extract<ToWorker, { type: "init" }>) {
 self.onmessage = async (ev: MessageEvent<ToWorker>) => {
   const m = ev.data;
   if (m.type === "init") return initSim(m);
+  if (m.type === "stop") {
+    generation++;
+    if (loopTimer) clearTimeout(loopTimer);
+    sim?.free();
+    sim = null;
+    return;
+  }
   if (!sim) return;
   switch (m.type) {
     case "tower":

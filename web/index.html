@@ -5,10 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Zombie TD</title>
   </head>
-  <body>
+  <body data-screen="explore">
+    <div id="map"></div>
+
+    <section id="explore">
+      <div class="explore-panel">
+        <form id="search" class="searchbox" role="search">
+          <input id="search-q" type="search" placeholder="Search an address or place" autocomplete="off" aria-label="Search an address or place" />
+          <button type="submit" aria-label="Search">Search</button>
+        </form>
+        <ul id="results" hidden></ul>
+      </div>
+      <div class="pick-card">
+        <div class="brand-lg">Zombie&nbsp;TD</div>
+        <div class="pick-label">Outbreak location</div>
+        <div id="pick-name" class="pick-name"></div>
+        <p class="pick-note">The play area is up to 600 m around the pin, sized to 600–1,200 buildings from OpenStreetMap.</p>
+        <button id="go" class="primary big-btn">Start here</button>
+        <div class="pick-label">Or play a built-in level</div>
+        <div id="presets" class="chips"></div>
+      </div>
+    </section>
+
     <header id="topbar">
       <div class="brand">Zombie&nbsp;TD <span id="phase" class="phase">Loading</span></div>
-      <label aria-label="Level"><select id="level"></select></label>
+      <button id="back" title="Back to the map">← Map</button>
+      <span id="place" class="place"></span>
       <label class="pop">Population <input id="pop" type="range" min="5000" max="100000" step="5000" value="20000" /> <span id="pop-label">20k</span></label>
       <label>Seed <input id="seed" type="number" min="0" value="1" /></label>
       <div class="group">
@@ -21,8 +43,6 @@
       <button id="reset">Reset</button>
       <span id="fallback" class="badge" hidden title="SharedArrayBuffer unavailable: positions are copied each tick">fallback mode</span>
     </header>
-
-    <div id="map"></div>
 
     <aside id="tools">
       <h2>Setup</h2>
@@ -45,7 +65,7 @@
         <dt><i class="dot civ"></i>Civilians</dt><dd id="h-civ">–</dd>
         <dt><i class="dot inf"></i>Infected</dt><dd id="h-inf">–</dd>
         <dt><i class="dot zom"></i>Zombies</dt><dd id="h-zom">–</dd>
-        <dt><i class="dot dead"></i>Dead</dt><dd id="h-dead">–</dd>
+        <dt><i class="dot dead"></i>Killed</dt><dd id="h-dead">–</dd>
         <dt>Survival</dt><dd id="h-surv">–</dd>
         <dt>Sim ms/tick <small>last / p95</small></dt><dd id="h-sim">–</dd>
         <dt>Render fps</dt><dd id="h-fps">–</dd>
@@ -64,13 +84,23 @@
         </dl>
         <div class="row">
           <button id="replay" class="primary">Replay same seed</button>
+          <button id="r-map">New location</button>
           <button id="r-close">Close</button>
         </div>
       </div>
     </div>
 
     <div id="toast" hidden></div>
-    <div id="loading">Loading level…</div>
+    <div id="loading">
+      <div class="card prep">
+        <div class="spinner" id="prep-spin"></div>
+        <p id="prep-msg">Loading level…</p>
+        <div class="row" id="prep-actions" hidden>
+          <button id="prep-retry" class="primary">Retry</button>
+          <button id="prep-back">Back to map</button>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

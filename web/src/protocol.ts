@@ -1,9 +1,8 @@
 // Messages and shared-memory layout between the main thread and the sim worker.
 
-export type LevelName = "paris-marais" | "suburb";
-
 export type ToWorker =
-  | { type: "init"; levelUrl: string; population: number; seed: number; replay?: Placement[] }
+  | { type: "init"; levelJson: string; population: number; seed: number; replay?: Placement[] }
+  | { type: "stop" }
   | { type: "tower"; x: number; y: number }
   | { type: "fence"; pts: number[] }
   | { type: "undo" }
@@ -52,7 +51,7 @@ export type FromWorker =
   | { type: "stats"; stats: Stats }
   | { type: "placements"; towers: Float32Array; fences: Float32Array; history: Placement[] }
   | { type: "fences"; fences: Float32Array }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; fatal?: boolean }
   | { type: "field"; kind: "chase" | "flee"; data: Int32Array; w: number; h: number };
 
 // ---- shared buffer: header, then 3 slots of (positions f32 x,y; render u8) ----
