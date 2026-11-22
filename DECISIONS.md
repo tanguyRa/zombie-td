@@ -823,10 +823,31 @@ yet: that comes after T5).
   block corners rounded to cm (the same rounding on a shared edge, so tiling
   stays exact). A building with a vertex more than 49.9 m outside its block
   is **clipped** to the block grown by 49.9 m (Sutherland–Hodgman), not
-  dropped, so a big building (a station, a museum) keeps most of its
-  footprint; the 0.1 m below `block_margin_m` absorbs cm rounding and f32.
-  The part beyond is lost (no other block has it). Buildings under 15 m²
-  are dropped, as in `levelgen.ts`. Buildings are sorted by OSM id.
+  dropped; the 0.1 m below `block_margin_m` absorbs cm rounding and f32.
+  The part beyond is lost (no other block has it). Trade-off of the anchor
+  vertex: it is the building's southernmost vertex, so the building can
+  stick out of its block by up to its full depth (north) or width (east or
+  west), against about half of it under the vertex mean. A building 50 to
+  100 m across is therefore more likely to be clipped, and one much larger
+  than 50 m (a station, a museum) loses whatever lies beyond 49.9 m. On the
+  Marais fixture nothing is clipped, but the worst overshoot is 49.4 m
+  (30.8 m with the vertex mean); `loader.test.ts` reports both. Buildings
+  under 15 m² are dropped, as in `levelgen.ts`. Buildings are sorted by OSM
+  id.
+- **`abort()` is final, even with a warm cache.** `start()` checks the
+  signal before and after loading the initial blocks, so it rejects with an
+  AbortError even when every block came from the cache without a network
+  wait. After an abort no block is added and no `chunk` or `ring` event is
+  emitted: cache hits are skipped and the put loop checks the signal before
+  each block.
+- **Listeners can't break the loader.** Each `chunk`, `ring` and `error`
+  listener is called in its own try/catch: a throw (in the planned wiring,
+  `match.add_buildings` returning an error) is not a network failure, so it
+  causes no refetch, no extra query, no `error` event and no failed block,
+  and `start()` still resolves. The error goes to the `listenerError` event;
+  with no `listenerError` listener (or when that one throws) it is rethrown
+  from `queueMicrotask`, so it shows as an uncaught error in the console
+  without touching the load.
 - **Map snapshot hash** (`snapshotHash`, for the run record in T4):
   FNV-1a 64 (offset 0xcbf29ce484222325, prime 0x100000001b3) over the UTF-8
   bytes of `"zt-map-v1\n"` followed by, for each chunk in ascending block

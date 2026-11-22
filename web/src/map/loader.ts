@@ -12,6 +12,13 @@
 // as events (they go to `new_streaming`), so every block is delivered once.
 // `start()` may be called again after it rejects: it only fetches the
 // initial blocks still missing.
+//
+// Listeners are isolated from the loader: an exception thrown by a `chunk`,
+// `ring` or `error` listener is caught (the other listeners still run, the
+// block stays loaded, no refetch, `start()` is unaffected) and reported as a
+// `listenerError` event. With no `listenerError` listener, or when one of
+// those throws too, the error is rethrown from a microtask so it still shows
+// as an uncaught error in the console.
 
 import { blocksForDisc, blocksForRing, type BlockId, type LatLon } from "./blocks";
 import { MemoryBlockCache, makeCachedBlock, type BlockStore, type CachedBlock } from "./cache";
@@ -79,6 +86,8 @@ export interface MapLoaderEvents {
   ring: number;
   /// A batch failed `maxAttempts` times; its blocks stay missing until `retryFailed()`.
   error: { blocks: BlockId[]; error: unknown };
+  /// A listener of another event threw; the loader carried on regardless.
+  listenerError: { event: "chunk" | "ring" | "error"; error: unknown };
 }
 
 export interface MapLoaderStats {
@@ -145,7 +154,12 @@ export class MapLoader {
   /// Wave index (0-based) of each block.
   private waveOf = new Map<BlockId, number>();
   private waiters = new Set<Waiter>();
-  private listeners: { [K in keyof MapLoaderEvents]: Set<Listener<MapLoaderEvents[K]>> } = { chunk: new Set(), ring: new Set(), error: new Set() };
+  private listeners: { [K in keyof MapLoaderEvents]: Set<Listener<MapLoaderEvents[K]>> } = {
+    chunk: new Set(),
+    ring: new Set(),
+    error: new Set(),
+    listenerError: new Set(),
+  };
   private readyWaves = 0;
   private abortCtl = new AbortController();
   private starting: Promise<BuildingChunk[]> | null = null;
@@ -182,8 +196,22 @@ export class MapLoader {
     return () => this.listeners[ev].delete(fn);
   }
 
+  /// Calls every listener of `ev`; a throwing listener never reaches the
+  /// loader (see the header: `listenerError`, else a microtask rethrow).
   private emit<K extends keyof MapLoaderEvents>(ev: K, v: MapLoaderEvents[K]) {
-    for (const fn of this.listeners[ev]) fn(v);
+    for (const fn of [...this.listeners[ev]]) {
+      try {
+        fn(v);
+      } catch (error) {
+        if (ev === "listenerError" || !this.listeners.listenerError.size) {
+          queueMicrotask(() => {
+            throw error;
+          });
+        } else {
+          this.emit("listenerError", { event: ev as "chunk" | "ring" | "error", error });
+        }
+      }
+    }
   }
 
   /// Load waves 1..initialWaves (cache, then network) and resolve with their
@@ -205,8 +233,12 @@ export class MapLoader {
   private async runStart(): Promise<BuildingChunk[]> {
     const n = Math.min(this.opts.initialWaves, this.waveBlocks.length);
     const first = this.waveBlocks.slice(0, n).flat();
+    const signal = this.abortCtl.signal;
+    if (signal.aborted) throw abortError();
     for (const id of first) this.unavailable.delete(id);
     await this.load(first, true);
+    // A warm cache makes `load` succeed without a network await: check again.
+    if (signal.aborted) throw abortError();
     const missing = first.filter((id) => !this.loaded.has(id));
     if (missing.length) throw new Error(`${missing.length} map blocks of the first waves are not loaded`);
     const chunks = first.map((id) => this.loaded.get(id)!).sort((a, b) => a.block_id - b.block_id);
@@ -231,7 +263,9 @@ export class MapLoader {
   }
 
   /// Stop loading: requests and backoff sleeps are cut short, `start()`
-  /// rejects and pending `whenRingReady` promises reject with an AbortError.
+  /// rejects (even when every initial block is cached) and pending
+  /// `whenRingReady` promises reject with an AbortError. No block is added
+  /// and no `chunk` or `ring` event is emitted after it.
   abort() {
     this.abortCtl.abort();
     const e = abortError();
@@ -341,12 +375,18 @@ export class MapLoader {
         cached = new Map();
       }
       for (const id of todo) {
+        // Once aborted nothing more is added (a listener may abort mid-loop).
+        if (this.abortCtl.signal.aborted) break;
         const b = cached.get(id);
         if (b && this.fresh(b)) {
           this.stats.cacheHits++;
           this.pending.delete(id);
           this.add(b);
         }
+      }
+      if (this.abortCtl.signal.aborted) {
+        if (initial) throw abortError();
+        return;
       }
       const missing = todo.filter((id) => !this.loaded.has(id));
       const batches: BlockId[][] = [];
@@ -399,6 +439,7 @@ export class MapLoader {
           } catch {
             // The cache is best effort (quota, private mode): keep playing.
           }
+          if (signal.aborted) throw abortError();
           this.stats.fetched++;
           this.pending.delete(id);
           this.add(block);

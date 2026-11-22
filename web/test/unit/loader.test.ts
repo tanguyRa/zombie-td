@@ -1,8 +1,9 @@
 import { IDBFactory } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 import { blockAt, blockBoundsLocal, blockDistanceM, blocksForDisc, type BlockId } from "../../src/map/blocks";
-import { IdbBlockCache, MemoryBlockCache, SCHEMA_VERSION } from "../../src/map/cache";
-import { snapshotHash, type BuildingChunk } from "../../src/map/chunks";
+import { IdbBlockCache, MemoryBlockCache, SCHEMA_VERSION, type CachedBlock } from "../../src/map/cache";
+import { project } from "../../src/map/osm";
+import { CLIP_MARGIN_M, snapshotHash, type BuildingChunk } from "../../src/map/chunks";
 import { DEFAULT_COVERAGE_SLACK_M, MapLoader, matchRingRadii } from "../../src/map/loader";
 import { fakeOverpass, loadConfig, loadLevel, parseBboxes, timeoutBody, waysFromLevel, type FakeCall } from "./fixtures";
 
@@ -426,5 +427,195 @@ describe("MapLoader: cache max age", () => {
     await c.start();
     expect(stale.calls.length).toBeGreaterThan(0);
     expect(c.stats.cacheHits).toBe(0);
+  });
+});
+
+/// A warm cache: every block of `ringRadii` loaded once into a MemoryBlockCache.
+async function warmCache(ringRadii: number[]): Promise<MemoryBlockCache> {
+  const cache = new MemoryBlockCache();
+  const l = makeLoader(fakeOverpass(ways), { cache, ringRadii });
+  await l.start();
+  await l.done();
+  return cache;
+}
+
+describe("MapLoader: abort with a warm cache", () => {
+  it("abort() before start() rejects start() and emits nothing", async () => {
+    const cache = await warmCache(RINGS);
+    const fake = fakeOverpass(ways);
+    const l = makeLoader(fake, { cache });
+    const events: string[] = [];
+    l.on("chunk", (c) => events.push(`chunk ${c.block_id}`));
+    l.on("ring", (w) => events.push(`ring ${w}`));
+    l.abort();
+    await expect(l.start()).rejects.toThrow(/aborted/);
+    await l.done();
+    expect(events).toEqual([]);
+    expect(l.chunks()).toEqual([]);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("abort() while start() reads the cache rejects start() and loads nothing more", async () => {
+    const warm = await warmCache(RINGS);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    class SlowRead extends MemoryBlockCache {
+      override async getMany(ids: BlockId[]) {
+        const got = await warm.getMany(ids);
+        await gate;
+        return got;
+      }
+    }
+    const fake = fakeOverpass(ways);
+    const l = makeLoader(fake, { cache: new SlowRead() });
+    const events: string[] = [];
+    l.on("chunk", (c) => events.push(`chunk ${c.block_id}`));
+    l.on("ring", (w) => events.push(`ring ${w}`));
+    const started = l.start();
+    l.abort();
+    release();
+    await expect(started).rejects.toThrow(/aborted/);
+    await l.done();
+    expect(events).toEqual([]);
+    expect(l.chunks()).toEqual([]);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("an abort from a ring listener stops start() even with every block cached", async () => {
+    const cache = await warmCache(RINGS);
+    const l = makeLoader(fakeOverpass(ways), { cache });
+    const events: string[] = [];
+    l.on("ring", (w) => {
+      events.push(`ring ${w}`);
+      l.abort();
+    });
+    l.on("chunk", (c) => events.push(`chunk ${c.block_id}`));
+    await expect(l.start()).rejects.toThrow(/aborted/);
+    await l.done();
+    expect(events).toEqual(["ring 1"]);
+    expect(l.ringReady(2)).toBe(false);
+  });
+
+  it("an abort during a cache put adds no more blocks and emits no more events", async () => {
+    let held: (() => void) | null = null;
+    let puts = 0;
+    let holdAt = Infinity;
+    class SlowPut extends MemoryBlockCache {
+      override async put(b: CachedBlock) {
+        await super.put(b);
+        if (++puts === holdAt) await new Promise<void>((r) => (held = r));
+      }
+    }
+    const fake = fakeOverpass(ways);
+    const l = makeLoader(fake, { cache: new SlowPut(), concurrency: 1, batchSize: 6 });
+    await l.start();
+    holdAt = puts + 2; // the second block of the first background batch
+    const events: string[] = [];
+    l.on("chunk", (c) => events.push(`chunk ${c.block_id}`));
+    l.on("ring", (w) => events.push(`ring ${w}`));
+    await until(() => held !== null, "the held put");
+    expect(events).toHaveLength(1); // the first block of the batch
+    const loaded = l.chunks().length;
+    l.abort();
+    held!();
+    await l.done();
+    expect(events).toHaveLength(1);
+    expect(l.chunks()).toHaveLength(loaded);
+    expect(fake.calls.length).toBe(l.stats.queries);
+  });
+});
+
+describe("MapLoader: throwing listeners", () => {
+  it("a throwing chunk or ring listener doesn't refetch, fail blocks or reject start()", async () => {
+    const ref = makeLoader(fakeOverpass(ways));
+    await ref.start();
+    await ref.done();
+
+    const fake = fakeOverpass(ways);
+    const l = makeLoader(fake);
+    const boom = new Error("add_buildings failed");
+    const reported: { event: string; error: unknown }[] = [];
+    const errors: unknown[] = [];
+    const seen: number[] = [];
+    l.on("chunk", () => {
+      throw boom;
+    });
+    l.on("chunk", (c) => seen.push(c.block_id)); // later listeners still run
+    l.on("ring", () => {
+      throw boom;
+    });
+    l.on("error", (e) => errors.push(e));
+    l.on("listenerError", (e) => reported.push(e));
+    const first = await l.start();
+    await l.done();
+    expect(first).toEqual(await ref.start());
+    expect(l.ringReady(8)).toBe(true);
+    expect(errors).toEqual([]);
+    expect(l.stats.queries).toBe(ref.stats.queries);
+    expect(fake.calls).toHaveLength(ref.stats.queries);
+    expect(l.chunks()).toEqual(ref.chunks());
+    expect(l.snapshotHash()).toBe(ref.snapshotHash());
+    const background = l.waveBlocks.slice(2).flat();
+    expect([...seen].sort((a, b) => a - b)).toEqual([...background].sort((a, b) => a - b));
+    expect(reported.filter((r) => r.event === "chunk")).toHaveLength(background.length);
+    expect(reported.filter((r) => r.event === "ring")).toHaveLength(8);
+    expect(reported.every((r) => r.error === boom)).toBe(true);
+  });
+
+  it("without a listenerError listener the error is rethrown from a microtask", async () => {
+    const thrown: unknown[] = [];
+    const orig = globalThis.queueMicrotask;
+    globalThis.queueMicrotask = (cb) =>
+      orig(() => {
+        try {
+          cb();
+        } catch (e) {
+          thrown.push(e);
+        }
+      });
+    try {
+      const l = makeLoader(fakeOverpass(ways), { ringRadii: [150] });
+      l.on("ring", () => {
+        throw new Error("ring listener");
+      });
+      await expect(l.start()).resolves.toHaveLength(l.waveBlocks[0].length);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(thrown.map((e) => (e as Error).message)).toEqual(["ring listener"]);
+    } finally {
+      globalThis.queueMicrotask = orig;
+    }
+  });
+});
+
+describe("Building clipping on the Marais fixture (anchor vertex vs vertex mean)", () => {
+  /// For the block chosen by `pick`: the share of buildings with a vertex more
+  /// than CLIP_MARGIN_M outside it (projectBlock clips those) and the largest
+  /// overshoot of any vertex beyond the block edge.
+  function overshoot(pick: (g: { lat: number; lon: number }[]) => BlockId) {
+    let clipped = 0;
+    let max = 0;
+    for (const w of ways) {
+      const g = w.geometry!.slice(0, -1);
+      const [x0, y0, x1, y1] = blockBoundsLocal(pick(g), CENTER);
+      let out = 0;
+      for (const p of g) {
+        const [x, y] = project(p.lat, p.lon, CENTER.lat, CENTER.lon);
+        out = Math.max(out, x0 - x, x - x1, y0 - y, y - y1);
+      }
+      if (out > CLIP_MARGIN_M) clipped++;
+      max = Math.max(max, out);
+    }
+    return { share: clipped / ways.length, max };
+  }
+  it("reports the clipped share and worst overshoot (anchor can overshoot by a full width)", () => {
+    const anchor = overshoot((g) => {
+      const v = g.reduce((a, p) => (p.lat < a.lat || (p.lat === a.lat && p.lon < a.lon) ? p : a));
+      return blockAt(v.lat, v.lon);
+    });
+    const mean = overshoot((g) => blockAt(g.reduce((s, p) => s + p.lat, 0) / g.length, g.reduce((s, p) => s + p.lon, 0) / g.length));
+    const f = (r: { share: number; max: number }) => `${(r.share * 100).toFixed(2)}% clipped, worst overshoot ${r.max.toFixed(1)} m`;
+    console.log(`Marais (${ways.length} buildings): anchor vertex ${f(anchor)}; vertex mean ${f(mean)}`);
+    expect(anchor.share).toBeLessThan(0.01);
+    expect(anchor.max).toBeGreaterThanOrEqual(mean.max);
   });
 });
