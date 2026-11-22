@@ -377,6 +377,36 @@ impl WaveResult {
     }
 }
 
+/// How a wave attempt ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptResult {
+    Won,
+    Lost,
+    /// Left by `RetryWave` or `RestartMatch` during its prep or while it ran.
+    Abandoned,
+}
+
+/// One attempt at a wave, kept for the whole match (retries and restarts
+/// don't drop it, unlike `WaveResult`): what the run record stores so a
+/// replay can check every attempt, lost and abandoned ones too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaveAttempt {
+    pub wave: u8,
+    pub result: AttemptResult,
+    /// Match tick when its prep opened (reveal, retry or restart).
+    pub start_tick: u64,
+    /// Match tick when it ended (after the tick that ended the wave, or the
+    /// tick of the retry / restart that abandoned it).
+    pub end_tick: u64,
+    /// `Match::state_hash` when its prep opened.
+    #[serde(with = "crate::record::hex64")]
+    pub prep_hash: u64,
+    /// `Match::state_hash` when it ended (before a retry / restart restores).
+    #[serde(with = "crate::record::hex64")]
+    pub end_hash: u64,
+}
+
 /// An accepted action and the match tick it was applied on (`Match::tick`:
 /// steps done before it).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -559,6 +589,14 @@ pub struct Match {
     restarts: u32,
     tick: u64,
     log: Vec<LoggedAction>,
+    /// Every wave attempt that ended so far (not restored by retries).
+    attempts: Vec<WaveAttempt>,
+    /// Match tick when the current attempt's prep opened.
+    attempt_start: u64,
+    /// The shell as given (`shell` has the radius cut to the last ring).
+    input_shell: LevelPack,
+    /// Built by `Match::new` from a whole level (one chunk, id 0).
+    whole_level: bool,
 }
 
 /// The `ring_ready` band: every cell whose centre is within the ring radius +
@@ -595,7 +633,9 @@ impl Match {
         let mut shell = level.clone();
         shell.buildings = Vec::new();
         let all = BuildingChunk { block_id: 0, bounds: [f32::MIN, f32::MIN, f32::MAX, f32::MAX], buildings: level.buildings.clone() };
-        Match::new_streaming_with_cards(&shell, cfg, cards, setup, vec![all])
+        let mut m = Match::new_streaming_with_cards(&shell, cfg, cards, setup, vec![all])?;
+        m.whole_level = true;
+        Ok(m)
     }
 
     /// A match whose buildings arrive in chunks: `shell` gives the play area
@@ -619,6 +659,7 @@ impl Match {
         };
         let rings = Match::ring_radii(&cfg, level_r);
         let outbreaks = Match::outbreak_counts(&cfg, &rings);
+        let input_shell = shell.clone();
         let mut shell = shell.clone();
         if shell.radius_m.is_some() {
             shell.radius_m = Some(rings[rings.len() - 1]);
@@ -674,6 +715,10 @@ impl Match {
             restarts: 0,
             tick: 0,
             log: Vec::new(),
+            attempts: Vec::new(),
+            attempt_start: 0,
+            input_shell,
+            whole_level: false,
         };
         for ch in chunks {
             m.add_buildings(ch)?;
@@ -922,10 +967,13 @@ impl Match {
                 if phase == Phase::MatchWon {
                     return wrong();
                 }
+                self.abandon_attempt();
                 self.state.restore(&self.prep_snapshot);
+                self.attempt_start = self.tick;
                 self.retries += 1;
             }
             Action::RestartMatch => {
+                self.abandon_attempt();
                 let grid = Match::shell_grid(&self.shell, &self.cfg);
                 self.state = Match::fresh_state(grid, &self.cfg, &self.setup, &self.deck_list);
                 self.enter_prep();
@@ -935,6 +983,22 @@ impl Match {
         }
         self.log.push(LoggedAction { tick: self.tick, action });
         Ok(())
+    }
+
+    /// A retry or restart during prep or a running wave ends that attempt
+    /// (one ended by a win or a loss is already recorded).
+    fn abandon_attempt(&mut self) {
+        if matches!(self.state.phase, Phase::Prep | Phase::Running) {
+            let end_hash = self.state_hash();
+            self.attempts.push(WaveAttempt {
+                wave: self.state.wave,
+                result: AttemptResult::Abandoned,
+                start_tick: self.attempt_start,
+                end_tick: self.tick,
+                prep_hash: self.state.start_hash,
+                end_hash,
+            });
+        }
     }
 
     // ------------------------------------------------------------ cards
@@ -1412,6 +1476,7 @@ impl Match {
         let h = self.state_hash();
         self.state.start_hash = h;
         self.prep_snapshot = self.state.snapshot();
+        self.attempt_start = self.tick;
     }
 
     /// Open wave `k`'s disc: apply the chunks it touches (block-id order),
@@ -1569,6 +1634,9 @@ impl Match {
             end_hash,
         };
         st.results.push(r);
+        let prep_hash = st.start_hash;
+        let result = if won { AttemptResult::Won } else { AttemptResult::Lost };
+        self.attempts.push(WaveAttempt { wave: k, result, start_tick: self.attempt_start, end_tick: self.tick, prep_hash, end_hash });
     }
 
     // ------------------------------------------------------------ queries
@@ -1625,6 +1693,44 @@ impl Match {
     }
     pub fn log(&self) -> &[LoggedAction] {
         &self.log
+    }
+    /// Every wave attempt that ended so far, in order (won, lost and
+    /// abandoned; retries and restarts never drop one).
+    pub fn attempts(&self) -> &[WaveAttempt] {
+        &self.attempts
+    }
+    /// Match tick when the current attempt's prep opened.
+    pub fn attempt_start_tick(&self) -> u64 {
+        self.attempt_start
+    }
+    /// The level shell as given to `new_streaming` (for `Match::new`: the
+    /// level without its buildings).
+    pub fn shell(&self) -> &LevelPack {
+        &self.input_shell
+    }
+    /// Built by `Match::new` / `new_with_cards` from a whole level.
+    pub fn is_whole_level(&self) -> bool {
+        self.whole_level
+    }
+    /// Every chunk the match holds (applied or not), in block-id order.
+    pub fn chunks(&self) -> impl Iterator<Item = &BuildingChunk> {
+        self.chunks.values().map(|s| &s.chunk)
+    }
+    /// The building on the cell under sim point (x, y): the clicked cell
+    /// only, `None` off the grid, on a cell with no building or for a
+    /// building with no cell (`cell_count == 0`). Unlike `Sim::building_at`
+    /// there is no polygon fallback, which can name a half-applied building
+    /// on its open part (DECISIONS.md, "Match"); the browser must use this.
+    pub fn building_at(&self, x: f32, y: f32) -> Option<u32> {
+        let g = &self.state.sim.grid;
+        if !(x >= 0.0 && y >= 0.0 && x < g.w as f32 * g.cell && y < g.h as f32 * g.cell) {
+            return None;
+        }
+        let b = g.building[g.cell_of(x, y)];
+        if b == crate::grid::NO_BUILDING || g.buildings.get(b as usize).map_or(true, |i| i.cell_count == 0) {
+            return None;
+        }
+        Some(b)
     }
     /// RetryWave + RestartMatch count (0 earns the no-retry bonus).
     pub fn retries(&self) -> u32 {

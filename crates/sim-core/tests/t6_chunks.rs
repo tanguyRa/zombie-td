@@ -2,10 +2,12 @@
 //! (`web/test/unit/fixture.test.ts`, `npm run fixtures:chunks`) works with
 //! sim-core: waves 1–2 start a streaming match, the rest is accepted by
 //! `add_buildings`, and the map snapshot hash recomputed here matches the
-//! JS one (DECISIONS.md, "Map blocks (T6a)").
+//! JS one (DECISIONS.md, "Map blocks (T6a)"; the hash is
+//! `sim_core::mapsnap` since T4).
 mod common;
 use serde::Deserialize;
 use sim_core::level::LevelPack;
+use sim_core::mapsnap::{self, canonical_chunk, fnv1a64, hex, round_half_up};
 use sim_core::match_::{BuildingChunk, Match, MatchSetup};
 
 #[derive(Deserialize)]
@@ -45,64 +47,18 @@ fn shell(meta: &Meta) -> LevelPack {
     }
 }
 
-// ------------------------------------------------- map snapshot hash (port)
-// T4 will move this into sim-core; kept here until then.
+// The map snapshot hash lives in `sim_core::mapsnap` since T4; these tests
+// keep it equal to the JS `snapshotHash`.
 
-/// FNV-1a 64 of `bytes` (offset 0xcbf29ce484222325, prime 0x100000001b3).
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-/// Round half up, `floor(v + 0.5)`: the JS rule (`f64::round` differs on negative halves).
-fn round_half_up(v: f64) -> i64 {
-    (v + 0.5).floor() as i64
-}
-
-fn cm(v: f32) -> i64 {
-    round_half_up(v as f64 * 100.0)
-}
-
-/// `[block_id,[x0,y0,x1,y1],[[id,"kind",floors_dm,[x,y,...]],...]]`, compact,
-/// integer centimetres and tenths of floors, buildings in id order.
-fn canonical_chunk(c: &BuildingChunk) -> String {
-    let mut bs: Vec<_> = c.buildings.iter().collect();
-    bs.sort_by_key(|b| b.id);
-    let buildings: Vec<(u64, String, i64, Vec<i64>)> = bs
-        .iter()
-        .map(|b| {
-            let kind = serde_json::to_value(b.kind).unwrap().as_str().unwrap().to_string();
-            let pts = b.polygon.iter().flat_map(|&[x, y]| [cm(x), cm(y)]).collect();
-            (b.id, kind, round_half_up(b.floors as f64 * 10.0), pts)
-        })
-        .collect();
-    let bounds = [cm(c.bounds[0]), cm(c.bounds[1]), cm(c.bounds[2]), cm(c.bounds[3])];
-    serde_json::to_string(&(c.block_id, bounds, buildings)).unwrap()
-}
-
-/// `"zt-map-v1\n"` then each chunk's canonical line + `"\n"`, ascending
-/// block id; FNV-1a 64 as 16 lowercase hex digits.
 fn snapshot_hash(chunks: &[BuildingChunk]) -> String {
-    let mut sorted: Vec<&BuildingChunk> = chunks.iter().collect();
-    sorted.sort_by_key(|c| c.block_id);
-    let mut s = String::from("zt-map-v1\n");
-    for (i, c) in sorted.iter().enumerate() {
-        assert!(i == 0 || sorted[i - 1].block_id != c.block_id, "duplicate block {}", c.block_id);
-        s.push_str(&canonical_chunk(c));
-        s.push('\n');
-    }
-    format!("{:016x}", fnv1a64(s.as_bytes()))
+    hex(mapsnap::snapshot_hash(chunks).expect("unique block ids"))
 }
 
 #[test]
 fn fnv1a64_known_vectors() {
-    assert_eq!(format!("{:016x}", fnv1a64(b"")), "cbf29ce484222325");
-    assert_eq!(format!("{:016x}", fnv1a64(b"a")), "af63dc4c8601ec8c");
-    assert_eq!(format!("{:016x}", fnv1a64(b"foobar")), "85944171f73967e8");
+    assert_eq!(hex(fnv1a64(b"")), "cbf29ce484222325");
+    assert_eq!(hex(fnv1a64(b"a")), "af63dc4c8601ec8c");
+    assert_eq!(hex(fnv1a64(b"foobar")), "85944171f73967e8");
     assert_eq!(round_half_up(-12.5), -12);
     assert_eq!(round_half_up(12.5), 13);
 }

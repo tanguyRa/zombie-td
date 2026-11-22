@@ -1079,7 +1079,7 @@ yet: that comes after T5).
   make it portable: Rust gets the same bytes from its f32 chunks with
   `(v as f64 * 100.0 + 0.5).floor() as i64` and `serde_json::to_string`
   of the same tuple shape (`crates/sim-core/tests/t6_chunks.rs` does this
-  and checks the fixture's hashes; T4 moves it into sim-core). It hashes the
+  and checks the fixture's hashes; since T4 it is `sim_core::mapsnap`). It hashes the
   projected chunks (what the sim consumes), so it depends on the match
   centre; the per-block content hash of the raw data is kept alongside
   (`MapLoader.blockHashes()`). JS computes FNV in 16-bit limbs, checked
@@ -1137,3 +1137,183 @@ yet: that comes after T5).
 - **`levelgen.ts`'s grow-the-radius logic stays** for now (the current
   game still uses it); retiring or porting it to blocks is part of the
   integration step.
+
+## Run records (T4)
+
+- **`RunRecord`** (`sim-core/src/record.rs`, serde JSON, `format: 1`):
+  - `sim {rules, crate_version, git}`: `rules` is `SIM_RULES_VERSION` (1),
+    the only part a verifier compares; the crate version and the git commit
+    of the build (`build.rs` runs `git rev-parse --short=12 HEAD`, no
+    network; `ZT_GIT_HASH` overrides it, absent without git) are
+    informational, so a rebuild or a docs commit doesn't invalidate runs.
+    **Bump `SIM_RULES_VERSION` with any change that changes a hash** and
+    regenerate the golden record.
+  - `config_hash` (`Config::content_hash`: FNV-1a of the config
+    re-serialised as compact JSON, so key order and formatting of the file
+    don't count) and `cards_hash` (`CardDb::content_hash`).
+  - `map {source: level|chunks, snapshot_hash, blocks, shell}`: the level
+    without its buildings (centre lat/lon, radius or bounds, fences: what a
+    chunks replay builds the match on) and the snapshot of the buildings
+    (below).
+  - `setup {seed, population_multiplier, deck}`: the seed is a decimal
+    string and every hash 16 hex digits, since JS numbers stop at 2^53.
+  - `actions`: `Match::log()`, every accepted action with its match tick,
+    retries, restarts, mulligans and keep choices included.
+  - `attempts`: every wave attempt that ended, `{wave, result:
+    won|lost|abandoned, start_tick, end_tick, prep_hash, end_hash}`. The
+    match keeps them outside the retry state (`Match::attempts`; a retry
+    drops the attempt's `WaveResult` but not this), so a lost attempt
+    before a retry is verified too. A `RetryWave` / `RestartMatch` during
+    prep or a running wave ends that attempt as `abandoned` with the hash
+    just before the restore (one `state_hash`, ~24 ms at wave-8 size); one
+    from a result screen adds nothing (the win or loss is recorded).
+  - `end {tick, phase, wave, abandoned, hash, prep_hash,
+    attempt_start_tick, waves_won, retries, restarts, waves: [{wave, won,
+    start_civilians, end_civilians, saved}]}`: where the record stops, the
+    state hash there and the outcome summary.
+- **`RunRecord::from_match(&Match)`** takes no map argument: the match
+  holds its chunks (`Match::chunks`) and knows whether it was built from a
+  whole level (`Match::is_whole_level`), so it computes the snapshot itself.
+- **Map snapshot.** Streamed matches: `mapsnap::snapshot_hash` (the JS
+  `snapshotHash`, moved from `t6_chunks.rs`, which still checks it against
+  the JS fixture) of **every chunk the match holds** at export, applied or
+  not, with their ids in `blocks`. A chunk refused with `AreaRevealed` was
+  never stored and is not in it. Stored but unapplied chunks don't change
+  the sim, but including them keeps the rule "exactly what the match was
+  given" (a replay gets them all up front, which the arrival-order tests
+  of T2 show is equivalent). **Whole levels** (`Match::new`): the snapshot
+  is `snapshot_hash` of one chunk with block id 0, bounds `[0, 0, 0, 0]`
+  and every building of the level (`mapsnap::level_snapshot_hash`; the
+  match's own block 0 has unbounded bounds, which have no centimetre form).
+  The shell (radius, bounds, centre, fences) is compared bit for bit.
+  Both hashes round to centimetres, so a building moved by 1 cm is refused
+  as a map mismatch; a sub-centimetre change that alters the game still
+  fails at the first wave hash.
+- **`replay(record, ReplayMap::Level(&level) | ReplayMap::Chunks(&chunks))
+  -> Result<ReplaySummary, VerifyError>`** uses the embedded config and
+  cards and the default limits; `replay_with(record, map, cfg, cards,
+  &limits, &mut progress)` takes others. For chunks, the record's blocks
+  are picked out of the chunks given (any order, extras ignored, a missing
+  one is `missing_block`). The match is rebuilt from the setup and the map,
+  each action is applied on its tick with plain `step()`s in between, and
+  the replay stops at `end.tick`, never later. Checks, in order:
+  1. no simulation: `format`, `sim_version`, the limits, action sizes, tick
+     order (`out_of_order`), ticks past the end (`future_tick`), the end
+     marker, `config_hash`, `cards_hash`;
+  2. the map: `map_source`, `map_shell`, `missing_block`, `map_hash`, then
+     `setup` (the match can't be built: illegal deck, chunks...);
+  3. replaying: `illegal_action {index, tick, action, reason: ActionError}`
+     (card not in hand, wrong phase, not enough supply, bad target: the
+     same checks as play), `too_long` (a wave or a prep over its limit),
+     and `diverged {attempt, wave, tick, what, record, replay}` as soon as
+     an attempt differs. Each attempt's wave, start tick and prep hash are
+     checked when its prep opens, its end tick, result and end hash when it
+     ends, and a recorded attempt still running past its end tick diverges
+     right away. `attempt` indexes `attempts` (`attempts.len()` is the
+     attempt open at the end);
+  4. the end: phase, wave and `final_hash` (as `diverged`), then the
+     summary (`outcome`). `cancelled` if the callback stopped it.
+
+  So an edited seed, deck or multiplier diverges at attempt 0's prep hash
+  (tick 0), before any action; a changed play diverges at the attempt it
+  was played in.
+- **A record that ends before the match is won must say `abandoned:
+  true`**, else `unfinished` (checked before any tick; `abandoned` on a won
+  match is `bad_record`). `from_match` sets it from the phase, so the
+  marker means "the client exported this as a left match", and a truncated
+  or hand-cut upload is refused rather than read as a run in progress.
+  Abandoned records still verify (the server can pay per wave won).
+- **DoS bounds** (`ReplayLimits::for_config`, verifier policy, not in the
+  config hash): 20,000 actions, 256 attempts (and as many retries plus
+  restarts), `end.tick` at most 4 h of game time (288,000 ticks at 20 Hz),
+  one wave at most 30 min (36,000 ticks), one prep at most 30 min, 1,024
+  points per polyline target, 64 entries per building list or keep list,
+  64 waves in the summary. Everything but the per-phase lengths is checked
+  before the first tick (tested: a 1M-action log, a 10^12-tick end, a
+  100k-point polyline and 300 restarts are refused in well under 500 ms in
+  total); a wave that never ends or a prep that lasts forever stops at its
+  limit. The JSON itself must be size-capped by the server before parsing.
+  Worst case at the bounds: 288,000 ticks at ~17 ms (wave-8 size) is
+  ~80 min of CPU, so the server should still queue and time out replays;
+  `--max-ticks` (CLI) or `ReplayLimits` tighten it.
+- **Progress / cancel:** `replay_with`'s callback gets `{tick, end_tick,
+  wave, attempts}` every 256 ticks and returns `false` to stop
+  (`cancelled {tick}`); `sim-headless verify` uses it for progress lines.
+- **Prep ticks are replayed** like any tick (`Match::step` in prep moves
+  the cosmetic wander, which `state_hash` covers until Start resets it), so
+  time a player idles in prep costs the verifier as much as wave time. T5
+  can pause the sim in prep without breaking anything (pause and speed
+  never reach the sim).
+- **JSON floats round-trip exactly:** serde_json writes the shortest
+  string that reads back to the same f32 (checked on 20M random values and
+  on every record of the tests), so polyline and point targets replay bit
+  for bit from the JSON.
+- **CLI:** `sim-headless verify <run.json> --level <name or level.json> |
+  --chunks <chunks.json>` (exit 0 verified, 1 rejected, 2 usage or I/O)
+  and `sim-headless match ... --record out.json` (refused with
+  `--fast-forward-to`, which removes zombies outside the log). Node:
+  `tools/verify-run.mjs` with the `pkg-node` WASM build.
+- **WASM** (`sim-wasm`, marshalling only): `WasmMatch` (`new(level_json,
+  setup_json)`, `new_streaming(shell_json, setup_json, chunks_json)`,
+  `add_buildings`, `ring_ready`, `apply(action_json)` throwing the
+  `ActionError` JSON with a `message`, `step(ticks)`, render buffers like
+  `WasmSim`, `status_json`, `hand_json`, `results_json`, `attempts_json`,
+  `structures_json`, `repair_cost`, `pull_down_refund`, `structure_at`,
+  `fence_length_m`, `building_at`, geometry, `state_hash`, `prep_hash`,
+  `record()`), and `verify_level(record_json, level_json)` /
+  `verify_chunks(record_json, chunks_json)` returning the summary JSON or
+  throwing the `VerifyError` JSON. The setup JSON takes the seed as a
+  string or a number; config and cards are the embedded ones.
+- **`Match::building_at(x, y)`** looks at the clicked cell only: `None`
+  off the grid, on a cell with no building or for a building with
+  `cell_count == 0`. `Sim::building_at`'s polygon fallback names a
+  half-applied building on its open part (T2 review), so `WasmMatch` uses
+  the match's (tested on the half-applied building of the T2 test).
+- **Tests** (`crates/sim-core/tests/t4_records.rs`): a scripted 8-wave
+  Marais match (seed 1, a test bot with no trig) with prep idling, a
+  restart, a lost attempt, a retry, an attempt abandoned mid-wave, a
+  mulligan, a same-prep pull-down, an older pull-down, a repair, a retry
+  after a win and tactical cards mid-wave (90 actions, 12 attempts, 17,577
+  ticks) replays 3 times with equal hashes, also after a JSON round trip.
+  Tampering: a changed play, a changed tick, reordered actions, a card not
+  in hand, wrong phases, not enough supply, an edited wave hash, a dropped
+  attempt, an edited final hash or summary, seed, deck, multiplier,
+  format, rules version, config, cards, a level building moved 1 cm, the
+  level radius, a chunk building moved 1 cm, a missing block and the wrong
+  map kind, each with its error and the right attempt. Streamed: the same
+  match on the T6a `map_chunks.json` blocks given up front or staged
+  (waves 1–2 reversed, the rest shuffled during wave 1's prep) records
+  byte-identical JSON and verifies with the chunks reversed. WASM under
+  Node verifies the golden record with every attempt hash equal and
+  drives `WasmMatch` through its first three attempts. A CLI test records
+  a match, verifies it and rejects a tampered copy.
+- **Replay cost** (native M1 Pro, single thread; the server replays every
+  claimed run). A replay costs what playing costs: the same ticks, plus a
+  state hash per prep and per attempt end.
+
+  | run | ticks | agents at the end | native | WASM (Node) |
+  |---|---|---|---|---|
+  | Marais, 8 waves won, `sim-headless match --seed 1` (no retry) | 9,120 | 6,257 | 3.9 s | 5.2 s |
+  | Marais golden record (8 waves, 4 retries, 1 restart, 12 attempts) | 17,577 | ~6,300 | 9.0 s | 11.9 s |
+  | Wave-8 size: 1.3 km tiled Marais, 150 s of one wave | 3,000 | 88,991 | 51.7 s (17.2 ms/tick) | — |
+
+  The last row is a proxy, since the scripted defence can't win waves 3–8
+  at 1.3 km (T3): a config whose first ring is already 1,265 m with wave
+  8's outbreak (10 clusters, 14 m, min 12) and multiplier 0.5, played by
+  `sim-headless match --level marais-tiled:1300 --max-wave-s 150 --record`
+  and verified with the same `ZT_CONFIG` (peak RSS 217 MB; playing it took
+  53 s). Its 17.2 ms/tick matches T2's live wave-8 p50 (17.1 ms). A full
+  1.3 km match whose waves each run ~2.5 min would replay in roughly
+  2–4 min native (smaller early waves are cheaper), so the server needs
+  about one core-minute or more per claimed full-size run.
+- **Golden record** `crates/sim-core/tests/fixtures/run_record_golden.json`
+  (the scripted match; config `ceabf38252a0c4ba`, cards `3e157f5ac2531906`,
+  map `e9b1fbac85820411`, final hash `063314547f6d4959`). The test fails
+  with "sim rules changed: bump SIM_RULES_VERSION … and regenerate the
+  golden record with `ZT_REGEN_GOLDEN=1 cargo test --release -p sim-core
+  --test t4_records golden`" when it no longer replays, and also when the
+  script no longer records it byte for byte. Any balance change in
+  `config.default.json` or `cards.json` changes the config or cards hash
+  and needs the same bump (that is the point: a run replays only on the
+  rules it was played with). No other fixture changed (`0ea142296a5795a9`,
+  `b0b7f9703b3cc1c0`, the fence-break hash).

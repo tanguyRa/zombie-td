@@ -1243,4 +1243,13 @@ fn a_half_applied_building_owns_only_its_new_cells() {
     for &c in &owned {
         assert_eq!(g.kind[c], sim_core::grid::BUILDING, "cell {c} of the building is not a building cell");
     }
+    // T4: `Match::building_at` looks at the clicked cell only. The polygon
+    // fallback of `Sim::building_at` names the building on its open part.
+    let [ox, oy] = g.cell_center(open);
+    assert_eq!(m.sim().building_at(ox, oy), Some(bi), "Sim::building_at falls back to the polygon");
+    assert_eq!(m.building_at(ox, oy), None, "Match::building_at: open ground is no building");
+    let [bx, by] = g.cell_center(owned[0]);
+    assert_eq!(m.building_at(bx, by), Some(bi));
+    assert_eq!(m.building_at(-1.0, by), None);
+    assert_eq!(m.building_at(g.w as f32 * g.cell + 1.0, by), None);
 }

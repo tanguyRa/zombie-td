@@ -8,7 +8,8 @@
 //!        [--fenced 1300|none] [--skip-wasm] [--out reports/scale.md]   # --radii none: no plain grid
 //!   cargo run --release -p sim-headless -- scenarios
 //!   cargo run --release -p sim-headless -- match --level paris-marais --seed 1 [--retries 2] [--max-wave-s 1800]
-//!        [--multiplier 0.3] [--fast-forward-to 8]   # level may also be marais-tiled:1300
+//!        [--multiplier 0.3] [--fast-forward-to 8] [--record run.json]   # level may also be marais-tiled:1300
+//!   cargo run --release -p sim-headless -- verify run.json (--level paris-marais | --chunks chunks.json)
 
 mod bench;
 mod charts;
@@ -17,6 +18,7 @@ mod matchcmd;
 mod report;
 mod scale;
 mod scenarios;
+mod verify;
 
 use std::time::Instant;
 
@@ -38,6 +40,7 @@ fn main() {
     match cmd {
         "run" => cmd_run(&args),
         "match" => matchcmd::cmd(&args),
+        "verify" => verify::cmd(&args),
         "bench" if args.iter().any(|a| a == "--scale") => cmd_scale(&args),
         "bench" => {
             let pop: u32 = arg(&args, "--pop", 100_000);
@@ -56,7 +59,7 @@ fn main() {
         }
         "report" => report::run(&args),
         _ => {
-            eprintln!("usage: sim-headless <report|run|match|bench|scenarios> [options]");
+            eprintln!("usage: sim-headless <report|run|match|verify|bench|scenarios> [options]");
             std::process::exit(2);
         }
     }

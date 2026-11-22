@@ -43,7 +43,8 @@ wasm-pack and Node 22 on the host, the commands below also work without the
 | Everything | `./run-all.sh` | Builds WASM, runs all tests (native, WASM, browsers), writes the report, serves http://localhost:5173 |
 | Headless test suite | `./dev.sh cargo test --release` | All tests green |
 | Headless test suite with debug assertions | `./dev.sh env CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo test --release --workspace` | All tests green with `debug_assert!`s on (release speed, own build cache) |
-| Native = WASM hash test | `./dev.sh wasm-pack test --node --release crates/sim-wasm` | WASM reproduces the native hash |
+| Native = WASM hash test | `./dev.sh wasm-pack test --node --release crates/sim-wasm` | WASM reproduces the native hashes and verifies the golden 8-wave run record |
+| Verify a run record | `./dev.sh cargo run --release -p sim-headless -- verify run.json --level paris-marais` | `verified: …` and the replay summary (exit 0), or `rejected: …` naming the first diverging wave attempt (exit 1) |
 | Headless report | `./dev.sh cargo run --release -p sim-headless -- report` | `reports/headless-report.md` and `.html` (charts), raw `reports/*.json` and `*.csv` |
 | Web unit tests (Node, Vitest) | `./dev.sh bash -c "cd web && npm ci && npm run test:unit"` | Map blocks, projection, snapshot hash, block cache and loader tests pass (no network, no browser); `cargo test --release -p sim-core --test t6_chunks` checks their Rust fixture |
 | Browser tests (Chromium, Firefox, WebKit) | `./dev.sh bash -c "cd web && npm ci && npm run e2e"` | Smoke test and native = browser hash test pass in all three browsers |
@@ -67,6 +68,20 @@ Useful extras:
   `ZT_CONFIG=<file>` and `ZT_CARDS=<file>` swap `config.default.json` /
   `cards.json` for balance sweeps; `--level marais-tiled:1300 --fast-forward-to 8 --max-wave-s 150`
   times a real wave 8 at the wave-8 caps (earlier waves won instantly).
+  `--record run.json` also writes the match's **run record** (setup, map
+  snapshot hash, every action with its tick, the state hash at the end of
+  every wave attempt; not with `--fast-forward-to`, which bypasses the
+  action log).
+- `./dev.sh cargo run --release -p sim-headless -- verify run.json --level paris-marais`
+  (or `--level <path to level.json>`, or `--chunks chunks.json` for a match
+  on streamed map blocks) replays a run record and checks every action and
+  every wave hash, as the server will before paying rewards. It prints the
+  replay summary, or why the run was rejected and at which wave attempt it
+  first diverged. `ZT_CONFIG` / `ZT_CARDS` apply as for `match`
+  (a record only verifies with the config and cards it was played with);
+  `--max-ticks` changes the tick bound, `--quiet` drops the progress lines.
+  `node tools/verify-run.mjs run.json --level levels/paris-marais.json` does
+  the same with the WASM build (`pkg-node`, see `tools/wasm-bench.mjs`).
 - `./dev.sh cargo run --release -p sim-headless -- report --quick` makes a
   fast report (2 seeds, no S5, short benchmarks) for iteration. It is marked
   "QUICK MODE".
@@ -205,10 +220,15 @@ don't change the outcome (S2). The fence ring in S3 is first breached after
   deck, a hand of 5 per wave (2 can be kept), supply per wave, one
   mulligan, repair and pull-down. Fortifications and armaments are played
   in prep, tactical cards during the wave.
+  Run records (`record.rs`) and the replay verifier: `RunRecord::from_match`
+  and `replay(record, map)`; the map snapshot hash is `mapsnap.rs`.
   The browser still plays the single-wave `Sim` until T5.
 - **`crates/sim-headless`**: tests support, scenarios S1–S5, benchmarks and
   the report writer (SVG charts, no Python).
-- **`crates/sim-wasm`**: wasm-bindgen wrapper with no logic of its own.
+- **`crates/sim-wasm`**: wasm-bindgen wrapper with no logic of its own:
+  `WasmSim` (the single-wave prototype), `WasmMatch` (the 8-wave match:
+  JSON actions in, state and the run record out) and `verify_level` /
+  `verify_chunks`.
 - **`web/`**: the sim runs in a Web Worker on a fixed 20 Hz accumulator. It
   publishes positions and states through a triple-buffered SharedArrayBuffer
   (COOP/COEP headers set by Vite). If the page is not cross-origin isolated,

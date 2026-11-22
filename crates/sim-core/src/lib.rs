@@ -7,7 +7,9 @@ pub mod fixture;
 pub mod field;
 pub mod grid;
 pub mod level;
+pub mod mapsnap;
 pub mod match_;
+pub mod record;
 pub mod rng;
 pub mod sim;
 
@@ -15,4 +17,5 @@ pub use cards::{validate_deck, CardDb, DeckError};
 pub use config::Config;
 pub use level::LevelPack;
 pub use match_::{Action, ActionError, BuildingChunk, Match, MatchSetup, Phase, Target};
+pub use record::{replay, ReplayMap, ReplaySummary, RunRecord, VerifyError};
 pub use sim::{GamePhase, Outcome, Sim};

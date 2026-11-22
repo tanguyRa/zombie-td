@@ -10,3 +10,4 @@ pub fn level(name: &str) -> LevelPack {
 pub fn cfg() -> Config {
     Config::default_config()
 }
+pub mod bot;

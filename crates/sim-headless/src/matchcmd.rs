@@ -367,9 +367,19 @@ pub fn cmd(args: &[String]) {
         multiplier: crate::arg::<String>(args, "--multiplier", String::new()).parse().ok(),
         no_tactical: args.iter().any(|a| a == "--no-tactical"),
     };
+    let record: String = crate::arg(args, "--record", String::new());
+    if !record.is_empty() && o.fast_forward_to > 0 {
+        eprintln!("--record can't be used with --fast-forward-to: it removes zombies outside the action log, so the run would not replay");
+        std::process::exit(2);
+    }
     let t0 = Instant::now();
     let (m, rows) = run(&o);
     println!("match on {} seed {} (population multiplier {}, starter deck, {} reshuffles)", o.level, o.seed, m.setup().population_multiplier, m.reshuffles());
     print!("{}", table(&m, &rows));
     println!("wall {:.1}s", t0.elapsed().as_secs_f64());
+    if !record.is_empty() {
+        let r = sim_core::RunRecord::from_match(&m);
+        std::fs::write(&record, r.to_json_pretty() + "\n").unwrap_or_else(|e| panic!("{record}: {e}"));
+        println!("run record: {record} ({} actions, {} attempts, {} ticks{})", r.actions.len(), r.attempts.len(), r.end.tick, if r.end.abandoned { ", abandoned" } else { "" });
+    }
 }

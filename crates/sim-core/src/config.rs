@@ -183,6 +183,12 @@ impl Config {
     pub fn default_config() -> Config {
         Config::from_json(DEFAULT_CONFIG_JSON).expect("config.default.json is valid")
     }
+    /// FNV-1a 64 of the config re-serialised as compact JSON (struct field
+    /// order, shortest round-trip floats), so formatting and key order of
+    /// the file don't matter, only the values. The run record's config hash.
+    pub fn content_hash(&self) -> u64 {
+        crate::mapsnap::fnv1a64(serde_json::to_string(self).expect("config serialises").as_bytes())
+    }
     pub fn dt(&self) -> f32 {
         1.0 / self.tick_hz as f32
     }
