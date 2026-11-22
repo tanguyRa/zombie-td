@@ -61,5 +61,12 @@
     "mulligan_cost": 1,
     "repair_cost_factor": 0.5,
     "pull_down_refund": 0.5
+  },
+
+  "difficulty": {
+    "recruit":   { "population_multiplier": 1.0,  "outbreak_scale": 1.0,  "fatigue_scale": 1.0 },
+    "veteran":   { "population_multiplier": 1.25, "outbreak_scale": 1.25, "fatigue_scale": 1.15 },
+    "elite":     { "population_multiplier": 1.5,  "outbreak_scale": 1.5,  "fatigue_scale": 1.3 },
+    "nightmare": { "population_multiplier": 2.0,  "outbreak_scale": 2.0,  "fatigue_scale": 1.5 }
   }
 }
