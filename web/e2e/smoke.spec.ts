@@ -1,12 +1,21 @@
 // Smoke test: built-in level, a tower and a fence placed through the UI,
 // Start, 4×, run to the end, check the result panel.
-import { expect, hook, test } from "./offline";
+import { expect, hook, isLocal, MAP_STYLE, test } from "./offline";
+import config from "../../config.default.json" with { type: "json" };
+
+// A game ends by win, loss or at max_game_seconds. At a perfect 4× that last
+// case takes max_game_seconds / 4 of wall time; allow 1.5× for a slow browser
+// (Firefox, Docker, three browsers sharing the CPU).
+const GAME_MS = (config.max_game_seconds / 4) * 1000 * 1.5;
+// Level load and spawning (two 60 s waits below) plus the placements.
+const SETUP_MS = 150_000;
 
 // Central screen area not covered by the top bar, the tools panel or the HUD.
 const SAFE = { left: 240, right: 1280 - 280, top: 90, bottom: 800 - 30 };
 const inSafe = (p: { x: number; y: number } | null) => !!p && p.x > SAFE.left && p.x < SAFE.right && p.y > SAFE.top && p.y < SAFE.bottom;
 
-test("built-in level: tower + fence, start, 4x, result panel", async ({ page, blocked }) => {
+test("built-in level: tower + fence, start, 4x, result panel", async ({ page, blocked, requests, local }) => {
+  test.setTimeout(SETUP_MS + GAME_MS);
   await page.goto("/?test=1");
   await page.waitForFunction(() => !!window.__zt);
   expect(await hook(page, (h) => h.screen)).toBe("explore");
@@ -66,7 +75,9 @@ test("built-in level: tower + fence, start, 4x, result panel", async ({ page, bl
   await expect.poll(() => hook(page, (h) => h.stats!.speed)).toBe(4);
   await expect(page.locator("#speed-4")).toHaveClass(/\bon\b/);
 
-  await expect(page.locator("#result")).toBeVisible({ timeout: 170_000 });
+  await expect(page.locator("#result"), `game did not end within ${GAME_MS / 1000} s of wall time`).toBeVisible({
+    timeout: GAME_MS,
+  });
   const end = await hook(page, (h) => ({ phase: h.phase, stats: h.stats! }));
   const wall = (Date.now() - t0) / 1000;
   const { hash } = await hook(page, (h) => h.stateHash());
@@ -84,6 +95,8 @@ test("built-in level: tower + fence, start, 4x, result panel", async ({ page, bl
   await expect(page.locator("#r-surv")).toHaveText(/%$/);
   expect(end.stats.tick).toBeGreaterThan(0);
 
-  // Nothing outside the local server was let through (blocked requests are fine).
-  expect(blocked.every((u) => !u.startsWith("http://localhost"))).toBe(true);
+  // Nothing outside the local server was let through: every other request was
+  // either the map style (answered locally) or aborted.
+  const leaked = requests.filter((u) => !isLocal(u, local) && !MAP_STYLE.test(u) && !blocked.includes(u));
+  expect(leaked).toEqual([]);
 });

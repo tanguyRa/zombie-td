@@ -3,10 +3,15 @@ import { defineConfig, devices } from "@playwright/test";
 // Browser end-to-end tests (`npm run e2e` or `npx playwright test`).
 // The web server builds the WASM first, then serves the app with Vite on its
 // own port, so tests can run while `npm run dev` is up on 5173.
-const PORT = 5199;
+// PW_PORT picks another port (e.g. for a second worktree running at the same
+// time). The port must be free: `--strictPort` makes a busy port fail loudly,
+// unless PW_REUSE=1 asks to reuse a server already running there (which then
+// skips `npm run wasm`, so it may serve a stale build).
+const PORT = Number(process.env.PW_PORT ?? 5199);
 
 export default defineConfig({
   testDir: "./e2e",
+  // Default per-test budget; the smoke test sets its own (it plays a game).
   timeout: 180_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
@@ -39,7 +44,7 @@ export default defineConfig({
   webServer: {
     command: `npm run wasm && npx vite --port ${PORT} --strictPort`,
     url: `http://localhost:${PORT}/`,
-    reuseExistingServer: true,
+    reuseExistingServer: !!process.env.PW_REUSE,
     timeout: 300_000,
     stdout: "ignore",
     stderr: "pipe",
