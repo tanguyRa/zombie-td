@@ -84,9 +84,11 @@ pub struct MatchConfig {
     /// `[seconds, factor]` points, linear in between, flat before the first
     /// and after the last. Zombies are not affected.
     pub fatigue_curve: Vec<[f32; 2]>,
-    /// How far a block's buildings may stick out of its bounds. A ring is
-    /// ready once every cell within its radius + this margin is covered, so
-    /// every block whose buildings reach into the ring has arrived.
+    /// How far a block's buildings may stick out of its bounds (per axis). A
+    /// reveal applies the blocks whose bounds come within its radius + this
+    /// margin; a ring is ready once every cell within its radius + this
+    /// margin + one cell diagonal is covered, so all of them have arrived
+    /// (`match_::ring_band_m`).
     pub block_margin_m: f32,
 
     // Cards and supply (T3).

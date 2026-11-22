@@ -318,26 +318,65 @@ Every choice the spec left open, and every simplification, in one place.
 - **Reveal** happens when a wave's prep opens. The match keeps a `base`
   geometry per cell (walk / building / wall with all applied buildings);
   newly revealed cells take it (plus the level's own fences), older cells
-  keep their kind (fences placed or broken stay as they are). Then the
-  "largest 4-connected area" rule runs again over the disc with fences
-  counted as open, and pockets walled off earlier are re-opened first, since
-  a pocket cut by the ring edge may now connect. Step masks are rebuilt.
+  keep their kind (fences placed or broken stay as they are). Pockets walled
+  off earlier are re-opened first, since a pocket cut by the ring edge may
+  now connect; then every open region (fences counted as open) not
+  connected to the cells open before this reveal is walled
+  (`Grid::keep_regions_touching`). Wave 1 keeps its largest region. Step
+  masks are rebuilt. (T2 review: the rule used to be "keep the largest
+  region" every wave, and a new ring with a larger open area not connected
+  to the old one walled the whole territory already played: 0 walkable
+  cells in the core, survivors stuck in walls. Now the played area is never
+  walled; an unconnected part of a new ring is. Agents left on a cell that
+  is not walkable go to the nearest walkable cell anywhere on the grid, no
+  longer only within 32 cells. The Marais sweep, seeds 1–16, is unchanged
+  row for row.)
 - **Buildings arrive in chunks** (`BuildingChunk { block_id, bounds,
   buildings }`, level-local meters). `add_buildings` works in any phase but
-  refuses a chunk whose area (bounds grown to its buildings) touches the
-  revealed disc, or a duplicate id. Chunks are stored, not applied: each
-  reveal applies, in block-id order, every stored chunk whose area touches
-  the new disc. Building indices therefore depend only on the chunks and
+  refuses a chunk the revealed area already needed (below), a duplicate id,
+  and (`BadChunk`, T2 review: `f32::clamp` panicked on them) bounds that are
+  not finite, inverted or narrower than one cell on an axis, or a building
+  with a non-finite coordinate or floor count; `new_streaming` checks its
+  chunks the same way. Chunks are stored, not applied: each reveal applies,
+  in block-id order, every stored chunk whose **bounds** come within the
+  new radius + `block_margin_m` of the centre (Euclidean distance from the
+  centre to the bounds box), and `add_buildings` refuses a chunk with
+  `AreaRevealed` by the same test against the current radius. The
+  buildings never enter that test (before the T2 review it used the bounds
+  grown to the buildings): a building may stick out by the margin per axis,
+  so margin × √2 at a block corner, and could make a block due that
+  `ring_ready` didn't wait for. The part of such a building that reaches
+  into rings revealed before its block is applied stays open ground, the
+  same for any arrival order (tested). Building indices therefore depend only on the chunks and
   the rings, never on arrival order or timing (tested: sorted, reversed,
   and staged arrival give the same per-wave hashes). `Match::new(level)`
   wraps a whole level as one chunk (id 0, infinite bounds).
-- **`ring_ready(wave)`** means every grid cell within the ring radius +
-  `match.block_margin_m` (50 m) is inside some chunk's bounds. The margin
-  is needed: a block whose bounds stop short of a ring can still hold a
-  building that reaches into it; without the margin the ring was declared
-  ready without it and the staged test diverged. Buildings sticking out of
-  their block by more than the margin are refused
-  (`BuildingOutsideBlock`). Contract for T6: blocks tile the plane without
+- **`ring_ready(wave)`** (exact rule since the T2 review; the browser's map
+  loader mirrors it): every grid cell whose centre `p` satisfies
+  `|p − centre|² ≤ (r_k + block_margin_m + cell_size_m × SQRT_2)²` for some
+  wave k ≤ `wave` (f32; `SQRT_2` is `std::f32::consts::SQRT_2`, no trig;
+  `match_::ring_band_m`) is covered by a chunk, a cell being covered by a
+  chunk when `min_x ≤ p.x < max_x` and `min_y ≤ p.y < max_y` (half-open, so
+  blocks that tile the plane cover each cell once even when a shared edge
+  runs through cell centres). Only cells of the grid count. Why the extra
+  cell diagonal: a block is due at reveal k once its bounds come within
+  `r_k + margin`, and a block at least one cell wide whose bounds come
+  within that distance holds a cell centre within one cell diagonal of the
+  nearest point, so it is always awaited before the reveal that would
+  apply it, and so never refused afterwards. With `r_k + margin` alone, a
+  block starting at x = 149.01 (r1 = 100, margin 50) held no cell centre in
+  the band, was not awaited, was refused after the reveal, and
+  `ring_ready(2)` never became true (tested, plus a sweep of sub-cell
+  offsets on both sides of the band edge, straight out and at a diagonal,
+  checking that a block wave 1 doesn't await is accepted after its reveal).
+  The margin is needed: a block whose bounds stop short of a ring can still
+  hold a building that reaches into it. Buildings sticking out of their
+  block by more than the margin on either axis are refused
+  (`BuildingOutsideBlock`). A loader fetching every block whose bounds meet
+  the disc of radius `r_k + block_margin_m + cell_size_m × √2` (as the JS
+  loader does, with 5 cm slack) always has what `ring_ready` needs; for an
+  f32 tie exactly on the band edge it should fetch a little beyond, never
+  less. Contract for T6: blocks tile the plane without
   overlapping and each building is in exactly one block. `NextWave` is
   refused with `RingNotLoaded` until the next ring is ready;
   `new_streaming` refuses to start without wave 1's ring.
@@ -396,11 +435,44 @@ Every choice the spec left open, and every simplification, in one place.
   stream is re-created whenever its wave starts, so a retry or a restart
   replays the same newcomers, outbreak and wander.
 - **`Match::state_hash`** = FNV-1a over the sim's hash, wave, phase, agents
-  in play and applied block ids. `WaveResult` stores it at prep start and
+  in play and applied block ids (more since T3 and the T2 review, below). `WaveResult` stores it at prep start and
   after the tick that ended the wave. A second fixture, two waves of a
   Marais match (`fixture::compute_match_fixture_hash`), hashes
   `4909c13c5beea4e9` natively and in WASM under Node (tested both sides).
-  (T3 changed it on purpose to `e1061f2da92f6c9f`, see "Cards".)
+  (T3 changed it on purpose to `e1061f2da92f6c9f`, see "Cards"; the T2
+  review changed it on purpose to `524027b630e0338f`, below.)
+- **What the match hash covers (T2 review).** It left out state that
+  changes the rest of a running wave, so two matches with equal hashes
+  could diverge (equal hashes, different defeat line: one tick later one
+  was Running, the other WaveLost). It now also eats
+  `Sim::wave_state_hash`: the sim RNG (wander), `n`, `loss_below`, the
+  `fatigue` bits, `timeout`, every `Stats` counter and `spawn_x`/`spawn_y`
+  of the agents in play; and, only while the wave runs (in prep Start
+  recomputes every field; an ended wave never steps), the published chase
+  and flee fields, the threat field clamped to `threat_limit + 1` (higher
+  values are never read exactly and the lazy job leaves them unfinished),
+  and for each pending field job its seeds and the cells broken since it
+  started. A job's result depends only on its seeds and the grid of its
+  start tick, which is the live grid with those cells put back to fence, so
+  this is exact without hashing the half-built back buffers, the Dijkstra
+  queues or the frozen grid copies. Those depend on the work budget and on
+  `eager_fields` and the hash must not (tested: per-tick match hashes are
+  equal for lazy, eager and odd budgets with fences breaking under jobs in
+  flight). The match itself adds `wave_start_civilians`, the newcomers,
+  the counters taken at Start and the results so far (without their
+  hashes). Left out: the spatial hash, separation and fence-damage scratch
+  (rebuilt every tick), `step_mul`, the single-wave tool budgets and
+  placements, spawn counts and weights, outbreak sites (debug only), the
+  prep snapshot, timings and test counters. `Sim::state_hash` is
+  unchanged, so the single-wave fixture (`0ea142296a5795a9`, checked in
+  every browser) and the break fixture (`948428b482f65852`) hold; the match
+  fixture changed on purpose to **`524027b630e0338f`** (native = WASM under
+  Node). Bulk arrays in `wave_state_hash` are mixed one u64 word per step
+  (a bijection per word, so a single-word change always shows). Cost at
+  wave-8 size (100k agents, 1.75M cells, native M1 Pro): `Sim::state_hash`
+  14.7 ms + `wave_state_hash` 9.3 ms, so ~24 ms per `Match::state_hash`
+  (was ~15 ms). It runs twice per wave in a game; T4's divergence search
+  calls it per tick only while bisecting a replay.
 - **`sim-headless match`** (T2 version; since T3 it plays the starter
   deck) plays with 32 towers per wave (`--tower-budget`;
   the config keeps today's 8): with 8, wave 1 already ends at the 15% line
@@ -683,6 +755,8 @@ Every choice the spec left open, and every simplification, in one place.
     mulligans; the script only mulligans a hand with no armament.
     Rerun after the T3 review fixes (mulligan order, keep choice, splash
     centre): the same 13/16 and 12/16, with the same retries per seed.
+    Rerun after the T2 review fixes (pockets walled by connection to the
+    played area): every wave row of seeds 1–16 identical (13/16, 12/16).
   - Tactical cards barely change the scripted results. With
     `--no-tactical`, seeds 1–16 still give 13/16 and 12/16; only seed 5
     needs 2 retries instead of 0. The script plays them late, on the
@@ -983,9 +1057,9 @@ yet: that comes after T5).
   `ring_radius + block_margin_m + coverageSlackM`; wave w's blocks touch
   disc w but not disc w−1 (a 5 cm slack counts tangent blocks).
   `coverageSlackM` defaults to one cell diagonal (`cell_size_m × √2`, read
-  from `config.default.json`: 2.83 m): today's sim-core `ring_ready` checks
-  the cells within `ring_radius + block_margin_m`, and a pending fix widens
-  that to `+ cell_size_m × √2` for cells straddling the disc. The larger
+  from `config.default.json`: 2.83 m): sim-core's `ring_ready` checked the
+  cells within `ring_radius + block_margin_m`, and the T2 review fixes widened
+  that to `+ cell_size_m × √2` (see "Match", `ring_ready`). The larger
   disc is a superset of both, so the JS loader is right with either rule
   (`MapLoader.ringReady` implies sim-core's). `start()` loads waves 1–2
   (cache first, then Overpass) and resolves with their chunks; the rest

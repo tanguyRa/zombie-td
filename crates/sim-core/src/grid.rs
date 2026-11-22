@@ -182,6 +182,42 @@ impl Grid {
         (info, cells)
     }
 
+    /// Keep every 4-connected region of cells passing `open` that contains a
+    /// cell of `anchor`; cells passing `wall` in the other regions become
+    /// walls. Without any open anchor cell, `keep_largest_region`. Returns
+    /// how many cells were walled. A match passes the cells open before a
+    /// reveal, so the territory already played is never walled off, however
+    /// large an unconnected region of the new ring is (T2 review).
+    pub fn keep_regions_touching(&mut self, open: impl Fn(u8) -> bool, wall: impl Fn(u8) -> bool, anchor: &[bool]) -> u32 {
+        let n = self.w * self.h;
+        debug_assert_eq!(anchor.len(), n);
+        if !(0..n).any(|c| anchor[c] && open(self.kind[c])) {
+            return self.keep_largest_region(open, wall);
+        }
+        // Flood from every open anchor cell; whatever is not reached is cut off.
+        let mut kept = vec![false; n];
+        let mut stack: Vec<usize> = (0..n).filter(|&c| anchor[c] && open(self.kind[c])).collect();
+        for &c in &stack {
+            kept[c] = true;
+        }
+        while let Some(c) = stack.pop() {
+            for nb in [c - 1, c + 1, c - self.w, c + self.w] {
+                if !kept[nb] && open(self.kind[nb]) {
+                    kept[nb] = true;
+                    stack.push(nb);
+                }
+            }
+        }
+        let mut walled = 0;
+        for i in 0..n {
+            if !kept[i] && open(self.kind[i]) && wall(self.kind[i]) {
+                self.kind[i] = WALL;
+                walled += 1;
+            }
+        }
+        walled
+    }
+
     /// Keep only the largest 4-connected region of cells passing `open`
     /// (ties: the first found in index order); open cells elsewhere become
     /// walls. Returns how many cells were walled.

@@ -562,9 +562,11 @@ fn chunks_give_the_same_match_whatever_their_arrival_order() {
     let reversed = play_chunked(Match::new_streaming(&shell, cfg.clone(), setup.clone(), rev).unwrap(), vec![]);
     assert_eq!(sorted, reversed);
 
-    // Only wave 1's blocks first, the rest later in another order.
+    // Only wave 1's blocks first (what a loader fetches: bounds within the
+    // ring + `ring_band_m`), the rest later in another order.
     let r1 = Match::ring_radii(&cfg, 400.0)[0];
-    let (first, late): (Vec<_>, Vec<_>) = chunks.iter().cloned().partition(|c| extent_meets(c, r1));
+    let band = sim_core::match_::ring_band_m(&cfg);
+    let (first, late): (Vec<_>, Vec<_>) = chunks.iter().cloned().partition(|c| extent_meets(c, r1 + band));
     assert!(!late.is_empty() && !first.is_empty());
     let staged = play_chunked(Match::new_streaming(&shell, cfg.clone(), setup.clone(), first.clone()).unwrap(), late.clone());
     assert_eq!(sorted, staged);
@@ -596,4 +598,429 @@ fn match_hash_fixture() {
     }
     let s = std::fs::read_to_string(&path).expect("fixture missing: run with UPDATE_FIXTURES=1");
     assert!(s.contains(&format!("{got:016x}")), "native match hash {got:016x} differs from fixture {s}");
+}
+
+// ------------------------------------------------------------------ T2 review
+
+fn rect_building(id: u64, kind: level::BuildingKind, [x0, y0, x1, y1]: [f32; 4]) -> Building {
+    Building { id, kind, floors: 3.0, polygon: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]] }
+}
+
+/// The default config with these rings (as many waves as rings; per-wave
+/// lists cut to match) and a smaller agent cap, for synthetic levels.
+fn ring_cfg(rings: &[f32]) -> Config {
+    let mut cfg = common::cfg();
+    let w = rings.len();
+    let mc = &mut cfg.match_;
+    mc.ring_radius_m = rings.to_vec();
+    mc.outbreak_clusters.truncate(w);
+    mc.inner_outbreaks.truncate(w);
+    mc.outbreak_radius_m.truncate(w);
+    mc.outbreak_min_per_cluster.truncate(w);
+    mc.supply_civilians_per_point.truncate(w);
+    cfg.wave8_radius_m = rings[w - 1];
+    cfg.max_population = 5_000;
+    cfg
+}
+
+fn disc_level(radius_m: f32, buildings: Vec<Building>) -> LevelPack {
+    LevelPack { name: "t2-review".into(), center_lat: 0.0, center_lon: 0.0, radius_m: Some(radius_m), buildings, fences: vec![], bounds: None }
+}
+
+/// Every live agent stands on a walkable cell.
+fn assert_agents_on_walk(m: &Match) {
+    let s = m.sim();
+    for i in 0..s.n {
+        if s.state[i] == sim_core::sim::DEAD || s.state[i] == ABSENT {
+            continue;
+        }
+        let c = s.grid.cell_of(s.x[i], s.y[i]);
+        assert_eq!(s.grid.kind[c], WALK, "agent {i} (state {}) is on a cell of kind {} at wave {}", s.state[i], s.grid.kind[c], m.wave());
+    }
+}
+
+/// Reviewer repro: rings 100/200/300/400 m, a closed square of buildings
+/// around the centre at 80-86 m, homes inside and in ring 2. The open area
+/// of ring 2 is larger than the core and not connected to it: "keep the
+/// largest region" walled the whole core (0 walkable cells, survivors
+/// stuck in walls). Now only regions touching the area kept so far stay.
+#[test]
+fn a_reveal_never_walls_off_the_territory_already_played() {
+    use level::BuildingKind::{Other, Residential};
+    let cfg = ring_cfg(&[100.0, 200.0, 300.0, 400.0]);
+    let mut bs = vec![
+        rect_building(1, Other, [-86.0, -86.0, 86.0, -80.0]),
+        rect_building(2, Other, [-86.0, 80.0, 86.0, 86.0]),
+        rect_building(3, Other, [-86.0, -80.0, -80.0, 80.0]),
+        rect_building(4, Other, [80.0, -80.0, 86.0, 80.0]),
+        rect_building(5, Residential, [-20.0, -20.0, 20.0, 20.0]),
+    ];
+    for (k, [x, y]) in [[150.0f32, 0.0], [-150.0, 0.0], [0.0, 150.0], [0.0, -150.0]].into_iter().enumerate() {
+        bs.push(rect_building(10 + k as u64, Residential, [x - 15.0, y - 15.0, x + 15.0, y + 15.0]));
+    }
+    let mut m = Match::new(&disc_level(400.0, bs), cfg.clone(), MatchSetup::new(3, &cfg)).unwrap();
+    let core_walk = |m: &Match| {
+        let g = &m.sim().grid;
+        (0..g.kind.len()).filter(|&c| g.kind[c] == WALK && dist_from_center(m, g.cell_center(c)[0], g.cell_center(c)[1]) < 80.0).count()
+    };
+    let core = core_walk(&m);
+    assert!(core > 4_000, "core walkable cells {core}");
+    assert!(m.sim().n > 10);
+    assert_agents_on_walk(&m);
+    fast_win(&mut m, 30);
+    m.apply(Action::NextWave).unwrap();
+    assert_eq!(core_walk(&m), core, "the core must stay open");
+    assert_agents_on_walk(&m);
+    // The ring-2 area is cut off from the core by the square: walled.
+    let g = &m.sim().grid;
+    let [cx, cy] = m.center();
+    let mut outside = 0;
+    for c in 0..g.kind.len() {
+        let [x, y] = g.cell_center(c);
+        let square = (x - cx).abs().max((y - cy).abs());
+        if square > 87.0 && dist_from_center(&m, x, y) < 190.0 {
+            assert_ne!(g.kind[c], WALK, "cell {c} outside the square is open");
+            outside += 1;
+        }
+    }
+    assert!(outside > 10_000);
+    // The match goes on in the core.
+    fast_win(&mut m, 30);
+    m.apply(Action::NextWave).unwrap();
+    assert_eq!(core_walk(&m), core);
+    assert_agents_on_walk(&m);
+}
+
+#[test]
+fn chunks_with_bad_bounds_or_coordinates_are_refused() {
+    let cfg = common::cfg();
+    let setup = MatchSetup::new(16, &cfg);
+    let (shell, chunks) = marais_chunks();
+    let chunk = |id: u64, bounds: [f32; 4], poly: Vec<[f32; 2]>| BuildingChunk {
+        block_id: id,
+        bounds,
+        buildings: if poly.is_empty() { vec![] } else { vec![Building { id: 7, kind: level::BuildingKind::Other, floors: 2.0, polygon: poly }] },
+    };
+    let far = [2000.0, 2000.0, 2100.0, 2100.0];
+    let bad = vec![
+        chunk(900, [10.0, 0.0, 0.0, 10.0], vec![]),          // inverted x
+        chunk(901, [0.0, 10.0, 10.0, 0.0], vec![]),          // inverted y
+        chunk(902, [f32::NAN, 0.0, 10.0, 10.0], vec![]),     // NaN
+        chunk(903, [0.0, 0.0, 10.0, f32::NAN], vec![]),      // NaN
+        chunk(904, [0.0, 0.0, f32::INFINITY, 10.0], vec![]), // infinite
+        chunk(905, [f32::NEG_INFINITY, 0.0, 10.0, 10.0], vec![]),
+        chunk(906, [2000.0, 2000.0, 2001.5, 2100.0], vec![]), // thinner than a cell
+        chunk(907, far, vec![[2050.0, f32::NAN], [2060.0, 2050.0], [2060.0, 2060.0]]),
+        chunk(908, far, vec![[2050.0, 2050.0], [f32::INFINITY, 2050.0], [2060.0, 2060.0]]),
+    ];
+    let mut m = Match::new_streaming(&shell, cfg.clone(), setup.clone(), chunks.clone()).unwrap();
+    for c in &bad {
+        assert_eq!(m.add_buildings(c.clone()), Err(MatchError::BadChunk(c.block_id)), "{:?}", c.bounds);
+        // Also when it comes with the initial chunks.
+        let mut init = chunks.clone();
+        init.push(c.clone());
+        assert!(matches!(Match::new_streaming(&shell, cfg.clone(), setup.clone(), init), Err(MatchError::BadChunk(id)) if id == c.block_id));
+    }
+    // Nothing was stored: the match plays on, and a good chunk with the same
+    // id is still accepted.
+    m.add_buildings(chunk(900, far, vec![])).unwrap();
+    fast_win(&mut m, 10);
+    m.apply(Action::NextWave).unwrap();
+}
+
+/// A streamed match on a 400 m disc (rings 100-400 m, margin 50 m) whose
+/// map is `probe` plus four blocks tiling the rest of the plane around it.
+fn probe_match(probe: Option<&BuildingChunk>, around: [f32; 4]) -> Result<Match, MatchError> {
+    let cfg = ring_cfg(&[100.0, 200.0, 300.0, 400.0]);
+    let [x0, y0, x1, y1] = around;
+    let e = 1000.0;
+    let mut chunks = vec![
+        BuildingChunk { block_id: 1, bounds: [-e, -e, x0, e], buildings: vec![] },
+        BuildingChunk { block_id: 2, bounds: [x1, -e, e, e], buildings: vec![] },
+        BuildingChunk { block_id: 3, bounds: [x0, -e, x1, y0], buildings: vec![] },
+        BuildingChunk { block_id: 4, bounds: [x0, y1, x1, e], buildings: vec![] },
+    ];
+    chunks.extend(probe.cloned());
+    Match::new_streaming(&disc_level(400.0, vec![]), cfg.clone(), MatchSetup::new(17, &cfg), chunks)
+}
+
+/// Reviewer repro: r1 = 100 m, margin 50 m, a block whose bounds start at
+/// x = 149.01 with a building reaching x = 99.2. Its bounds come within
+/// r1 + margin but hold no cell centre there, so `ring_ready(1)` did not
+/// wait for it; arriving after the reveal it was refused (`AreaRevealed`)
+/// and `ring_ready(2)` never became true. The band now has one more cell
+/// diagonal, so wave 1 waits for it.
+#[test]
+fn ring_ready_waits_for_every_block_the_reveal_would_refuse() {
+    let b = [149.01, -50.0, 249.01, 50.0];
+    let probe = BuildingChunk { block_id: 100, bounds: b, buildings: vec![rect_building(1, level::BuildingKind::Residential, [99.2, -5.0, 140.0, 5.0])] };
+    assert_eq!(probe_match(None, b).err(), Some(MatchError::RingNotLoaded(1)));
+    let m = probe_match(Some(&probe), b).unwrap();
+    assert!(m.applied_blocks().contains(&100), "the block reaching into wave 1 is applied at wave 1");
+    let band = sim_core::match_::ring_band_m(m.config());
+    assert_eq!(band, 50.0 + 2.0 * std::f32::consts::SQRT_2);
+}
+
+/// `ring_ready` and the `AreaRevealed` refusal agree: a block that wave 1
+/// does not wait for is never refused after wave 1 is revealed. Probes
+/// straddle the band edge with sub-cell offsets, east of the centre and at
+/// a diagonal (a building at the block's corner), each with a building
+/// reaching as far into the core as the margin allows.
+#[test]
+fn ring_ready_and_area_revealed_agree() {
+    let (r1, mg) = (100.0f32, 50.0f32);
+    let mut probes = Vec::new();
+    // East: one cell high, x from 148 to 150.4 m, y offsets within a cell.
+    for i in 0..=24 {
+        for j in 0..=8 {
+            let x0 = 148.0 + i as f32 * 0.1;
+            let y0 = -1.0 + j as f32 * 0.25;
+            let tip = x0 - mg + 0.01;
+            probes.push(([x0, y0, x0 + 2.0, y0 + 2.0], vec![[tip, y0 + 1.0], [x0 + 1.0, y0 + 0.5], [x0 + 1.0, y0 + 1.5]]));
+        }
+    }
+    // Diagonal: the block's south-west corner at about r1 + mg from the
+    // centre, a building vertex just under mg from that corner (Euclidean).
+    for i in 0..=40 {
+        let a = 104.5 + i as f32 * 0.075;
+        let t = a - (mg - 0.01) / std::f32::consts::SQRT_2;
+        probes.push(([a, a, a + 2.0, a + 2.0], vec![[t, t], [a + 1.0, a + 1.5], [a + 1.5, a + 1.0]]));
+    }
+    let (mut awaited, mut free) = (0, 0);
+    for (k, (b, poly)) in probes.into_iter().enumerate() {
+        let probe = BuildingChunk { block_id: 100 + k as u64, bounds: b, buildings: vec![Building { id: 1, kind: level::BuildingKind::Residential, floors: 2.0, polygon: poly }] };
+        match probe_match(None, b) {
+            Err(MatchError::RingNotLoaded(1)) => awaited += 1,
+            Ok(mut m) => {
+                free += 1;
+                assert_eq!(m.add_buildings(probe.clone()), Ok(()), "block {b:?} was not awaited by wave 1 but is refused after its reveal");
+                assert!(m.ring_ready(2), "{b:?}");
+            }
+            Err(e) => panic!("{b:?}: {e:?}"),
+        }
+        // With the probe there from the start the match is fine.
+        probe_match(Some(&probe), b).unwrap();
+    }
+    assert!(awaited > 0 && free > 0, "the probes must straddle the band edge ({awaited} awaited, {free} not)");
+    let _ = r1;
+    // A building may stick out by the margin per axis, so up to margin × √2
+    // at a block corner: here into wave 1's disc from a block whose bounds
+    // are beyond r1 + margin. The block is applied by its bounds (wave 2),
+    // never refused, and the result doesn't depend on when it arrived; the
+    // corner of the building inside the core stays open ground.
+    let a = 112.0;
+    let corner = BuildingChunk { block_id: 99, bounds: [a, a, a + 2.0, a + 2.0], buildings: vec![rect_building(5, level::BuildingKind::Other, [a - 45.0, a - 45.0, a + 1.0, a + 1.0])] };
+    let mut late = probe_match(None, corner.bounds).unwrap();
+    let mut early = probe_match(Some(&corner), corner.bounds).unwrap();
+    assert_eq!(late.add_buildings(corner.clone()), Ok(()));
+    assert_eq!(late.state_hash(), early.state_hash());
+    for m in [&mut late, &mut early] {
+        assert!(!m.applied_blocks().contains(&99));
+        m.apply(Action::StartWave).unwrap();
+        m.step(); // no civilians, no outbreak: won at once
+        assert_eq!(m.phase(), Phase::WaveWon);
+        m.apply(Action::NextWave).unwrap();
+        assert!(m.applied_blocks().contains(&99));
+        let [cx, cy] = m.center();
+        let g = &m.sim().grid;
+        assert_eq!(g.kind[g.cell_of(cx + 69.0, cy + 69.0)], WALK, "inside wave 1, revealed before the block applied");
+        assert_eq!(g.kind[g.cell_of(cx + 105.0, cy + 105.0)], sim_core::grid::BUILDING, "in ring 2");
+    }
+    assert_eq!(late.state_hash(), early.state_hash());
+}
+
+/// Reviewer repro: two matches with equal hashes but a different defeat
+/// line; one tick later one was Running and the other WaveLost.
+#[test]
+fn state_hash_sees_the_defeat_line() {
+    let mut a = new_match(common::cfg(), 18);
+    let mut b = new_match(common::cfg(), 18);
+    a.apply(Action::StartWave).unwrap();
+    b.apply(Action::StartWave).unwrap();
+    assert_eq!(a.state_hash(), b.state_hash());
+    let civ = b.sim().stats.civilians;
+    b.debug_sim_mut().loss_below = civ + 1;
+    assert_ne!(a.state_hash(), b.state_hash());
+    a.step();
+    b.step();
+    assert_eq!((a.phase(), b.phase()), (Phase::Running, Phase::WaveLost));
+}
+
+/// The Marais with a deck of 20 light fences at 4 hp per cell.
+fn weak_fence_match(seed: u64) -> Match {
+    let mut cards = sim_core::CardDb::default_cards();
+    cards.deck_rules.max_copies.common = 20;
+    for c in cards.cards.iter_mut() {
+        if let sim_core::cards::Effect::Fence { cell_hp, .. } = &mut c.effect {
+            *cell_hp = 4.0;
+        }
+    }
+    let cfg = common::cfg();
+    let setup = MatchSetup::new(seed, &cfg).with_deck(vec!["light_fence".to_string(); 20]);
+    Match::new_with_cards(&marais(), cfg, cards, setup).unwrap()
+}
+
+/// Wave 1's outbreak sites of `weak_fence_match(seed)` (a throwaway match).
+fn outbreak_sites(seed: u64) -> Vec<[f32; 2]> {
+    let mut m = weak_fence_match(seed);
+    m.apply(Action::StartWave).unwrap();
+    m.outbreak_sites().to_vec()
+}
+
+/// Prep: a weak fence box around each outbreak site (zombies chew out of
+/// it), then start the wave.
+fn box_the_outbreak(m: &mut Match, sites: &[[f32; 2]]) {
+    for &[x, y] in sites {
+        let h = 8.0;
+        let pts = vec![[x - h, y - h], [x + h, y - h], [x + h, y + h], [x - h, y + h], [x - h, y - h]];
+        m.apply(Action::PlayCard { hand_index: 0, target: Target::Polyline(pts) }).unwrap();
+    }
+    m.apply(Action::StartWave).unwrap();
+}
+
+/// Match hashes don't depend on how the field work is spread (budgets) or
+/// on computing every job in full at once (`eager_fields`), also while
+/// fences break under jobs in flight: the hash covers the published fields
+/// and the jobs' inputs, not their half-done buffers.
+#[test]
+fn match_hash_ignores_field_budgets_and_eager_jobs() {
+    fn odd(tick: u32, _job: usize, b: usize) -> usize {
+        if tick % 3 == 0 { 1 } else { b / 7 + 1 }
+    }
+    let sites = outbreak_sites(19);
+    let run = |mode: u8| {
+        let mut m = weak_fence_match(19);
+        match mode {
+            1 => m.debug_sim_mut().eager_fields = true,
+            2 => m.debug_sim_mut().test_budget = Some(odd),
+            _ => {}
+        }
+        box_the_outbreak(&mut m, &sites);
+        let mut hashes = Vec::new();
+        for _ in 0..400 {
+            m.step();
+            hashes.push(m.state_hash());
+            if m.phase() != Phase::Running {
+                break;
+            }
+        }
+        (hashes, m.sim().stats.fence_cells_broken)
+    };
+    let (lazy, broken) = run(0);
+    assert!(broken > 0, "fences must break during the run");
+    let (eager, _) = run(1);
+    let (budget, _) = run(2);
+    assert_eq!(lazy.len(), eager.len());
+    assert_eq!(lazy.len(), budget.len());
+    for t in 0..lazy.len() {
+        assert_eq!(lazy[t], eager[t], "eager differs at tick {t}");
+        assert_eq!(lazy[t], budget[t], "budget differs at tick {t}");
+    }
+}
+
+/// A retry after fence cells broke (field jobs then read frozen grids)
+/// lands on the prep hash, and replaying the attempt gives exactly the
+/// hashes of a fresh match playing it once.
+#[test]
+fn retry_after_fence_breaks_replays_exactly() {
+    let sites = outbreak_sites(20);
+    let attempt = |m: &mut Match, ticks: usize| -> Vec<u64> {
+        box_the_outbreak(m, &sites);
+        (0..ticks)
+            .map(|_| {
+                m.step();
+                m.state_hash()
+            })
+            .collect()
+    };
+    let mut a = weak_fence_match(20);
+    let prep = a.state_hash();
+    let first = attempt(&mut a, 300);
+    assert!(a.sim().stats.fence_cells_broken > 0, "fences must break");
+    a.apply(Action::RetryWave).unwrap();
+    assert_eq!(a.state_hash(), prep);
+    assert_eq!(a.sim().stats.fence_cells_broken, 0);
+    let rerun = attempt(&mut a, 300);
+    let mut fresh = weak_fence_match(20);
+    assert_eq!(fresh.state_hash(), prep);
+    let once = attempt(&mut fresh, 300);
+    assert_eq!(rerun, once);
+    assert_eq!(first, once);
+    assert_eq!(a.phase(), fresh.phase());
+}
+
+/// A match on the Marais with room for 40 agents: newcomers stop at the
+/// cap, and waves still play.
+#[test]
+fn a_population_capped_match_plays() {
+    let mut cfg = common::cfg();
+    cfg.max_population = 40;
+    let mut m = new_match(cfg, 21);
+    assert_eq!(m.sim().x.len(), 40);
+    assert_eq!((m.sim().n, m.newcomers()), (40, 40));
+    for _ in 0..3 {
+        fast_win(&mut m, 20);
+        m.apply(Action::NextWave).unwrap();
+        assert_eq!((m.sim().n, m.newcomers()), (40, 0), "wave {}", m.wave());
+        assert_agents_on_walk(&m);
+    }
+}
+
+/// Play every wave of `m`: start, clear the outbreak, win.
+fn play_all_waves(m: &mut Match) {
+    loop {
+        assert_agents_on_walk(m);
+        m.apply(Action::StartWave).unwrap();
+        m.step();
+        clear_outbreak(m);
+        while m.phase() == Phase::Running {
+            m.step();
+        }
+        match m.phase() {
+            Phase::WaveWon => m.apply(Action::NextWave).unwrap(),
+            Phase::MatchWon => return,
+            p => panic!("wave {} ended {p:?}", m.wave()),
+        }
+    }
+}
+
+/// Tiny levels: rings smaller than a cell, no buildings, one building.
+#[test]
+fn tiny_levels_play_through() {
+    let cfg = common::cfg();
+    let mut empty = Match::new(&disc_level(30.0, vec![]), cfg.clone(), MatchSetup::new(22, &cfg)).unwrap();
+    assert_eq!(empty.sim().n, 0);
+    play_all_waves(&mut empty);
+    assert_eq!(empty.wave(), 8);
+
+    let one = vec![rect_building(1, level::BuildingKind::Residential, [2.0, -2.0, 6.0, 2.0])];
+    let mut m = Match::new(&disc_level(8.0, one), cfg.clone(), MatchSetup::new(23, &cfg)).unwrap();
+    assert!(m.ring_radius_m(1) < 1.0);
+    play_all_waves(&mut m);
+    assert_eq!((m.wave(), m.phase()), (8, Phase::MatchWon));
+}
+
+/// A ring with no buildings: no newcomers, the outbreak falls back to
+/// anywhere, and the match goes on.
+#[test]
+fn an_empty_ring_still_plays() {
+    use level::BuildingKind::Residential;
+    let cfg = ring_cfg(&[100.0, 200.0, 300.0, 400.0]);
+    let bs = vec![rect_building(1, Residential, [-30.0, -30.0, 30.0, 30.0]), rect_building(2, Residential, [240.0, -20.0, 280.0, 20.0])];
+    let mut m = Match::new(&disc_level(400.0, bs), cfg.clone(), MatchSetup::new(24, &cfg)).unwrap();
+    let n1 = m.sim().n;
+    assert!(n1 > 20);
+    fast_win(&mut m, 20);
+    m.apply(Action::NextWave).unwrap();
+    assert_eq!((m.wave(), m.newcomers(), m.sim().n), (2, 0, n1));
+    m.apply(Action::StartWave).unwrap();
+    assert_eq!(m.outbreak_sites().len(), m.outbreak_count(2).0 as usize);
+    for _ in 0..20 {
+        m.step();
+    }
+    clear_outbreak(&mut m);
+    m.step();
+    assert_eq!(m.phase(), Phase::WaveWon);
+    m.apply(Action::NextWave).unwrap();
+    assert!(m.newcomers() > 0, "ring 3 has a building");
 }

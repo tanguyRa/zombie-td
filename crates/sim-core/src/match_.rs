@@ -212,9 +212,14 @@ pub enum MatchError {
     /// `new_streaming` needs a level without buildings (they come in chunks).
     LevelHasBuildings,
     DuplicateBlock(u64),
+    /// The chunk's bounds are not finite, inverted or narrower than one cell
+    /// (`cell_size_m`) on an axis, or a building has a non-finite coordinate
+    /// or floor count.
+    BadChunk(u64),
     /// The chunk touches the already revealed area (it had to arrive earlier).
     AreaRevealed(u64),
-    /// A building sticks out of its block by more than `block_margin_m`.
+    /// A building sticks out of its block by more than `block_margin_m` (on
+    /// either axis).
     BuildingOutsideBlock { block_id: u64, building_id: u64 },
     /// Wave 1's ring is not covered by the initial chunks.
     RingNotLoaded(u8),
@@ -382,8 +387,6 @@ pub struct LoggedAction {
 
 struct StoredChunk {
     chunk: BuildingChunk,
-    /// `bounds` grown to every building's bounding box.
-    extent: [f32; 4],
 }
 
 /// Hand, deck, discard, supply and structures (part of `MatchState`).
@@ -542,7 +545,7 @@ pub struct Match {
     rings: Vec<f32>,
     /// First wave whose disc contains each cell's centre (0: never).
     cell_ring: Vec<u8>,
-    /// Same with the disc grown by `block_margin_m` (what `ring_ready` checks).
+    /// Same with the disc grown by `ring_band_m` (what `ring_ready` checks).
     cell_ring_margin: Vec<u8>,
     level_fence: Vec<bool>,
     chunks: BTreeMap<u64, StoredChunk>,
@@ -558,6 +561,21 @@ pub struct Match {
     log: Vec<LoggedAction>,
 }
 
+/// The `ring_ready` band: every cell whose centre is within the ring radius +
+/// `block_margin_m` + `cell_size_m * SQRT_2` must be covered by a chunk.
+/// The extra cell diagonal makes it agree with the reveal and the
+/// `AreaRevealed` refusal (`Match::bounds_due`: bounds within radius +
+/// margin): a block at least one cell wide whose bounds come that close
+/// holds a cell centre (half-open, see `add_buildings`) within a diagonal
+/// of that point, so the block is awaited before the ring opens (T2 review: without it a late block could be
+/// refused while the next ring waited for its cells forever). The browser's
+/// map loader mirrors this rule (DECISIONS.md, "Match").
+pub fn ring_band_m(cfg: &Config) -> f32 {
+    cfg.match_.block_margin_m + cfg.cell_size_m * std::f32::consts::SQRT_2
+}
+
+/// Callers validate the box first (`validate_chunk`): `clamp` panics on an
+/// inverted or NaN range.
 fn box_meets_disc(b: [f32; 4], c: [f32; 2], r: f32) -> bool {
     let nx = c[0].clamp(b[0], b[2]);
     let ny = c[1].clamp(b[1], b[3]);
@@ -609,7 +627,7 @@ impl Match {
         let cells = grid.w * grid.h;
         let mut cell_ring = vec![0u8; cells];
         let mut cell_ring_margin = vec![0u8; cells];
-        let margin = cfg.match_.block_margin_m;
+        let margin = ring_band_m(&cfg);
         for c in 0..cells {
             let [lx, ly] = Match::cell_local(&grid, c);
             let (dx, dy) = (lx - center[0], ly - center[1]);
@@ -749,10 +767,10 @@ impl Match {
     /// in block-id order, so the result never depends on arrival order.
     pub fn add_buildings(&mut self, chunk: BuildingChunk) -> Result<(), MatchError> {
         let id = chunk.block_id;
+        Match::validate_chunk(&chunk, self.cfg.cell_size_m)?;
         if self.chunks.contains_key(&id) {
             return Err(MatchError::DuplicateBlock(id));
         }
-        let mut e = chunk.bounds;
         let mg = self.cfg.match_.block_margin_m;
         let [bx0, by0, bx1, by1] = chunk.bounds;
         for b in &chunk.buildings {
@@ -760,18 +778,21 @@ impl Match {
                 if x < bx0 - mg || y < by0 - mg || x > bx1 + mg || y > by1 + mg {
                     return Err(MatchError::BuildingOutsideBlock { block_id: id, building_id: b.id });
                 }
-                e = [e[0].min(x), e[1].min(y), e[2].max(x), e[3].max(y)];
             }
         }
-        if self.state.wave > 0 && box_meets_disc(e, self.center, self.radius_m()) {
+        if self.state.wave > 0 && self.chunk_due(&chunk.bounds, self.radius_m()) {
             return Err(MatchError::AreaRevealed(id));
         }
         let g = &self.state.sim.grid;
-        // Cells whose centre is inside the bounds (clamped to the grid).
+        // Cells whose centre is inside the bounds, half-open (`min <= centre
+        // < max`, clamped to the grid): blocks that tile the plane cover each
+        // cell once, even when an edge runs through cell centres. Closed
+        // intervals let a neighbour cover a block's only cells, so the block
+        // was not awaited (T2 review).
         let cx0 = (((bx0 - g.origin[0]) / g.cell - 0.5).ceil().max(0.0) as usize).min(g.w);
         let cy0 = (((by0 - g.origin[1]) / g.cell - 0.5).ceil().max(0.0) as usize).min(g.h);
-        let cx1 = ((bx1 - g.origin[0]) / g.cell - 0.5).floor().min(g.w as f32 - 1.0);
-        let cy1 = ((by1 - g.origin[1]) / g.cell - 0.5).floor().min(g.h as f32 - 1.0);
+        let cx1 = (((bx1 - g.origin[0]) / g.cell - 0.5).ceil() - 1.0).min(g.w as f32 - 1.0);
+        let cy1 = (((by1 - g.origin[1]) / g.cell - 0.5).ceil() - 1.0).min(g.h as f32 - 1.0);
         if cx1 >= 0.0 && cy1 >= 0.0 {
             let (w, cx1, cy1) = (g.w, cx1 as usize, cy1 as usize);
             for cy in cy0..=cy1 {
@@ -787,12 +808,46 @@ impl Match {
                 }
             }
         }
-        self.chunks.insert(id, StoredChunk { chunk, extent: e });
+        self.chunks.insert(id, StoredChunk { chunk });
         Ok(())
     }
 
-    /// Whether every cell within wave `wave`'s radius + `block_margin_m` is
-    /// covered by a chunk (cells of the grid only).
+    /// Whether a chunk with these bounds is applied by the reveal of a disc
+    /// of radius `r`: its bounds come within `r + block_margin_m` of the
+    /// centre. Decided by the bounds alone, never by the buildings: a
+    /// building may stick out by the margin per axis, so up to margin × √2
+    /// at a block corner, and a rule on the buildings could then apply (and
+    /// refuse) a block that `ring_ready` did not wait for (T2 review). With
+    /// this rule `ring_band_m` covers every block a reveal applies. The part
+    /// of a building reaching farther than the margin into rings already
+    /// revealed is not added there (open ground), whatever the arrival order.
+    fn bounds_due(b: &[f32; 4], c: [f32; 2], r: f32, margin: f32) -> bool {
+        box_meets_disc(*b, c, r + margin)
+    }
+
+    fn chunk_due(&self, b: &[f32; 4], r: f32) -> bool {
+        Match::bounds_due(b, self.center, r, self.cfg.match_.block_margin_m)
+    }
+
+    /// `BadChunk` unless the bounds are finite, `min <= max` and at least one
+    /// cell wide on both axes (so they hold a cell centre, see `ring_band_m`),
+    /// and every building coordinate (and floor count) is finite.
+    fn validate_chunk(chunk: &BuildingChunk, cell: f32) -> Result<(), MatchError> {
+        let [x0, y0, x1, y1] = chunk.bounds;
+        let finite = chunk.bounds.iter().all(|v| v.is_finite());
+        // `>=` is false for NaN; `MAX - MIN` overflows to +inf, which passes.
+        if !finite || !(x1 - x0 >= cell) || !(y1 - y0 >= cell) {
+            return Err(MatchError::BadChunk(chunk.block_id));
+        }
+        if chunk.buildings.iter().any(|b| !b.floors.is_finite() || b.polygon.iter().any(|p| !p[0].is_finite() || !p[1].is_finite())) {
+            return Err(MatchError::BadChunk(chunk.block_id));
+        }
+        Ok(())
+    }
+
+    /// Whether every grid cell whose centre is within wave `wave`'s radius +
+    /// `ring_band_m` (`block_margin_m` + one cell diagonal) is covered by a
+    /// chunk (cells of the grid only).
     pub fn ring_ready(&self, wave: u8) -> bool {
         let w = (wave as usize).min(self.rings.len());
         self.missing[..w].iter().all(|&m| m == 0)
@@ -1344,12 +1399,13 @@ impl Match {
 
     /// Open wave `k`'s disc: apply the chunks it touches (block-id order),
     /// restore the geometry inside it, add level fences of the new ring, and
-    /// wall off pockets not connected to the main area.
+    /// wall off pockets not connected to the area kept so far (wave 1: not
+    /// in its largest region).
     fn reveal(&mut self, k: u8) {
         let r = self.rings[k as usize - 1];
         let st = &mut self.state;
         for (id, sc) in &self.chunks {
-            if st.applied.contains(id) || !box_meets_disc(sc.extent, self.center, r) {
+            if st.applied.contains(id) || !Match::bounds_due(&sc.chunk.bounds, self.center, r, self.cfg.match_.block_margin_m) {
                 continue;
             }
             for b in &sc.chunk.buildings {
@@ -1365,6 +1421,8 @@ impl Match {
             st.applied.push(*id);
         }
         let g = &mut st.sim.grid;
+        // The area kept so far (open before this reveal): it is never walled.
+        let kept: Vec<bool> = g.kind.iter().map(|&kd| kd == WALK || kd == FENCE).collect();
         for c in 0..g.kind.len() {
             let rc = self.cell_ring[c];
             if rc == 0 || rc > k {
@@ -1380,7 +1438,11 @@ impl Match {
                 g.kind[c] = WALK; // a pocket walled earlier may connect now
             }
         }
-        g.keep_largest_region(|kd| kd == WALK || kd == FENCE, |kd| kd == WALK);
+        // Wall the pockets: open regions connected to none of the cells kept
+        // so far (wave 1: everything but the largest region). Not "keep the
+        // largest", which walled the whole played area when the new ring
+        // held a larger region not connected to it (T2 review).
+        g.keep_regions_touching(|kd| kd == WALK || kd == FENCE, |kd| kd == WALK, &kept);
         g.rebuild_step_masks();
     }
 
@@ -1696,9 +1758,17 @@ impl Match {
         self.state.start_hash
     }
 
-    /// FNV-1a over the sim's state hash and the match state (wave, phase,
-    /// applied blocks). Excludes inputs and counters that a retry must not
-    /// reset (retries, the log, the match tick).
+    /// FNV-1a over everything the rest of the match depends on: the sim
+    /// (`Sim::state_hash` plus `Sim::wave_state_hash`: RNG, defeat line,
+    /// fatigue, spawn positions, stats and, while a wave runs, the published
+    /// fields and the pending field jobs), the wave, phase, agents in play,
+    /// applied blocks, the wave's starting civilians, newcomers and counters,
+    /// the results so far (without their hashes), shooters and strikes, and
+    /// the card state. Two matches with the same hash play on identically,
+    /// so T4 can find the first tick where two runs diverge. Excludes inputs
+    /// and what a retry must not reset (retries, the log, the match tick)
+    /// and the prep snapshot (a copy of an earlier state). See DECISIONS.md,
+    /// "Match", for what is left out and why.
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let mut eat = |bytes: &[u8]| {
@@ -1712,6 +1782,19 @@ impl Match {
         eat(&(self.state.sim.n as u32).to_le_bytes());
         for id in &self.state.applied {
             eat(&id.to_le_bytes());
+        }
+        // Added in the T2 review fixes (the match fixture hash changed).
+        let st = &self.state;
+        eat(&st.sim.wave_state_hash().to_le_bytes());
+        for v in [st.wave_start_civilians, st.newcomers, st.counters0[0], st.counters0[1], st.counters0[2], st.results.len() as u32] {
+            eat(&v.to_le_bytes());
+        }
+        for r in &st.results {
+            eat(&[r.wave, r.won as u8]);
+            eat(&r.radius_m.to_bits().to_le_bytes());
+            for v in [r.ticks, r.newcomers, r.start_civilians, r.end_civilians, r.zombies_killed, r.bites, r.fence_cells_broken, r.outbreak_clusters, r.supply_earned, r.cards_played] {
+                eat(&v.to_le_bytes());
+            }
         }
         // Shooters and strikes beyond what `Sim::state_hash` covers.
         let sim = &self.state.sim;
@@ -1807,5 +1890,92 @@ impl Match {
         let g = &snap.sim.grid;
         let snap_bytes = g.kind.len() * 11 + snap.base.len() + snap.sim.x.len() * 34;
         self.state.sim.memory_bytes() + self.state.base.len() + snap_bytes + self.cell_ring.len() * 4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::field::INF;
+
+    fn marais() -> LevelPack {
+        let path = format!("{}/../../levels/paris-marais.json", env!("CARGO_MANIFEST_DIR"));
+        LevelPack::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// Wave 1 of a Marais match, 13 ticks into the wave (field jobs in
+    /// flight, one of them past a publish).
+    fn running() -> Match {
+        let cfg = Config::default_config();
+        let mut m = Match::new(&marais(), cfg.clone(), MatchSetup::new(5, &cfg)).unwrap();
+        crate::fixture::fixture_prep_plays(&mut m);
+        m.apply(Action::StartWave).unwrap();
+        for _ in 0..13 {
+            m.step();
+        }
+        assert_eq!(m.phase(), Phase::Running);
+        m
+    }
+
+    /// Changing any one piece of state the rest of a running wave depends
+    /// on changes `Match::state_hash` (T2 review: the RNG, the defeat line,
+    /// fatigue, spawn positions, the fields and the field jobs were left out).
+    #[test]
+    fn state_hash_covers_what_the_rest_of_a_wave_depends_on() {
+        let base = running().state_hash();
+        assert_eq!(running().state_hash(), base);
+        type Edit = fn(&mut Match);
+        let edits: Vec<(&str, Edit)> = vec![
+            ("rng", |m| {
+                m.state.sim.rng.next_u32();
+            }),
+            ("loss_below", |m| m.state.sim.loss_below += 1),
+            ("wave_start_civilians", |m| m.state.wave_start_civilians += 1),
+            ("newcomers", |m| m.state.newcomers += 1),
+            ("counters at start", |m| m.state.counters0[1] += 1),
+            ("fatigue (one bit)", |m| m.state.sim.fatigue = f32::from_bits(m.state.sim.fatigue.to_bits() ^ 1)),
+            ("spawn_x", |m| m.state.sim.spawn_x[3] += 0.25),
+            ("spawn_y", |m| m.state.sim.spawn_y[3] += 0.25),
+            ("n", |m| m.state.sim.n += 1),
+            ("stats", |m| m.state.sim.stats.bites += 1),
+            ("results", |m| {
+                let r = WaveResult { wave: 1, won: true, ticks: 1, radius_m: 150.0, newcomers: 0, start_civilians: 0, end_civilians: 0, zombies_killed: 0, bites: 0, fence_cells_broken: 0, outbreak_clusters: 0, supply_earned: 0, cards_played: 0, start_hash: 0, end_hash: 0 };
+                m.state.results.push(r);
+            }),
+            ("published chase field", |m| {
+                let s = &mut m.state.sim;
+                let c = (0..s.chase.len()).find(|&c| s.chase[c] < INF).unwrap();
+                s.chase[c] += 1;
+            }),
+            ("published flee field", |m| {
+                let s = &mut m.state.sim;
+                let c = (0..s.flee.len()).find(|&c| s.flee[c] < INF).unwrap();
+                s.flee[c] += 1;
+            }),
+            ("published threat field", |m| {
+                let s = &mut m.state.sim;
+                let lim = s.threat_limit();
+                let c = (0..s.threat.len()).find(|&c| s.threat[c] < lim).unwrap();
+                s.threat[c] += 1;
+            }),
+            ("chase job seeds", |m| m.state.sim.chase_dial.seeds[0].0 += 1),
+            ("threat job seeds", |m| m.state.sim.threat_dial.seeds[0].0 += 1),
+            ("chase job pending", |m| m.state.sim.chase_job = false),
+            ("cells broken under the chase job", |m| m.state.sim.chase_breaks.push(7)),
+            ("cells broken under the threat job", |m| m.state.sim.threat_breaks.push(7)),
+        ];
+        for (name, edit) in edits {
+            let mut m = running();
+            edit(&mut m);
+            assert_ne!(m.state_hash(), base, "{name} is not in the hash");
+        }
+        // Threat values above `threat_limit` are never read exactly (the lazy
+        // job leaves them unfinished): they don't count.
+        let mut m = running();
+        let s = &mut m.state.sim;
+        let lim = s.threat_limit();
+        let c = (0..s.threat.len()).find(|&c| s.threat[c] > lim + 1 && s.threat[c] < INF).unwrap();
+        s.threat[c] += 1;
+        assert_eq!(m.state_hash(), base);
     }
 }

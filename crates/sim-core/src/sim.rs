@@ -267,12 +267,12 @@ pub struct Sim {
     chase_next: Vec<i32>,
     threat_next: Vec<i32>,
     flee_next: Vec<i32>,
-    chase_dial: Dial,
+    pub(crate) chase_dial: Dial,
     /// Threat stops at `threat_limit` (the flee cap, or the wake radius if
     /// larger); cells beyond hold values above it.
-    threat_dial: Dial,
+    pub(crate) threat_dial: Dial,
     flee_dial: Dial,
-    chase_job: bool,
+    pub(crate) chase_job: bool,
     threat_job: ThreatJob,
     /// The grid each job reads (see `freeze_job_grids`), and the grid
     /// version at the job's start.
@@ -283,6 +283,12 @@ pub struct Sim {
     /// Copies of the grid for jobs whose grid changed after they started.
     /// Two jobs, so two copies at most.
     frozen: [FrozenGrid; 2],
+    /// Cells a fence break turned into `WALK` since the pending chase job
+    /// (threat + flee job) started, in break order. With the live grid they
+    /// give the grid that job reads; only the state hash uses them, the same
+    /// whether the job reads a frozen copy or already finished (eager).
+    pub(crate) chase_breaks: Vec<u32>,
+    pub(crate) threat_breaks: Vec<u32>,
     /// Tests: replaces the per-tick work budget of the jobs
     /// (`f(tick, job, budget)`, job 0 chase, 1 threat + flee). Budgets never
     /// change results.
@@ -440,6 +446,8 @@ impl Sim {
             chase_version: 0,
             threat_version: 0,
             frozen: Default::default(),
+            chase_breaks: Vec::new(),
+            threat_breaks: Vec::new(),
             test_budget: None,
             job_pauses: [0; 4],
             field_cells: cells,
@@ -739,10 +747,17 @@ impl Sim {
         while self.undo() {}
     }
 
+    /// The nearest `WALK` cell within 31 cells of `c` (squared distance,
+    /// then lowest index).
     pub(crate) fn nearest_walkable(&self, c: usize) -> Option<usize> {
+        self.nearest_walkable_within(c, 32)
+    }
+
+    /// `nearest_walkable` searching rings `1..max_r`.
+    fn nearest_walkable_within(&self, c: usize, max_r: i64) -> Option<usize> {
         let g = &self.grid;
         let (cx, cy) = ((c % g.w) as i64, (c / g.w) as i64);
-        for r in 1..32i64 {
+        for r in 1..max_r {
             let mut best: Option<(i64, usize)> = None;
             for dy in -r..=r {
                 for dx in -r..=r {
@@ -769,6 +784,9 @@ impl Sim {
         None
     }
 
+    /// Move every live agent standing on a cell that is not `WALK` to the
+    /// centre of the nearest `WALK` cell, searching the whole grid if needed
+    /// (only a grid with no walkable cell at all leaves an agent in place).
     pub(crate) fn push_agents_off_blocked_cells(&mut self) {
         for i in 0..self.n {
             if self.state[i] == DEAD || self.state[i] == ABSENT {
@@ -776,7 +794,11 @@ impl Sim {
             }
             let c = self.grid.cell_of(self.x[i], self.y[i]);
             if self.grid.kind[c] != WALK {
-                if let Some(t) = self.nearest_walkable(c) {
+                // Usually a few cells away; a whole area walled by a reveal
+                // can put it farther (T2 review: 32 cells left agents in
+                // walls), so fall back to searching the whole grid.
+                let t = self.nearest_walkable(c).or_else(|| self.nearest_walkable_within(c, self.grid.w.max(self.grid.h) as i64 + 1));
+                if let Some(t) = t {
                     let [px, py] = self.grid.cell_center(t);
                     self.x[i] = px;
                     self.y[i] = py;
@@ -1187,6 +1209,7 @@ impl Sim {
         d.seeds.extend((0..self.n).filter(|&i| state[i] == CIVILIAN).map(|i| (grid.cell_of(x[i], y[i]) as u32, 0)));
         self.chase_src = JobGrid::Live;
         self.chase_version = self.grid.version;
+        self.chase_breaks.clear();
         self.chase_next.fill(INF);
         self.chase_dial.begin(Mode::Chase, self.cfg.fence_path_cost, false);
         self.chase_job = true;
@@ -1219,6 +1242,7 @@ impl Sim {
         d.seeds.extend((0..self.n).filter(|&i| state[i] == ZOMBIE).map(|i| (grid.cell_of(x[i], y[i]) as u32, 0)));
         self.threat_src = JobGrid::Live;
         self.threat_version = self.grid.version;
+        self.threat_breaks.clear();
         self.threat_next.fill(INF);
         // The reference flee seeding reads the finalization order.
         let order = self.eager_fields || self.cfg.flee_multiplier < 0.0;
@@ -1783,6 +1807,12 @@ impl Sim {
                     self.freeze_job_grids();
                 }
                 self.grid.set_kind(c, WALK);
+                if self.chase_job {
+                    self.chase_breaks.push(c as u32);
+                }
+                if self.threat_job != ThreatJob::Idle {
+                    self.threat_breaks.push(c as u32);
+                }
                 self.stats.fence_cells_broken += 1;
                 if self.stats.first_breach_tick.is_none() {
                     self.stats.first_breach_tick = Some(self.tick);
@@ -1828,6 +1858,68 @@ impl Sim {
             eat(&t.shots.to_le_bytes());
         }
         h
+    }
+
+    /// What `state_hash` leaves out and a match needs (`Match::state_hash`
+    /// eats it): the rest of a running wave depends on it. `state_hash`
+    /// itself stays as it was, since the single-wave fixture hash is checked
+    /// in every browser. Covers:
+    /// - the RNG state, `n`, `loss_below`, `fatigue`, `timeout`, the stats
+    ///   counters and the spawn positions of the agents in play;
+    /// - while running (`GamePhase::Running`; in setup every field is
+    ///   recomputed at Start, and an ended game never steps again): the
+    ///   published chase and flee fields, the threat field clamped to
+    ///   `threat_limit() + 1` (values above it are never read exactly, and
+    ///   the lazy job leaves them unfinished), and for each pending job its
+    ///   seeds and the cells broken since it started. A job's result depends
+    ///   only on its seeds and the grid of its start tick, which is the live
+    ///   grid with those cells put back to `FENCE`, so this is exact without
+    ///   the half-built back buffers, the Dijkstra queues or the frozen
+    ///   copies (those depend on the work budget and on `eager_fields`, and
+    ///   the hash must not). The budgets themselves (`chase_work`,
+    ///   `threat_work`, `field_cells`) never change a result.
+    ///
+    /// Not covered, because nothing reads them in a match or they are
+    /// rebuilt every tick: the spatial hash, separation and fence-damage
+    /// scratch, `step_mul`, `placements` / `fence_used_m` / budgets of the
+    /// single-wave tools, `spawn_counts` / `spawn_weights`, timings and test
+    /// counters. Bulk arrays are mixed a word at a time (a u64 per step), so
+    /// it costs about as much as `state_hash` at wave-8 size.
+    pub fn wave_state_hash(&self) -> u64 {
+        let mut h = Words(0xcbf2_9ce4_8422_2325);
+        let (a, b) = self.rng.raw_state();
+        h.u64(a);
+        h.u64(b);
+        h.u64(self.n as u64);
+        h.u64(self.loss_below as u64);
+        h.u64(self.fatigue.to_bits() as u64 | (self.timeout as u64) << 32);
+        let s = &self.stats;
+        for v in [s.civilians, s.infected, s.zombies, s.dead, s.dormant, s.initial_civilians, s.zombies_killed, s.bites, s.fence_cells_broken, s.first_breach_tick.map_or(u32::MAX, |t| t)] {
+            h.u64(v as u64);
+        }
+        h.u64(s.first_breach_tick.is_some() as u64);
+        h.f32s(&self.spawn_x[..self.n]);
+        h.f32s(&self.spawn_y[..self.n]);
+        if self.phase != GamePhase::Running {
+            h.u64(0);
+            return h.0;
+        }
+        h.u64(1);
+        h.i32s(self.chase.iter().copied());
+        h.i32s(self.flee.iter().copied());
+        let top = self.threat_limit().saturating_add(1);
+        h.i32s(self.threat.iter().map(|&v| v.min(top)));
+        for (pending, seeds, breaks) in [(self.chase_job, &self.chase_dial.seeds, &self.chase_breaks), (self.threat_job != ThreatJob::Idle, &self.threat_dial.seeds, &self.threat_breaks)] {
+            h.u64(pending as u64);
+            if !pending {
+                continue;
+            }
+            h.u64(seeds.len() as u64);
+            h.i32s(seeds.iter().flat_map(|&(c, v)| [c as i32, v]));
+            h.u64(breaks.len() as u64);
+            h.i32s(breaks.iter().map(|&c| c as i32));
+        }
+        h.0
     }
 
     /// Approximate heap bytes held by the sim (agent arrays, hash, fields,
@@ -1914,6 +2006,8 @@ impl Sim {
         self.threat_job = ThreatJob::Idle;
         self.chase_src = JobGrid::Live;
         self.threat_src = JobGrid::Live;
+        self.chase_breaks.clear();
+        self.threat_breaks.clear();
     }
 
     /// Run to the end of the game (or `max_ticks`), returning the outcome.
@@ -1924,6 +2018,35 @@ impl Sim {
                 return o;
             }
         }
+    }
+}
+
+/// A word-at-a-time FNV-style mix (`h = (h ^ w) * prime`, one u64 per
+/// step): each step is a bijection of `h`, so two inputs that differ in one
+/// word always hash differently. For `Sim::wave_state_hash`.
+struct Words(u64);
+
+impl Words {
+    #[inline]
+    fn u64(&mut self, w: u64) {
+        self.0 = (self.0 ^ w).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    /// Two values per word; an odd tail is padded with `u32::MAX`.
+    fn i32s(&mut self, v: impl Iterator<Item = i32>) {
+        let mut lo: Option<u32> = None;
+        for x in v {
+            match lo.take() {
+                None => lo = Some(x as u32),
+                Some(l) => self.u64(l as u64 | (x as u32 as u64) << 32),
+            }
+        }
+        if let Some(l) = lo {
+            self.u64(l as u64 | (u32::MAX as u64) << 32);
+        }
+    }
+    fn f32s(&mut self, v: &[f32]) {
+        self.u64(v.len() as u64);
+        self.i32s(v.iter().map(|x| x.to_bits() as i32));
     }
 }
 
@@ -1951,6 +2074,36 @@ fn clamp_speed(vx: f32, vy: f32, max: f32) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent deep inside a walled area (farther than the usual 32-cell
+    /// search) still ends on a walkable cell (T2 review: a reveal could
+    /// leave survivors in walls).
+    #[test]
+    fn agents_far_inside_walls_are_pushed_out() {
+        let level = level::open_field(400.0);
+        let mut sim = Sim::new(&level, Config::default_config(), 10, 1);
+        let g = &mut sim.grid;
+        let (w, h) = (g.w, g.h);
+        for cy in 1..h - 1 {
+            for cx in 1..w - 1 {
+                if cx < w * 3 / 4 {
+                    g.kind[cy * w + cx] = crate::grid::WALL;
+                }
+            }
+        }
+        g.rebuild_step_masks();
+        let far = sim.grid.cell_center((h / 2) * w + w / 8);
+        sim.x[0] = far[0];
+        sim.y[0] = far[1];
+        assert!(sim.nearest_walkable(sim.grid.cell_of(far[0], far[1])).is_none(), "the test needs an agent beyond the 32-cell search");
+        sim.push_agents_off_blocked_cells();
+        for i in 0..sim.n {
+            let c = sim.grid.cell_of(sim.x[i], sim.y[i]);
+            assert_eq!(sim.grid.kind[c], WALK, "agent {i}");
+        }
+        // The nearest one: the first open column, same row.
+        assert_eq!(sim.grid.cell_of(sim.x[0], sim.y[0]), (h / 2) * w + w * 3 / 4);
+    }
 
     /// The splash is centred on the target's hash-time position (where the
     /// scan found it), not where it moved to during this tick's integrate.
