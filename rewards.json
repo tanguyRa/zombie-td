@@ -1,0 +1,51 @@
+{
+  "payout": {
+    "furthest_wave_tickets": [0, 1, 1, 2, 2, 3, 3, 4],
+    "cleared_tickets": 2,
+    "civilians_per_ticket": 4000,
+    "max_civilian_tickets": 4,
+    "no_retry_bonus_tickets": 2
+  },
+  "daily": {
+    "first_blood": { "cap": 1, "tickets": 1 },
+    "wave_victory": { "cap": 5, "tickets": 1 },
+    "match_victory": { "cap": 5, "tickets": 2 }
+  },
+  "crates": {
+    "cards_per_crate": 3,
+    "hometown_cards": 5,
+    "odds": {
+      "recruit":   { "common": 0.70, "uncommon": 0.24, "rare": 0.05, "legendary": 0.01, "foil": 0.02 },
+      "veteran":   { "common": 0.62, "uncommon": 0.28, "rare": 0.08, "legendary": 0.02, "foil": 0.03 },
+      "elite":     { "common": 0.54, "uncommon": 0.31, "rare": 0.12, "legendary": 0.03, "foil": 0.05 },
+      "nightmare": { "common": 0.45, "uncommon": 0.33, "rare": 0.17, "legendary": 0.05, "foil": 0.08 }
+    },
+    "lore": {
+      "payout": [
+        "Lost and found military surplus, recovered from a cleared checkpoint in {place} after the {wave} wave ({tier}).",
+        "Pulled from an abandoned supply depot in {place} once the {wave} wave was over ({tier}).",
+        "Left behind by a retreating patrol in {place}; signed for after the {wave} wave ({tier})."
+      ],
+      "match_victory": [
+        "Handed over by grateful survivors of {place} when the last wave fell ({tier}).",
+        "Unclaimed requisitions from the relief of {place} ({tier})."
+      ],
+      "wave_victory": [
+        "Salvaged from a barricade in {place} after the {wave} wave ({tier}).",
+        "Found in an empty field hospital in {place} after the {wave} wave ({tier})."
+      ],
+      "first_blood": [
+        "Crated up by the first patrol to draw blood in {place} today ({tier}).",
+        "A quartermaster's thank-you for the day's first kill in {place} ({tier})."
+      ],
+      "hometown": [
+        "Recovered near home, in {place}: the first town you held ({tier}).",
+        "Your neighbours in {place} kept this crate for you ({tier})."
+      ]
+    }
+  },
+  "coverage": {
+    "city_cleared_fraction": 0.75,
+    "placeholder_city_area_km2": 100.0
+  }
+}

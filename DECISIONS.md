@@ -1025,3 +1025,155 @@ yet: that comes after T5).
 - **`levelgen.ts`'s grow-the-radius logic stays** for now (the current
   game still uses it); retiring or porting it to blocks is part of the
   integration step.
+
+## Profile (T7a)
+
+The local meta layer lives in `web/src/profile/` (library only: the deck
+builder, collection, crate and coverage screens and the match wiring come
+later).
+
+- **`ProfileService` is the boundary to the future server.** Every method
+  is async and takes and returns plain JSON (no Date, Map, bigint or class),
+  so an HTTP/RPC client can implement the same interface. Errors are
+  `ProfileError { code, message }` (`toJSON` gives the wire form); deck
+  problems are data (`{ ok: false, errors }`), not exceptions.
+  `LocalProfileService` is the v1 implementation. The server will re-run
+  the run record before `claimMatch` pays, own the daily counters (its own
+  clock, not the client's) and the crate RNG.
+- **Storage: one IndexedDB database `zt-profile`, three stores**: `state`
+  (one `ProfileState` document: collection, decks, tickets, crates, claimed
+  match ids, tiers, daily counters, achievements, RNG state), `matches`
+  (summary + run record by match id) and `coverage` (cells by id). The two
+  that grow are separate so the state document stays small. Unlike the
+  block cache this is the player's data: nothing is ever dropped. The
+  IndexedDB version only describes the stores (upgrades only add stores);
+  the data format is `ProfileState.schema` (1), migrated forward in JS on
+  open (`migrateBundle`, one function per step over the whole bundle). A
+  profile written by newer code (data schema or store layout) is refused
+  with `schema_too_new`, never wiped and never replaced by an empty memory
+  profile. `openProfileBackend` falls back to memory only when IndexedDB is
+  missing or fails to open; `service.persistent` tells the UI to warn.
+- **Every write is one transaction with a revision check.** The service
+  reads the state, applies the change to a copy and commits state, matches
+  and cells in one readwrite transaction that first checks the stored
+  `revision`. If another tab wrote in between, the commit aborts with
+  `conflict` and the operation reruns on fresh data (up to 8 times). So
+  two tabs claiming the same match pay once (tested on fake-indexeddb and
+  with a counting backend). Operations in one tab are also queued.
+- **Card instances**: `<profile id prefix>-<kind><seq>` ids from a counter
+  in the state (no randomness, stable in tests). The provenance stamp holds
+  district, city, wave, tier, population saved, MVP card and the **local
+  day** (`YYYY-MM-DD`, no time of day). The match id is kept on the crate
+  record, not on the stamp, so a traded card doesn't carry a link to the
+  match (and its centre). Starter cards: `source: "starter"`, `stamp:
+  null`, `accountBound: true`, `tradeable: false`, `salvageable: false`,
+  granted with the deck "Civil Defence Issue" when the profile is created
+  (one commit that requires no existing profile, so it can't happen twice).
+- **Stamp sanitiser** (`sanitizePlace`): strict on purpose, privacy before
+  a pretty name. Postcode patterns are removed (UK, Canada, NL, PL, PT,
+  SE/CZ, US ZIP+4, any 3+ digit run); a segment (split on `, ; / | ( )`
+  and ` - `) is dropped whole when it holds a house number or looks like a
+  street (street words in a dozen languages next to a name, glued suffixes
+  such as `-straße`, `-straat`, `-gatan`, abbreviations such as `St`, `Bd`,
+  `ul.`); the first segment left is kept, minus every token with a digit.
+  A street word alone is a town ("Rue", "Largo"), and "St" counts only in
+  last position ("St Albans" stays). Accepted false positives: areas named
+  after a street ("Earls Court") fall back to the city. Limit: a bare
+  street name with no marker and no number ("Strøget") is undetectable;
+  geocoder district/city fields don't carry those. Match history stores the
+  sanitised names too, so no screen can show a street. Lore writes the wave
+  as a word ("the eighth wave"), so a lore line has no digit at all; a test
+  checks every template is free of street words.
+- **Decks**: named lists of instance ids. Ownership is checked by the
+  profile (`not_owned`, `duplicate_instance`), then the core's rules run on
+  the card ids of the owned, distinct instances. The validator is injected
+  (`validateDeck: (cardIds) => DeckError[]`, sim-core's `validate_deck`
+  through WASM in T5); the default is `mirrorValidateDeck`, a TS mirror of
+  `CardDb::validate_deck` with the same error shape
+  (`{ error: "wrong_size", ... }`, sim-core's serde tag), the same order and
+  the same messages (`deckErrorMessage`). `profile_deck.test.ts` replays the
+  cases of `t3_cards.rs`.
+- **Payout** (`computePayout`, numbers in `rewards.json` → `payout`):
+  `furthest_wave_tickets[furthestWave − 1]` + `cleared_tickets` if wave 8 was
+  won + `min(max_civilian_tickets, floor(max(savedPerWave) /
+  civilians_per_ticket))` + `no_retry_bonus_tickets` if cleared with 0
+  retries. Defaults: 0,1,1,2,2,3,3,4 by wave, +2 cleared, 1 per 4000
+  civilians up to 4, +2 no retry: 12 tickets for a perfect clear, 4 for
+  quitting in wave 4 with 8000 alive, 0 for quitting in wave 1 (no farming
+  by starting and quitting). Civilians use the max over waves, not the sum:
+  survivors carry over, a sum would count them up to 8 times. The tier
+  doesn't change the ticket count: harder tiers pay better crates, not more
+  of them. Idempotent on `matchId`: a second claim (even with other
+  numbers) pays nothing and returns the first payout with `paid: false`.
+- **Tickets carry their provenance** (match, sanitised district and city,
+  tier, wave, population saved, MVP, local day), so the crate a ticket opens
+  can name where it was recovered and stamp its cards, whenever it is
+  opened.
+- **Daily caps** (`rewards.json` → `daily`): first blood 1/day (1 ticket),
+  wave victory 5/day (1 ticket), match victory 5/day (2 tickets, counted by
+  `claimMatch` for a cleared match). The day is the **local day** from an
+  injectable clock (`now()` and `utcOffsetMinutes()`), and it **never goes
+  backwards**: the effective day is the later of today's local date and the
+  stored day. Flying west after midnight (or setting the clock back) can't
+  reopen a day whose caps are used; flying east starts the next day early,
+  once. Each event has a key (`wave_victory:<match>:<wave>`,
+  `match_victory:<match>`, `first_blood:<day>`) kept for all time, so a
+  retried or restarted wave never counts twice, even the next day.
+- **Crates**: one ticket opens one crate of `cards_per_crate` (3) cards;
+  the Hometown crate has `hometown_cards` (5), needs a cleared match in the
+  history and is granted once per profile (the UI decides which match is
+  the player's own address). Each card: rarity from the tier's odds
+  (`rewards.json` → `crates.odds`, cumulative against one 24-bit float),
+  then a card of that rarity uniformly in `cards.json` order, then foil
+  against a second float. Lore: a template of the crate's source picked
+  with the same RNG. The RNG is a **PCG32 port of sim-core's** (same
+  seeding, same `below`, checked against the reference stream), stream
+  `CRATE_STREAM`, seeded once per profile from `crypto.getRandomValues`
+  (injectable), its state saved in the profile after each crate. It never
+  sees the match seed: crates are not part of replays. Harder tiers: fewer
+  commons, more rares, legendaries and foils (a test checks the table is
+  monotonic and frequencies over 40 000 rolls are within 5 σ).
+- **Difficulty tiers**: Recruit, Veteran, Elite, Nightmare. A tier unlocks
+  when a match is cleared on the tier below (stored as the highest cleared
+  tier index); claiming a match on a locked tier is refused. The
+  multipliers are in `config.default.json` → `difficulty.<tier>`:
+  `population_multiplier` (a factor on `match.population_multiplier`),
+  `outbreak_scale` (number and size of outbreak clusters) and
+  `fatigue_scale` (how much civilians slow down). The profile only reads
+  them (`difficulty(tier)`); the sim consumes them later. sim-core's
+  `Config` ignores the new key (no `deny_unknown_fields`).
+- **Coverage grid = the map block grid** (`map/blocks.ts`, ~251 m cells),
+  not a coarser one: a wave-8 disc (1300 m) is about 84 cells, Paris
+  (105 km²) about 1700, so 75% of Paris takes about 15 non-overlapping
+  matches, the 10–20 of GAMEPLAY.md. A cell counts when its **centre** is
+  inside the defended radius (not when it merely touches the disc), so
+  the covered area matches the disc's on average (within 15%, tested). Only
+  cleared matches add coverage. Each cell keeps its highest tier and its
+  highest tier per city key (a cell on a border can count for two cities).
+  `coverageInBox` reads the box's candidate cells (or scans all when the box
+  spans more than 20 000 cells).
+- **City cleared**: the area of the cells counted for the city at a tier or
+  harder, over the city's area, ≥ `coverage.city_cleared_fraction` (0.75),
+  one achievement per tier. The city key is the place search's `cityId`
+  when there is one (OSM relation later), else the folded name ("Paris" =
+  " PARIS "), so homonyms in different countries merge until ids are
+  passed. The area comes from an injected lookup (km², OSM admin boundary
+  later); when it is unknown the **placeholder** `placeholder_city_area_km2`
+  (100 km²) is used and the achievement is **provisional**. A provisional
+  achievement becomes final when a later claim in that city has the real
+  area and it still holds, and is dropped if the real area shows the city
+  isn't cleared; final achievements are never taken away.
+- **Privacy**: coverage cells and match centres stay in the local profile;
+  nothing in `web/src/profile/` sends anything anywhere. The comments on
+  `ProfileService.coverageInBox` and in `coverage.ts` say what a server
+  would publish: aggregates only (the combined liberation map, per-city
+  percentages over all players), never one player's cells or centres.
+- **Match history**: `listMatches` (newest first, no run record) and
+  `getMatch` (with the run record, opaque JSON until T4). `exportProfile` /
+  `importProfile` dump and restore everything (state, matches, coverage, RNG
+  state, claimed ids) for debugging; an older export is migrated, a newer
+  one refused.
+- **Data tables**: `rewards.json` at the repo root (next to `cards.json`):
+  payout, daily caps, crate odds, foil chance, lore templates, coverage
+  threshold and placeholder area. `checkTables` validates them when a
+  service is created (odds sum to 1, every tier present, lore not empty).
