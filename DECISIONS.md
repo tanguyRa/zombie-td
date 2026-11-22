@@ -231,6 +231,147 @@ Every choice the spec left open, and every simplification, in one place.
   available on the host to compare. Wave-8 sizes are therefore not playable
   in that Firefox build.
 
+## Match (T2, the 8-wave loop)
+
+- **`Match` owns a `Sim`** (`sim-core/src/match_.rs`). The only ways to
+  change it are `Match::apply(Action) -> Result<(), ActionError>` between
+  ticks, `Match::step()`, and `add_buildings` (map data, not a player
+  action). `Action` is serde-tagged JSON (`{"type":"place_tower",
+  "building":3}`); coordinates are sim meters, like the existing `Sim`
+  API. Accepted actions are logged as `(tick, action)` where `tick` counts
+  every `step()` since creation (all phases, never reset by a retry); T4
+  turns that log into run records. Refused actions are not logged.
+- **The single-wave `Sim` API is unchanged** and keeps its tests. The match
+  needs a few per-sim rules, added as fields whose defaults are neutral:
+  `fatigue` (1.0), `loss_below` (1: lose at 0 civilians), `timeout` (true),
+  `tower_budget` / `fence_budget_m` (from config). Multiplying by 1.0 gives
+  the same floats, so **the fixture hash is unchanged (`0ea142296a5795a9`)**;
+  spawning and outbreak seeding were split into helpers that draw the PRNG
+  in exactly the old order.
+- **Phases:** `Prep → Running → WaveWon | WaveLost`; `WaveWon → NextWave →`
+  the next wave's `Prep`; winning wave 8 goes straight to `MatchWon` (no
+  `WaveWon` first). `WaveLost` only allows `RetryWave` or `RestartMatch`
+  (zombies are still on the map, so there is no "next wave" from a loss).
+  Victory is checked before defeat, after the tick's stats, as in `Sim`.
+  Defeat: civilians < `ceil(defeat_fraction × civilians at Start)` (the
+  starting count is taken before the outbreak converts anyone). No timeout;
+  `sim-headless match` has a `--max-wave-s` safety cap only.
+- **Rings:** `match.ring_radius_m` (150, 300, 450, 600, 775, 950, 1125,
+  1300 m; the last must equal `wave8_radius_m`, checked). On a level smaller
+  than the wave-8 cap the core keeps its 150 m and the other rings are
+  squeezed linearly up to the level radius (Marais, 400 m: 150, 183, 215,
+  248, 286, 324, 362, 400 m), so every wave still reveals a ring.
+  Rectangular synthetic levels use the bounds' centre and half their
+  smaller side. Cells whose centre is outside the current disc are `WALL`,
+  so fields, steering and placements never see them (fences there are
+  clipped like on buildings; towers there are refused with `NotRevealed`,
+  judged by building centroid).
+- **The grid is sized from the final radius only**, never from the
+  buildings, so its origin (and every sim coordinate) doesn't depend on
+  which blocks happened to be loaded.
+- **Reveal** happens when a wave's prep opens. The match keeps a `base`
+  geometry per cell (walk / building / wall with all applied buildings);
+  newly revealed cells take it (plus the level's own fences), older cells
+  keep their kind (fences placed or broken stay as they are). Then the
+  "largest 4-connected area" rule runs again over the disc with fences
+  counted as open, and pockets walled off earlier are re-opened first, since
+  a pocket cut by the ring edge may now connect. Step masks are rebuilt.
+- **Buildings arrive in chunks** (`BuildingChunk { block_id, bounds,
+  buildings }`, level-local meters). `add_buildings` works in any phase but
+  refuses a chunk whose area (bounds grown to its buildings) touches the
+  revealed disc, or a duplicate id. Chunks are stored, not applied: each
+  reveal applies, in block-id order, every stored chunk whose area touches
+  the new disc. Building indices therefore depend only on the chunks and
+  the rings, never on arrival order or timing (tested: sorted, reversed,
+  and staged arrival give the same per-wave hashes). `Match::new(level)`
+  wraps a whole level as one chunk (id 0, infinite bounds).
+- **`ring_ready(wave)`** means every grid cell within the ring radius +
+  `match.block_margin_m` (50 m) is inside some chunk's bounds. The margin
+  is needed: a block whose bounds stop short of a ring can still hold a
+  building that reaches into it; without the margin the ring was declared
+  ready without it and the staged test diverged. Buildings sticking out of
+  their block by more than the margin are refused
+  (`BuildingOutsideBlock`). Contract for T6: blocks tile the plane without
+  overlapping and each building is in exactly one block. `NextWave` is
+  refused with `RingNotLoaded` until the next ring is ready;
+  `new_streaming` refuses to start without wave 1's ring.
+- **Population:** agent arrays always have `max_population` slots (100k),
+  whatever the level, so a streamed match and a fully loaded one hash the
+  same; slots not in play are `ABSENT` (state 4, the reserved render
+  state). `Sim::n` is the number of slots in play and every per-agent loop
+  stops there; the hash covers all slots (absent ones are constant).
+  Newcomers of wave k come from the applied buildings whose centroid is in
+  ring k: `round(Σ weight × population_multiplier)` (weight = area × floors
+  × density by kind, as before), capped by the free slots, split by largest
+  remainder and placed from the `SPAWN` stream on walkable cells of the new
+  disc. Survivors stay where they are. Corpses keep their slots for the
+  whole match (as in T1's definition of `max_population`).
+- **`population_multiplier` 0.5**: the 1.3 km tiled Marais then holds
+  92,303 agents at wave 8 (1,266 in the core), under the 100k cap with room
+  for denser places. The committed Marais (400 m) holds about 10.4k over
+  the match. Difficulty (T7) scales `MatchSetup::population_multiplier`.
+- **Prep is cosmetic, as before:** civilians wander from their own stream
+  (`PREP_WANDER`), and Start puts everyone back where the prep began,
+  zeroes velocities and reseeds `WANDER`. Kill flashes are cleared when a
+  prep opens. So how long the player stays in prep never changes the game.
+- **Fatigue:** `match.fatigue_curve`, `[seconds, factor]` points, linear in
+  between (f32, no trig), flat outside; set on the sim before every running
+  tick from the wave tick. It multiplies the civilians' wander and flee
+  speeds only. Default: 1.0 for the first minute, 0.75 at 3 min, 0.5 at
+  6 min, 0.35 from 10 min on.
+- **Outbreaks:** per-wave `outbreak_clusters` (2, 2, 3, 3, 4, 5, 6, 10),
+  `inner_outbreaks` (0, 0, 0, 0, 1, 1, 2, 3), `outbreak_radius_m` and
+  `outbreak_min_per_cluster` (5 to 12). Wave 1 draws among all civilians;
+  later waves first draw the inner seeds among civilians inside the previous
+  radius, then the rest among civilians in the new ring (an empty new ring
+  falls back to anywhere). The 150 m separation applies across both groups,
+  with the old fallback after 5,000 tries. Seed positions are kept
+  (`outbreak_sites`, hidden information for tests and debug views).
+- **Temporary tools until T3:** each prep grants `tower_budget` towers and
+  `fence_budget_m` meters on top of what is placed; unused budget is lost.
+  `Undo` only takes back this prep's placements. Placements persist; broken
+  fence cells stay walkable.
+- **Retries:** one snapshot, taken when the current wave's prep opens. It
+  leaves out the scratch buffers (fields and their back buffers, Dijkstra
+  queues, spatial hash, separation, fence damage), which Start recomputes
+  in full, so it is about 25 MB at the caps instead of a second ~125 MB.
+  `RetryWave` (any phase except `MatchWon`) restores it and keeps the live
+  scratch buffers. `RestartMatch` rebuilds wave 0 from the level shell and
+  the stored chunks (no re-fetch) and reveals wave 1 again. Both count in
+  `retries` (and `restarts` for the latter); neither is part of the state
+  hash, so a retry lands on exactly the prep's hash (tested). The retried
+  attempt's `WaveResult` is dropped; results keep the latest attempt of
+  each wave.
+- **RNG streams:** `Pcg32::new(match seed, ("matc" << 24) | (system << 8) |
+  wave)` with fixed system ids: `SPAWN` 1, `OUTBREAK` 2, `WANDER` 3,
+  `PREP_WANDER` 4, `DECK` 5 and `CARD_EFFECTS` 6 (reserved for T3). A
+  stream is re-created whenever its wave starts, so a retry or a restart
+  replays the same newcomers, outbreak and wander.
+- **`Match::state_hash`** = FNV-1a over the sim's hash, wave, phase, agents
+  in play and applied block ids. `WaveResult` stores it at prep start and
+  after the tick that ended the wave. A second fixture, two waves of a
+  Marais match (`fixture::compute_match_fixture_hash`), hashes
+  `4909c13c5beea4e9` natively and in WASM under Node (tested both sides).
+- **`sim-headless match`** plays with 32 towers per wave (`--tower-budget`;
+  the config keeps today's 8): with 8, wave 1 already ends at the 15% line
+  on the Marais, as every single-wave scenario in the report already ended
+  at 0% survival. Up to 3 retries per lost wave, each with a different
+  tower choice (newest ring largest at 50 m or 80 m spacing, largest
+  anywhere, nearest the centre). Seed 2 clears all 8 waves (6 retries);
+  seeds 1 and 3 lose wave 7. Balance is left to the cards (T3). The
+  squeezed Marais rings also keep the full wave-8 outbreak counts in much
+  less area.
+- **Perf re-check at the caps (native, M1 Pro, single thread):**
+  `sim-headless match --level marais-tiled:1300 --seed 1 --fast-forward-to
+  8 --max-wave-s 150`, so waves 1–7 are won instantly and wave 8 runs for
+  real with 92,303 agents, 10 outbreak clusters and 256 towers for
+  3,000 ticks: tick **p50 17.1 ms, p95 32.3 ms**, max 56.7 ms (one tick),
+  memory ~159 MB including the prep snapshot. T1 measured 36.2 ms native
+  p95 for 100k with no defence on the same level; with T1's WASM/native
+  ratio there (1.26) that puts WASM around 41 ms p95, under the 50 ms
+  target. It is an estimate: the WASM match bindings come in T5. All seven
+  reveals and Starts together took under 1 s.
+
 ## Player tools
 
 - **Fences are clipped at buildings.** Cells of the drawn line that fall on

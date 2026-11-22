@@ -6,10 +6,13 @@
 //!   cargo run --release -p sim-headless -- bench --scale [--radii 1100,1300,1600] [--pops 20000,...]
 //!        [--ticks 8000] [--clusters 12] [--level marais-tiled:1300,<levels/ name>|none] [--skip-wasm] [--out reports/scale.md]
 //!   cargo run --release -p sim-headless -- scenarios
+//!   cargo run --release -p sim-headless -- match --level paris-marais --seed 1 [--retries 2] [--max-wave-s 1800]
+//!        [--multiplier 0.3] [--fast-forward-to 8]   # level may also be marais-tiled:1300
 
 mod bench;
 mod charts;
 mod common;
+mod matchcmd;
 mod report;
 mod scale;
 mod scenarios;
@@ -33,6 +36,7 @@ fn main() {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "run" => cmd_run(&args),
+        "match" => matchcmd::cmd(&args),
         "bench" if args.iter().any(|a| a == "--scale") => cmd_scale(&args),
         "bench" => {
             let pop: u32 = arg(&args, "--pop", 100_000);
@@ -51,7 +55,7 @@ fn main() {
         }
         "report" => report::run(&args),
         _ => {
-            eprintln!("usage: sim-headless <report|run|bench|scenarios> [options]");
+            eprintln!("usage: sim-headless <report|run|match|bench|scenarios> [options]");
             std::process::exit(2);
         }
     }

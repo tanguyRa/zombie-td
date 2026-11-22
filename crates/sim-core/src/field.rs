@@ -72,6 +72,7 @@ const STEP_COST: [i32; 8] = [STRAIGHT, STRAIGHT, STRAIGHT, STRAIGHT, DIAGONAL, D
 /// value `>= its true value` (INF or a tentative one), and both are always
 /// `> settled`. Distances don't depend on where the run was paused, so a
 /// lazily finished field is identical to one computed in one go.
+#[derive(Clone)]
 pub struct Dial {
     buckets: Vec<Vec<u32>>,
     /// Cells in the order they were finalized (non-decreasing distance), when

@@ -5,11 +5,20 @@ use wasm_bindgen_test::*;
 
 const LEVEL: &str = include_str!("../../../levels/paris-marais.json");
 const FIXTURE: &str = include_str!("../../sim-core/tests/fixtures/native_hash.json");
+const MATCH_FIXTURE: &str = include_str!("../../sim-core/tests/fixtures/match_hash.json");
 
 #[wasm_bindgen_test]
 fn wasm_hash_matches_native_fixture() {
     let h = sim_wasm::fixture_hash(LEVEL).unwrap();
     assert!(FIXTURE.contains(&h), "wasm hash {h} != native fixture {FIXTURE}");
+}
+
+/// The 8-wave match (two waves of it) is deterministic across native and WASM.
+#[wasm_bindgen_test]
+fn wasm_match_hash_matches_native_fixture() {
+    let level = sim_core::LevelPack::from_json(LEVEL).unwrap();
+    let h = format!("{:016x}", sim_core::fixture::compute_match_fixture_hash(&level));
+    assert!(MATCH_FIXTURE.contains(&h), "wasm match hash {h} != native fixture {MATCH_FIXTURE}");
 }
 
 #[wasm_bindgen_test]

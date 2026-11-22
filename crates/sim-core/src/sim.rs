@@ -11,6 +11,9 @@ pub const CIVILIAN: u8 = 0;
 pub const INFECTED: u8 = 1;
 pub const ZOMBIE: u8 = 2;
 pub const DEAD: u8 = 3;
+/// A slot not in play yet (the match sizes agent arrays for every wave up
+/// front). Never moves, pushes, bites or gets bitten. Render state 4.
+pub const ABSENT: u8 = 4;
 
 const NONE: u32 = u32::MAX;
 
@@ -112,12 +115,15 @@ pub enum Placement {
     Fence { cells: Vec<u32>, length_m: f32 },
 }
 
+#[derive(Clone)]
 pub struct Sim {
     pub cfg: Config,
     pub grid: Grid,
     pub seed: u64,
-    rng: Pcg32,
+    pub(crate) rng: Pcg32,
 
+    /// Slots in play: agents `0..n`. The arrays may be longer (a match sizes
+    /// them for all waves); slots past `n` are `ABSENT`.
     pub n: usize,
     pub x: Vec<f32>,
     pub y: Vec<f32>,
@@ -128,11 +134,12 @@ pub struct Sim {
     pub hp: Vec<u16>,
     pub bite_cd: Vec<u8>,
     /// Movement multiplier this tick: 0 = not updated, 1 = awake, P = dormant update.
-    step_mul: Vec<u8>,
+    pub(crate) step_mul: Vec<u8>,
     pub sep_x: Vec<f32>,
     pub sep_y: Vec<f32>,
-    spawn_x: Vec<f32>,
-    spawn_y: Vec<f32>,
+    /// Positions `start` resets to (the spawn, or a match wave's prep start).
+    pub(crate) spawn_x: Vec<f32>,
+    pub(crate) spawn_y: Vec<f32>,
 
     // Spatial hash (counting sort into flat arrays).
     pub hash_w: usize,
@@ -165,7 +172,7 @@ pub struct Sim {
     chase_job: bool,
     threat_job: ThreatJob,
     /// Cells a field can reach (walkable or fence): bounds the job budgets.
-    field_cells: usize,
+    pub(crate) field_cells: usize,
     /// Cells finalized by the last job of each kind (sizes the budgets).
     chase_work: usize,
     threat_work: usize,
@@ -197,6 +204,17 @@ pub struct Sim {
     pub tick: u32,
     pub phase: GamePhase,
     pub stats: Stats,
+
+    // Rules a match changes per wave (the single-wave defaults are neutral).
+    /// Civilian speed multiplier (fatigue), 1 outside a match.
+    pub fatigue: f32,
+    /// The game is lost when civilians drop below this (1: when none are left).
+    pub loss_below: u32,
+    /// End with `Timeout` after `max_game_seconds` (a match has no timeout).
+    pub timeout: bool,
+    /// Towers / fence meters allowed in total (placed ones included).
+    pub tower_budget: u32,
+    pub fence_budget_m: f32,
     /// Milliseconds spent in each phase during the last tick (see `PHASES`).
     pub phase_ms: [f64; 9],
 }
@@ -210,23 +228,63 @@ fn density(kind: BuildingKind) -> f64 {
     }
 }
 
+/// Split `population` over weights `raw` (total > 0): floors first, then one
+/// more to the biggest fractional parts (ties by index).
+fn largest_remainder(raw: &[f64], population: u32) -> Vec<u32> {
+    let nb = raw.len();
+    let total: f64 = raw.iter().sum();
+    let mut counts = vec![0u32; nb];
+    let quotas: Vec<f64> = raw.iter().map(|r| r / total * population as f64).collect();
+    let mut assigned = 0u32;
+    for b in 0..nb {
+        counts[b] = quotas[b].floor() as u32;
+        assigned += counts[b];
+    }
+    let mut order: Vec<usize> = (0..nb).filter(|&b| raw[b] > 0.0).collect();
+    order.sort_by(|&a, &b| {
+        let fa = quotas[a] - quotas[a].floor();
+        let fb = quotas[b] - quotas[b].floor();
+        fb.partial_cmp(&fa).unwrap().then(a.cmp(&b))
+    });
+    let mut k = 0;
+    while assigned < population {
+        counts[order[k % order.len()]] += 1;
+        assigned += 1;
+        k += 1;
+    }
+    counts
+}
+
 impl Sim {
     pub fn new(level: &LevelPack, cfg: Config, population: u32, seed: u64) -> Sim {
         let grid = Grid::from_level(level, &cfg);
+        let mut sim = Sim::with_capacity(grid, cfg, population as usize, seed);
+        sim.n = population as usize;
+        sim.spawn_population(population);
+        sim.spawn_x = sim.x.clone();
+        sim.spawn_y = sim.y.clone();
+        sim.stats.civilians = population;
+        sim.stats.initial_civilians = population;
+        sim
+    }
+
+    /// A sim on `grid` with room for `capacity` agents and none in play (all
+    /// slots `ABSENT`). The match adds civilians wave by wave.
+    pub fn with_capacity(grid: Grid, cfg: Config, capacity: usize, seed: u64) -> Sim {
         let cells = grid.w * grid.h;
         let bucket_m = cfg.hash_bucket_m;
         let hash_w = ((grid.w as f32 * grid.cell) / bucket_m).ceil() as usize + 1;
         let hash_h = ((grid.h as f32 * grid.cell) / bucket_m).ceil() as usize + 1;
-        let n = population as usize;
-        let mut sim = Sim {
+        let n = capacity;
+        Sim {
             rng: Pcg32::new(seed, 0x7a6f_6d62),
             seed,
-            n,
+            n: 0,
             x: vec![0.0; n],
             y: vec![0.0; n],
             vx: vec![0.0; n],
             vy: vec![0.0; n],
-            state: vec![CIVILIAN; n],
+            state: vec![ABSENT; n],
             timer: vec![0; n],
             hp: vec![0; n],
             bite_cd: vec![0; n],
@@ -278,15 +336,14 @@ impl Sim {
             phase: GamePhase::Setup,
             stats: Stats::default(),
             phase_ms: [0.0; 9],
+            fatigue: 1.0,
+            loss_below: 1,
+            timeout: true,
+            tower_budget: cfg.tower_budget,
+            fence_budget_m: cfg.fence_budget_m,
             grid,
             cfg,
-        };
-        sim.spawn_population(population);
-        sim.spawn_x = sim.x.clone();
-        sim.spawn_y = sim.y.clone();
-        sim.stats.civilians = n as u32;
-        sim.stats.initial_civilians = n as u32;
-        sim
+        }
     }
 
     // ------------------------------------------------------------------ setup
@@ -322,76 +379,103 @@ impl Sim {
         out
     }
 
+    /// Spawn cells of building `b` (the radius grows in steps if it has none)
+    /// and its raw population weight (0 without cells).
+    pub(crate) fn building_spawn(&self, b: usize) -> (Vec<u32>, f64) {
+        let mut r = self.cfg.spawn_radius_m;
+        let mut c = self.spawn_candidates(b, r);
+        while c.is_empty() && r < self.cfg.spawn_radius_m * 5.0 {
+            r += self.cfg.spawn_radius_m;
+            c = self.spawn_candidates(b, r);
+        }
+        let info = &self.grid.buildings[b];
+        let w = if c.is_empty() { 0.0 } else { info.area_m2 as f64 * info.floors.max(1.0) as f64 * density(info.kind) };
+        (c, w)
+    }
+
+    /// Put civilian slot `a` on a random cell of `list`, jittered inside it.
+    fn place_civilian(&mut self, list: &[u32], a: usize, rng: &mut Pcg32) {
+        let cell = self.grid.cell;
+        let c = list[rng.below(list.len() as u32) as usize] as usize;
+        let jx = 0.1 + 0.8 * rng.f32();
+        let jy = 0.1 + 0.8 * rng.f32();
+        self.x[a] = ((c % self.grid.w) as f32 + jx) * cell;
+        self.y[a] = ((c / self.grid.w) as f32 + jy) * cell;
+    }
+
     fn spawn_population(&mut self, population: u32) {
         let nb = self.grid.buildings.len();
         let mut candidates: Vec<Vec<u32>> = Vec::with_capacity(nb);
         let mut raw: Vec<f64> = Vec::with_capacity(nb);
         for b in 0..nb {
-            let mut r = self.cfg.spawn_radius_m;
-            let mut c = self.spawn_candidates(b, r);
-            while c.is_empty() && r < self.cfg.spawn_radius_m * 5.0 {
-                r += self.cfg.spawn_radius_m;
-                c = self.spawn_candidates(b, r);
-            }
-            let info = &self.grid.buildings[b];
-            raw.push(if c.is_empty() { 0.0 } else { info.area_m2 as f64 * info.floors.max(1.0) as f64 * density(info.kind) });
+            let (c, w) = self.building_spawn(b);
+            raw.push(w);
             candidates.push(c);
         }
         let total: f64 = raw.iter().sum();
-        let mut counts = vec![0u32; nb];
-        if total > 0.0 {
-            // Largest remainder: floors first, then the biggest fractional parts.
-            let quotas: Vec<f64> = raw.iter().map(|r| r / total * population as f64).collect();
-            let mut assigned = 0u32;
-            for b in 0..nb {
-                counts[b] = quotas[b].floor() as u32;
-                assigned += counts[b];
-            }
-            let mut order: Vec<usize> = (0..nb).filter(|&b| raw[b] > 0.0).collect();
-            order.sort_by(|&a, &b| {
-                let fa = quotas[a] - quotas[a].floor();
-                let fb = quotas[b] - quotas[b].floor();
-                fb.partial_cmp(&fa).unwrap().then(a.cmp(&b))
-            });
-            let mut k = 0;
-            while assigned < population {
-                counts[order[k % order.len()]] += 1;
-                assigned += 1;
-                k += 1;
-            }
-        }
+        let counts = if total > 0.0 { largest_remainder(&raw, population) } else { vec![0u32; nb] };
         // Levels with no buildings (open_field): scatter over all walkable cells.
         let all_walk: Vec<u32> = if total > 0.0 {
             Vec::new()
         } else {
             (0..self.grid.kind.len()).filter(|&i| self.grid.kind[i] == WALK).map(|i| i as u32).collect()
         };
+        let mut rng = self.rng.clone();
         let mut a = 0usize;
-        let cell = self.grid.cell;
-        let place = |sim: &mut Sim, list: &[u32], a: &mut usize| {
-            let c = list[sim.rng.below(list.len() as u32) as usize] as usize;
-            let jx = 0.1 + 0.8 * sim.rng.f32();
-            let jy = 0.1 + 0.8 * sim.rng.f32();
-            sim.x[*a] = ((c % sim.grid.w) as f32 + jx) * cell;
-            sim.y[*a] = ((c / sim.grid.w) as f32 + jy) * cell;
-            *a += 1;
-        };
         for b in 0..nb {
             for _ in 0..counts[b] {
-                place(self, &candidates[b], &mut a);
+                self.place_civilian(&candidates[b], a, &mut rng);
+                a += 1;
             }
         }
         if !all_walk.is_empty() {
             while a < self.n {
-                place(self, &all_walk, &mut a);
+                self.place_civilian(&all_walk, a, &mut rng);
+                a += 1;
             }
         }
+        self.rng = rng;
         debug_assert_eq!(a, self.n);
         for i in 0..self.n {
             self.state[i] = CIVILIAN;
         }
         self.spawn_counts = counts;
         self.spawn_weights = raw;
+    }
+
+    /// Add the civilians of `buildings` (a match ring): `round(sum of raw
+    /// weights × multiplier)`, capped by the free slots, split by largest
+    /// remainder and placed in building order from `rng`. Returns how many.
+    pub(crate) fn spawn_newcomers(&mut self, buildings: &[usize], multiplier: f64, rng: &mut Pcg32) -> u32 {
+        let nb = self.grid.buildings.len();
+        self.spawn_counts.resize(nb, 0);
+        self.spawn_weights.resize(nb, 0.0);
+        let mut candidates = Vec::with_capacity(buildings.len());
+        let mut raw = Vec::with_capacity(buildings.len());
+        for &b in buildings {
+            let (c, w) = self.building_spawn(b);
+            self.spawn_weights[b] = w;
+            raw.push(w);
+            candidates.push(c);
+        }
+        let total: f64 = raw.iter().sum();
+        if total <= 0.0 {
+            return 0;
+        }
+        let free = (self.x.len() - self.n) as f64;
+        let want = (total * multiplier).round().clamp(0.0, free) as u32;
+        let counts = largest_remainder(&raw, want);
+        for (k, &b) in buildings.iter().enumerate() {
+            for _ in 0..counts[k] {
+                let a = self.n;
+                self.place_civilian(&candidates[k], a, rng);
+                self.state[a] = CIVILIAN;
+                self.n += 1;
+            }
+            self.spawn_counts[b] += counts[k];
+        }
+        self.stats.civilians += want;
+        want
     }
 
     /// Building index under a sim-space point (cell lookup, then polygons).
@@ -407,10 +491,10 @@ impl Sim {
     }
 
     pub fn towers_left(&self) -> u32 {
-        self.cfg.tower_budget.saturating_sub(self.towers.len() as u32)
+        self.tower_budget.saturating_sub(self.towers.len() as u32)
     }
     pub fn fence_left_m(&self) -> f32 {
-        (self.cfg.fence_budget_m - self.fence_used_m).max(0.0)
+        (self.fence_budget_m - self.fence_used_m).max(0.0)
     }
 
     pub fn place_tower(&mut self, building: u32) -> Result<(), String> {
@@ -529,9 +613,9 @@ impl Sim {
         None
     }
 
-    fn push_agents_off_blocked_cells(&mut self) {
+    pub(crate) fn push_agents_off_blocked_cells(&mut self) {
         for i in 0..self.n {
-            if self.state[i] == DEAD {
+            if self.state[i] == DEAD || self.state[i] == ABSENT {
                 continue;
             }
             let c = self.grid.cell_of(self.x[i], self.y[i]);
@@ -570,25 +654,44 @@ impl Sim {
         if n == 0 {
             return;
         }
+        let all: Vec<u32> = (0..n as u32).collect();
+        let mut rng = self.rng.clone();
+        let mut seeds = Vec::new();
+        self.pick_outbreak_seeds(&all, self.cfg.outbreak_clusters as usize, &mut rng, &mut seeds);
+        self.rng = rng;
+        self.infect_clusters(&seeds, self.cfg.outbreak_radius_m, self.cfg.outbreak_min_per_cluster as usize);
+    }
+
+    /// Add up to `count` cluster seeds drawn uniformly from `candidates`
+    /// (agent indices), each at least `outbreak_min_separation_m` from every
+    /// seed already in `seeds`. After 5,000 failed tries any distinct
+    /// candidate is accepted, so small maps still start.
+    pub(crate) fn pick_outbreak_seeds(&self, candidates: &[u32], count: usize, rng: &mut Pcg32, seeds: &mut Vec<usize>) {
+        if candidates.is_empty() {
+            return;
+        }
         let min_sep2 = self.cfg.outbreak_min_separation_m * self.cfg.outbreak_min_separation_m;
-        let mut seeds: Vec<usize> = Vec::new();
-        let clusters = self.cfg.outbreak_clusters as usize;
+        let target = seeds.len() + count;
         let mut tries = 0;
-        while seeds.len() < clusters && tries < 10_000 {
+        while seeds.len() < target && tries < 10_000 {
             tries += 1;
-            let c = self.rng.below(n as u32) as usize;
+            let c = candidates[rng.below(candidates.len() as u32) as usize] as usize;
             let ok = seeds.iter().all(|&s| {
                 let (dx, dy) = (self.x[s] - self.x[c], self.y[s] - self.y[c]);
                 dx * dx + dy * dy >= min_sep2
             });
-            // After many failures, accept any distinct civilian so small maps still start.
             if ok || (tries > 5_000 && !seeds.contains(&c)) {
                 seeds.push(c);
             }
         }
-        let r2 = self.cfg.outbreak_radius_m * self.cfg.outbreak_radius_m;
-        let min_per = self.cfg.outbreak_min_per_cluster as usize;
-        for &s in &seeds {
+    }
+
+    /// Around each seed, every civilian within `radius` becomes a zombie (the
+    /// `min_per` nearest if fewer).
+    pub(crate) fn infect_clusters(&mut self, seeds: &[usize], radius: f32, min_per: usize) {
+        let n = self.n;
+        let r2 = radius * radius;
+        for &s in seeds {
             let (sx, sy) = (self.x[s], self.y[s]);
             let mut near: Vec<(f32, usize)> = (0..n)
                 .filter(|&i| self.state[i] == CIVILIAN)
@@ -638,6 +741,20 @@ impl Sim {
             self.state[i] = INFECTED;
             self.timer[i] = self.cfg.infection_delay_ticks;
         }
+    }
+
+    /// Kill a zombie or infected agent outright (tests and tools).
+    pub fn force_kill(&mut self, i: usize) {
+        match self.state[i] {
+            ZOMBIE => self.stats.zombies -= 1,
+            INFECTED => self.stats.infected -= 1,
+            _ => return,
+        }
+        self.state[i] = DEAD;
+        self.timer[i] = 0;
+        self.vx[i] = 0.0;
+        self.vy[i] = 0.0;
+        self.stats.dead += 1;
     }
 
     /// Convert local level coordinates (meters from the level centre) to sim coordinates.
@@ -706,9 +823,9 @@ impl Sim {
             let s = &self.stats;
             if s.zombies == 0 && s.infected == 0 {
                 self.phase = GamePhase::Ended(Outcome::Win);
-            } else if s.civilians == 0 {
+            } else if s.civilians < self.loss_below {
                 self.phase = GamePhase::Ended(Outcome::Loss);
-            } else if self.tick + 1 >= self.cfg.max_ticks() {
+            } else if self.timeout && self.tick + 1 >= self.cfg.max_ticks() {
                 self.phase = GamePhase::Ended(Outcome::Timeout);
             }
         }
@@ -730,7 +847,7 @@ impl Sim {
         self.bucket_start.fill(0);
         self.bucket_civ_end[..nb].fill(0);
         for i in 0..self.n {
-            if self.state[i] == DEAD {
+            if self.state[i] == DEAD || self.state[i] == ABSENT {
                 self.agent_bucket[i] = NONE;
                 continue;
             }
@@ -1098,6 +1215,9 @@ impl Sim {
         let keep = cfg.velocity_keep;
         let blend = 1.0 - keep;
         let off = field::offsets(self.grid.w);
+        // Fatigue slows civilians only (1 outside a match: same floats).
+        let wander_v = cfg.civilian_wander_speed * self.fatigue;
+        let flee_v = cfg.civilian_flee_speed * self.fatigue;
         let mut dormant = 0u32;
         for i in 0..self.n {
             if self.state[i] != CIVILIAN {
@@ -1113,7 +1233,7 @@ impl Sim {
                     continue;
                 }
                 self.step_mul[i] = period as u8;
-                vmax = cfg.civilian_wander_speed;
+                vmax = wander_v;
                 if self.rng.f32() < cfg.wander_turn_chance || (self.vx[i] == 0.0 && self.vy[i] == 0.0) {
                     let d = WANDER_DIRS[(self.rng.next_u32() & 15) as usize];
                     dx = d[0] * vmax;
@@ -1124,7 +1244,7 @@ impl Sim {
                 }
             } else {
                 self.step_mul[i] = 1;
-                vmax = cfg.civilian_flee_speed;
+                vmax = flee_v;
                 match field::downhill_masked(self.grid.step_flee[c], &self.flee, c, &off) {
                     Some(d) => {
                         dx = DIR_UNIT[d][0] * vmax;
@@ -1457,6 +1577,53 @@ impl Sim {
         self.stats.civilians as f32 / self.stats.initial_civilians as f32
     }
 
+    // ------------------------------------------------------------ snapshots
+
+    /// Move the scratch buffers out (fields, field jobs, spatial hash,
+    /// separation, fence damage). None of them carries state between ticks
+    /// that a fresh field computation doesn't overwrite.
+    fn take_scratch(&mut self) -> Scratch {
+        use std::mem::take;
+        let empty = || Dial::new(0);
+        Scratch {
+            fields: [take(&mut self.chase), take(&mut self.threat), take(&mut self.flee), take(&mut self.chase_next), take(&mut self.threat_next), take(&mut self.flee_next), take(&mut self.flee_base)],
+            dials: [std::mem::replace(&mut self.chase_dial, empty()), std::mem::replace(&mut self.threat_dial, empty()), std::mem::replace(&mut self.flee_dial, empty())],
+            u32s: [take(&mut self.flee_counts), take(&mut self.flee_zone), take(&mut self.bucket_start), take(&mut self.bucket_civ_end), take(&mut self.bucket_fill), take(&mut self.agent_ids), take(&mut self.agent_bucket), take(&mut self.fence_touched)],
+            f32s: [take(&mut self.hx), take(&mut self.hy), take(&mut self.sep_x), take(&mut self.sep_y), take(&mut self.fence_damage)],
+            hs: take(&mut self.hs),
+        }
+    }
+
+    fn put_scratch(&mut self, s: Scratch) {
+        let Scratch { fields, dials, u32s, f32s, hs } = s;
+        [self.chase, self.threat, self.flee, self.chase_next, self.threat_next, self.flee_next, self.flee_base] = fields;
+        [self.chase_dial, self.threat_dial, self.flee_dial] = dials;
+        [self.flee_counts, self.flee_zone, self.bucket_start, self.bucket_civ_end, self.bucket_fill, self.agent_ids, self.agent_bucket, self.fence_touched] = u32s;
+        [self.hx, self.hy, self.sep_x, self.sep_y, self.fence_damage] = f32s;
+        self.hs = hs;
+    }
+
+    /// A copy of the persistent state without the scratch buffers (about a
+    /// sixth of the memory at wave-8 size). Only valid between ticks while
+    /// no field job is needed until the next full recompute (a match prep:
+    /// `start` recomputes every field). Restore it with `restore_from`.
+    pub(crate) fn snapshot(&mut self) -> Sim {
+        let scratch = self.take_scratch();
+        let copy = self.clone();
+        self.put_scratch(scratch);
+        copy
+    }
+
+    /// Become `snap` (from `snapshot`), keeping this sim's scratch buffers.
+    pub(crate) fn restore_from(&mut self, snap: &Sim) {
+        let scratch = self.take_scratch();
+        *self = snap.clone();
+        self.put_scratch(scratch);
+        self.flee_base_version = None;
+        self.chase_job = false;
+        self.threat_job = ThreatJob::Idle;
+    }
+
     /// Run to the end of the game (or `max_ticks`), returning the outcome.
     pub fn run_to_end(&mut self) -> Outcome {
         loop {
@@ -1466,6 +1633,15 @@ impl Sim {
             }
         }
     }
+}
+
+/// Buffers moved aside by `Sim::snapshot` / `restore_from`.
+struct Scratch {
+    fields: [Vec<i32>; 7],
+    dials: [Dial; 3],
+    u32s: [Vec<u32>; 8],
+    f32s: [Vec<f32>; 5],
+    hs: Vec<u8>,
 }
 
 #[inline]

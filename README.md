@@ -51,6 +51,15 @@ Useful extras:
 
 - `./dev.sh cargo run --release -p sim-headless -- run --level suburb --pop 20000 --seed 3`
   plays one game headless and prints the population every 10 s.
+- `./dev.sh cargo run --release -p sim-headless -- match --level paris-marais --seed 2`
+  plays an 8-wave match headless with a simple scripted defence (32 towers
+  per wave on the largest revealed buildings, up to 3 retries per lost wave
+  with a different choice) and prints one row per wave attempt: radius,
+  newcomers, civilians at start and end, kills, bites, game time, tick
+  times, end-of-wave state hash. `--retries`, `--tower-budget`,
+  `--multiplier` and `--max-wave-s` (a safety cap; the match itself has no
+  timeout) tune it; `--level marais-tiled:1300 --fast-forward-to 8 --max-wave-s 150`
+  times a real wave 8 at the wave-8 caps (earlier waves won instantly).
 - `./dev.sh cargo run --release -p sim-headless -- report --quick` makes a
   fast report (2 seeds, no S5, short benchmarks) for iteration. It is marked
   "QUICK MODE".
@@ -174,6 +183,11 @@ don't change the outcome (S2). The fence ring in S3 is first breached after
   for civilians), dormant civilians far from danger updated 1 tick in 4,
   bites, a 1 s infection, separation, wall sliding, towers and fences.
   Deterministic: PCG32, no trig, index-order iteration, FNV-1a state hash.
+  `Match` (`match_.rs`) runs the 8-wave loop on top of `Sim`: rings revealed
+  wave by wave, newcomers from the new ring's buildings, per-wave outbreaks,
+  fatigue, persistent placements, retry / restart, buildings streamed in
+  chunks. Every change goes through `Match::apply(Action)` and `step()`.
+  The browser still plays the single-wave `Sim` until T5.
 - **`crates/sim-headless`**: tests support, scenarios S1–S5, benchmarks and
   the report writer (SVG charts, no Python).
 - **`crates/sim-wasm`**: wasm-bindgen wrapper with no logic of its own.

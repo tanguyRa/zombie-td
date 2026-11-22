@@ -51,6 +51,96 @@ pub struct Config {
     /// Most agents a match may hold (every civilian, zombie and corpse of
     /// all waves). Agent arrays are sized for it up front (T2).
     pub max_population: u32,
+
+    /// The 8-wave match (`Match`, T2).
+    #[serde(rename = "match")]
+    pub match_: MatchConfig,
+}
+
+/// Match rules. Every per-wave list has one entry per wave (8).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MatchConfig {
+    /// Playable radius of each wave, in meters from the level centre. The
+    /// last entry must equal `wave8_radius_m`. Levels smaller than the wave-8
+    /// cap squeeze the rings (see `Match::ring_radii`).
+    pub ring_radius_m: Vec<f32>,
+    /// Civilians per unit of building weight (area × floors × density by
+    /// kind), before difficulty. Tuned so a 1.3 km disc of Marais-like
+    /// density holds about `max_population`.
+    pub population_multiplier: f32,
+    /// A wave is lost when civilians drop below this share of the wave's
+    /// starting civilians.
+    pub defeat_fraction: f32,
+    /// Outbreak clusters per wave.
+    pub outbreak_clusters: Vec<u32>,
+    /// Of those, clusters placed inside earlier territory (the rest are in
+    /// the newly revealed ring). Wave 1 places everything at random.
+    pub inner_outbreaks: Vec<u32>,
+    /// Cluster size per wave: every civilian within this radius of a seed...
+    pub outbreak_radius_m: Vec<f32>,
+    /// ...or at least this many (the nearest).
+    pub outbreak_min_per_cluster: Vec<u32>,
+    /// Civilian speed multiplier by seconds since the wave started:
+    /// `[seconds, factor]` points, linear in between, flat before the first
+    /// and after the last. Zombies are not affected.
+    pub fatigue_curve: Vec<[f32; 2]>,
+    /// How far a block's buildings may stick out of its bounds. A ring is
+    /// ready once every cell within its radius + this margin is covered, so
+    /// every block whose buildings reach into the ring has arrived.
+    pub block_margin_m: f32,
+}
+
+impl MatchConfig {
+    pub fn validate(&self, wave8_radius_m: f32) -> Result<(), String> {
+        let w = self.ring_radius_m.len();
+        if w == 0 {
+            return Err("match.ring_radius_m is empty".into());
+        }
+        for (name, len) in [
+            ("outbreak_clusters", self.outbreak_clusters.len()),
+            ("inner_outbreaks", self.inner_outbreaks.len()),
+            ("outbreak_radius_m", self.outbreak_radius_m.len()),
+            ("outbreak_min_per_cluster", self.outbreak_min_per_cluster.len()),
+        ] {
+            if len != w {
+                return Err(format!("match.{name} has {len} entries, ring_radius_m has {w}"));
+            }
+        }
+        if self.ring_radius_m.windows(2).any(|p| p[1] <= p[0]) || self.ring_radius_m[0] <= 0.0 {
+            return Err("match.ring_radius_m must be positive and increasing".into());
+        }
+        if self.ring_radius_m[w - 1] != wave8_radius_m {
+            return Err(format!("match.ring_radius_m ends at {} but wave8_radius_m is {wave8_radius_m}", self.ring_radius_m[w - 1]));
+        }
+        if self.inner_outbreaks.iter().zip(&self.outbreak_clusters).any(|(i, c)| i > c) {
+            return Err("match.inner_outbreaks exceeds outbreak_clusters".into());
+        }
+        if !(self.block_margin_m >= 0.0) {
+            return Err("match.block_margin_m must be >= 0".into());
+        }
+        if self.fatigue_curve.windows(2).any(|p| p[1][0] <= p[0][0]) {
+            return Err("match.fatigue_curve times must increase".into());
+        }
+        Ok(())
+    }
+
+    /// Fatigue factor `t` seconds into a wave.
+    pub fn fatigue_at(&self, t: f32) -> f32 {
+        let c = &self.fatigue_curve;
+        match c.first() {
+            None => 1.0,
+            Some(&[t0, f0]) if t <= t0 => f0,
+            _ => {
+                for p in c.windows(2) {
+                    let ([ta, fa], [tb, fb]) = (p[0], p[1]);
+                    if t <= tb {
+                        return fa + (fb - fa) * ((t - ta) / (tb - ta));
+                    }
+                }
+                c[c.len() - 1][1]
+            }
+        }
+    }
 }
 
 /// The repository's `config.default.json`, embedded so tests and the WASM

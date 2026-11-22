@@ -114,42 +114,12 @@ impl Grid {
 
         // Buildings: a cell belongs to a building if its centre is inside the polygon.
         for (bi, b) in level.buildings.iter().enumerate() {
-            let poly: Vec<[f32; 2]> = b.polygon.iter().map(|&[x, y]| [x - ox, y - oy]).collect();
-            let (mut px0, mut py0, mut px1, mut py1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-            for &[x, y] in &poly {
-                px0 = px0.min(x);
-                py0 = py0.min(y);
-                px1 = px1.max(x);
-                py1 = py1.max(y);
+            let (info, cells) = g.rasterize_building(b, &g.kind);
+            for &c in &cells {
+                g.kind[c] = BUILDING;
+                g.building[c] = bi as u32;
             }
-            let cx0 = ((px0 / cell).floor().max(0.0)) as usize;
-            let cy0 = ((py0 / cell).floor().max(0.0)) as usize;
-            let cx1 = ((px1 / cell).ceil() as usize).min(w - 1);
-            let cy1 = ((py1 / cell).ceil() as usize).min(h - 1);
-            let mut count = 0;
-            for cy in cy0..=cy1 {
-                for cx in cx0..=cx1 {
-                    let i = cy * w + cx;
-                    if g.kind[i] == WALL {
-                        continue;
-                    }
-                    let (x, y) = ((cx as f32 + 0.5) * cell, (cy as f32 + 0.5) * cell);
-                    if level::point_in_polygon(x, y, &poly) {
-                        g.kind[i] = BUILDING;
-                        g.building[i] = bi as u32;
-                        count += 1;
-                    }
-                }
-            }
-            g.buildings.push(BuildingInfo {
-                id: b.id,
-                kind: b.kind,
-                floors: b.floors,
-                area_m2: level::polygon_area(&b.polygon),
-                centroid: level::polygon_centroid(&poly),
-                polygon: poly,
-                cell_count: count,
-            });
+            g.buildings.push(info);
         }
 
         g.remove_enclosed_areas();
@@ -166,6 +136,90 @@ impl Grid {
         }
         g.rebuild_step_masks();
         g
+    }
+
+    /// A building's info (polygon moved to sim coordinates) and the cells
+    /// whose centre is inside its polygon, skipping cells that are `WALL` in
+    /// `kind`. Does not modify the grid.
+    pub fn rasterize_building(&self, b: &level::Building, kind: &[u8]) -> (BuildingInfo, Vec<usize>) {
+        let (ox, oy, cell, w, h) = (self.origin[0], self.origin[1], self.cell, self.w, self.h);
+        let poly: Vec<[f32; 2]> = b.polygon.iter().map(|&[x, y]| [x - ox, y - oy]).collect();
+        let (mut px0, mut py0, mut px1, mut py1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for &[x, y] in &poly {
+            px0 = px0.min(x);
+            py0 = py0.min(y);
+            px1 = px1.max(x);
+            py1 = py1.max(y);
+        }
+        let mut cells = Vec::new();
+        if px1 >= 0.0 && py1 >= 0.0 && !poly.is_empty() {
+            let cx0 = ((px0 / cell).floor().max(0.0)) as usize;
+            let cy0 = ((py0 / cell).floor().max(0.0)) as usize;
+            let cx1 = ((px1 / cell).ceil() as usize).min(w - 1);
+            let cy1 = ((py1 / cell).ceil() as usize).min(h - 1);
+            for cy in cy0..=cy1 {
+                for cx in cx0..=cx1 {
+                    let i = cy * w + cx;
+                    if kind[i] == WALL {
+                        continue;
+                    }
+                    let (x, y) = ((cx as f32 + 0.5) * cell, (cy as f32 + 0.5) * cell);
+                    if level::point_in_polygon(x, y, &poly) {
+                        cells.push(i);
+                    }
+                }
+            }
+        }
+        let info = BuildingInfo {
+            id: b.id,
+            kind: b.kind,
+            floors: b.floors,
+            area_m2: level::polygon_area(&b.polygon),
+            centroid: level::polygon_centroid(&poly),
+            polygon: poly,
+            cell_count: cells.len() as u32,
+        };
+        (info, cells)
+    }
+
+    /// Keep only the largest 4-connected region of cells passing `open`
+    /// (ties: the first found in index order); open cells elsewhere become
+    /// walls. Returns how many cells were walled.
+    pub fn keep_largest_region(&mut self, open: impl Fn(u8) -> bool, wall: impl Fn(u8) -> bool) -> u32 {
+        let n = self.w * self.h;
+        let mut comp = vec![u32::MAX; n];
+        let mut stack = Vec::new();
+        let mut best = (0u32, 0usize);
+        let mut id = 0u32;
+        for start in 0..n {
+            if !open(self.kind[start]) || comp[start] != u32::MAX {
+                continue;
+            }
+            let mut size = 0usize;
+            comp[start] = id;
+            stack.push(start);
+            while let Some(c) = stack.pop() {
+                size += 1;
+                for nb in [c - 1, c + 1, c - self.w, c + self.w] {
+                    if open(self.kind[nb]) && comp[nb] == u32::MAX {
+                        comp[nb] = id;
+                        stack.push(nb);
+                    }
+                }
+            }
+            if size > best.1 {
+                best = (id, size);
+            }
+            id += 1;
+        }
+        let mut walled = 0;
+        for i in 0..n {
+            if comp[i] != u32::MAX && comp[i] != best.0 && wall(self.kind[i]) {
+                self.kind[i] = WALL;
+                walled += 1;
+            }
+        }
+        walled
     }
 
     fn masks_at(&self, c: usize) -> (u8, u8) {
