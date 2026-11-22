@@ -269,14 +269,16 @@ pub fn run(args: &[String]) {
     let mut test_notes = Vec::new();
     if !skip_tests {
         eprintln!("[report] cargo test --release --workspace");
-        let (ok, out) = sh("cargo", &["test", "--release", "--workspace", "--no-fail-fast"]);
+        // libtest prints "Running <file>" to stderr and results to stdout:
+        // merge them in order so each test lands in its file's group.
+        let (ok, out) = sh("sh", &["-c", "cargo test --release --workspace --no-fail-fast 2>&1"]);
         tests.extend(parse_tests(&out, "sim-core unit"));
         if !ok {
             test_notes.push("cargo test reported failures (see table)".to_string());
         }
         if !skip_wasm {
             eprintln!("[report] wasm-pack test --node --release crates/sim-wasm");
-            let (ok, out) = sh("wasm-pack", &["test", "--node", "--release", "crates/sim-wasm"]);
+            let (ok, out) = sh("sh", &["-c", "wasm-pack test --node --release crates/sim-wasm 2>&1"]);
             let mut w = parse_tests(&out, "Native = WASM");
             for t in &mut w {
                 t.group = "Native = WASM".into();
