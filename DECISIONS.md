@@ -1251,6 +1251,17 @@ yet: that comes after T5).
   - **Seed:** the server issues it when the match starts and passes it as
     `ExpectedRun.seed`. Without that, a player can play many seeds offline
     and upload the best genuine record.
+  - **Issued runs are single-use and bound to an account:** the server
+    keys each issued `ExpectedRun` by a run id bound to the account it
+    was issued to, and a submission names that run id (a record
+    submitted by another account, or for an unknown id, is refused
+    without a replay). The first submission for a run id marks it
+    consumed, whether the replay accepts or rejects it; any later one is
+    refused. A run that is issued but never submitted counts as
+    abandoned (as a lost run would, for streaks and rewards). Together
+    this ends seed rerolling at the run level: asking for new runs until
+    a good seed comes up costs an abandoned run each time, and a record
+    can't be replayed against a second issue of the same seed.
   - **Deck:** the server checks the player owns every card of the deck
     when issuing the run and passes it as `ExpectedRun.deck` (setup order).
     `Match::new` only checks the deck rules (`CardDb::validate_deck`), not
@@ -1273,6 +1284,15 @@ yet: that comes after T5).
     own `end`.
   `ExpectedRun` fields left `None` are not checked (`replay` passes no
   expectation at all: tests and tools); a server passes all three.
+  `ReplaySummary.setup_checked` says whether an expectation with at least
+  one field ran (`false` for `None` or an empty `ExpectedRun`), so a
+  caller can tell a checked run from an unchecked one; a server refuses
+  to pay out on `false`. In WASM (`verify_level` / `verify_chunks`) only
+  `undefined` means "no expectation": `""`, `"null"` and `{}` are refused
+  as `bad_expected`, so a caller's bug can't switch every check off. The
+  CLI (`sim-headless verify`) and `tools/verify-run.mjs` refuse an
+  unknown flag, a flag given twice or a stray argument (exit 2), so a
+  typo'd `--expect-*` can't be skipped silently.
 - **Shell bounds** (`ShellLimits::for_config`, checked by
   `Match::new_streaming` itself as `MatchError::BadShell` before the grid
   is allocated, and by the verifier on the record's shell as `bad_shell`

@@ -35,12 +35,29 @@ fn recorded_match_verifies_and_tampering_is_rejected() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{s}\n{}", String::from_utf8_lossy(&out.stderr));
     assert!(s.contains("verified: "), "{s}");
+    assert!(s.contains("\"setup_checked\": false") && s.contains("not checked against an issued run"), "{s}");
     // The issued seed, deck and multiplier: accepted when they match.
     let deck = sim_core::CardDb::default_cards().starter_deck_ids().join(",");
     let out = Command::new(bin).arg("verify").arg(&run).args(["--level", "paris-marais", "--quiet", "--expect-seed", "2", "--expect-multiplier", "0.3", "--expect-deck", &deck]).output().unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{s}\n{}", String::from_utf8_lossy(&out.stderr));
     assert!(s.contains("\"seed\": \"2\""), "the summary echoes the setup: {s}");
+    assert!(s.contains("\"setup_checked\": true") && !s.contains("not checked"), "{s}");
+    // A typo'd flag, a repeated flag or a stray argument is a usage error
+    // (exit 2), never an expectation silently skipped or overridden.
+    for (extra, why) in [
+        (&["--expect-sed", "4"][..], "unknown flag --expect-sed"),
+        (&["--expect-seed", "3", "--expect-seed", "2"][..], "--expect-seed given twice"),
+        (&["--expect-seed", "2", "3"][..], "unexpected argument \"3\""),
+        (&["--quiet"][..], "--quiet given twice"),
+        (&["--level", "paris-marais"][..], "--level given twice"),
+    ] {
+        let out = Command::new(bin).arg("verify").arg(&run).args(["--level", "paris-marais", "--quiet"]).args(extra).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{extra:?}: {err}");
+        assert!(err.contains(why) && err.contains("usage:"), "{extra:?}: {err}");
+        assert!(out.stdout.is_empty(), "{extra:?}: nothing verified");
+    }
     // Another seed issued: rejected before any tick.
     let out = Command::new(bin).arg("verify").arg(&run).args(["--level", "paris-marais", "--quiet", "--expect-seed", "3"]).output().unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
@@ -110,4 +127,32 @@ fn streamed_run_verifies_with_a_shell_file() {
     assert_eq!(code, Some(1), "{s}");
     assert!(s.contains("\"error\":\"map_shell\""), "{s}");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `tools/verify-run.mjs` refuses the same bad arguments with exit 2. Its
+/// arguments are parsed before the WASM package is loaded, so this needs
+/// Node but not a `pkg-node` build; skipped when `node` isn't on the PATH.
+#[test]
+fn verify_run_mjs_rejects_bad_arguments() {
+    let tool = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/verify-run.mjs");
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("node not found: verify-run.mjs argument check skipped");
+        return;
+    }
+    for (args, why) in [
+        (&["run.json", "--level", "l.json", "--expect-sed", "4"][..], "unknown flag --expect-sed"),
+        (&["run.json", "--level", "l.json", "--expect-seed", "3", "--expect-seed", "4"][..], "--expect-seed given twice"),
+        (&["run.json", "--level", "l.json", "stray"][..], "unexpected argument \"stray\""),
+        (&["run.json", "--level", "l.json", "--quiet"][..], "unknown flag --quiet"),
+        (&["run.json", "--level"][..], "--level needs a value"),
+        (&["run.json", "--level", "l.json", "--expect-seed", "x"][..], "--expect-seed \"x\""),
+        (&["run.json", "--level", "l.json", "--expect-multiplier", ""][..], "--expect-multiplier \"\""),
+        (&["run.json", "--chunks", "c.json"][..], "give either --level"),
+        (&["--level", "l.json"][..], "usage:"),
+    ] {
+        let out = Command::new("node").arg(tool).args(args).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        assert!(err.contains(why) && err.contains("usage:"), "{args:?}: {err}");
+    }
 }

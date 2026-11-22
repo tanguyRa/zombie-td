@@ -4,7 +4,8 @@
 //! (sim-core `record`). The map always comes from the verifier: a level, or
 //! the shell and the chunks; the `--expect-*` flags are what the server
 //! issued. Exit code 0 when the run verifies, 1 when it is rejected, 2 on
-//! bad arguments or unreadable files.
+//! bad arguments (an unknown flag, a flag given twice, a stray argument)
+//! or unreadable files.
 
 use std::time::Instant;
 
@@ -34,49 +35,84 @@ fn level_arg(s: &str) -> sim_core::LevelPack {
     }
 }
 
-/// The value after `name`, if the flag is given (a flag without a value is
-/// a usage error).
-fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
-    let i = args.iter().position(|a| a == name)?;
-    match args.get(i + 1) {
-        Some(v) if !v.starts_with("--") => Some(v),
-        _ => fail(format!("{name} needs a value\n{USAGE}")),
+/// Flags that take a value, and flags that don't.
+const VALUED: &[&str] = &["--level", "--chunks", "--shell", "--expect-seed", "--expect-deck", "--expect-multiplier", "--max-ticks"];
+const SWITCHES: &[&str] = &["--quiet"];
+
+/// The parsed command line: the run path, then every flag given once.
+/// Anything else (an unknown flag, a flag given twice, a stray positional,
+/// a flag without its value) is a usage error: an expectation must never be
+/// silently dropped or overridden.
+struct Args {
+    run: String,
+    values: std::collections::HashMap<&'static str, String>,
+    switches: std::collections::HashSet<&'static str>,
+}
+
+impl Args {
+    fn parse(args: &[String]) -> Args {
+        let Some(run) = args.get(1).filter(|a| !a.starts_with("--")) else { fail(USAGE.into()) };
+        let mut out = Args { run: run.clone(), values: Default::default(), switches: Default::default() };
+        let mut it = args[2..].iter();
+        while let Some(a) = it.next() {
+            if let Some(&name) = VALUED.iter().find(|&&n| n == a) {
+                let v = match it.next() {
+                    Some(v) if !v.starts_with("--") => v.clone(),
+                    _ => fail(format!("{name} needs a value\n{USAGE}")),
+                };
+                if out.values.insert(name, v).is_some() {
+                    fail(format!("{name} given twice\n{USAGE}"));
+                }
+            } else if let Some(&name) = SWITCHES.iter().find(|&&n| n == a) {
+                if !out.switches.insert(name) {
+                    fail(format!("{name} given twice\n{USAGE}"));
+                }
+            } else if a.starts_with("--") {
+                fail(format!("unknown flag {a}\n{USAGE}"));
+            } else {
+                fail(format!("unexpected argument {a:?}\n{USAGE}"));
+            }
+        }
+        out
+    }
+
+    fn flag(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(String::as_str)
+    }
+
+    /// Like `flag`, parsed; a value that doesn't parse is a usage error.
+    fn parsed<T: std::str::FromStr>(&self, name: &str) -> Option<T>
+    where
+        T::Err: std::fmt::Display,
+    {
+        self.flag(name).map(|v| v.parse().unwrap_or_else(|e| fail(format!("{name} {v:?}: {e}"))))
     }
 }
 
-/// Like `flag`, parsed; a value that doesn't parse is a usage error (an
-/// expectation must never be silently dropped).
-fn parsed<T: std::str::FromStr>(args: &[String], name: &str) -> Option<T>
-where
-    T::Err: std::fmt::Display,
-{
-    flag(args, name).map(|v| v.parse().unwrap_or_else(|e| fail(format!("{name} {v:?}: {e}"))))
-}
-
 /// `--expect-*`: `None` when no flag is given.
-fn expected_arg(args: &[String]) -> Option<ExpectedRun> {
-    let deck = flag(args, "--expect-deck").map(|v| {
+fn expected_arg(args: &Args) -> Option<ExpectedRun> {
+    let deck = args.flag("--expect-deck").map(|v| {
         if std::path::Path::new(v).is_file() {
             serde_json::from_str::<Vec<String>>(&read(v)).unwrap_or_else(|e| fail(format!("{v}: {e}")))
         } else {
             v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
         }
     });
-    let x = ExpectedRun { seed: parsed(args, "--expect-seed"), deck, population_multiplier: parsed(args, "--expect-multiplier") };
-    (x != ExpectedRun::default()).then_some(x)
+    let x = ExpectedRun { seed: args.parsed("--expect-seed"), deck, population_multiplier: args.parsed("--expect-multiplier") };
+    (!x.is_empty()).then_some(x)
 }
 
 pub fn cmd(args: &[String]) {
-    let Some(run) = args.get(1).filter(|a| !a.starts_with("--")) else { fail(USAGE.into()) };
-    let record = RunRecord::from_json(&read(run)).unwrap_or_else(|e| fail(e));
-    let level = flag(args, "--level");
-    let chunks_path = flag(args, "--chunks");
-    let shell_arg = flag(args, "--shell");
-    let expected = expected_arg(args);
-    let quiet = args.iter().any(|a| a == "--quiet");
+    let args = Args::parse(args);
+    let record = RunRecord::from_json(&read(&args.run)).unwrap_or_else(|e| fail(e));
+    let level = args.flag("--level");
+    let chunks_path = args.flag("--chunks");
+    let shell_arg = args.flag("--shell");
+    let expected = expected_arg(&args);
+    let quiet = args.switches.contains("--quiet");
     let cfg = load_config();
     let mut limits = ReplayLimits::for_config(&cfg);
-    if let Some(t) = parsed(args, "--max-ticks") {
+    if let Some(t) = args.parsed("--max-ticks") {
         limits.max_ticks = t;
     }
     let level_pack;
@@ -119,7 +155,7 @@ pub fn cmd(args: &[String]) {
                 s.attempts,
                 s.end_tick,
                 t0.elapsed().as_secs_f64(),
-                if expected.is_some() { "" } else { " (seed, deck and multiplier not checked against an issued run: --expect-*)" }
+                if s.setup_checked { "" } else { " (seed, deck and multiplier not checked against an issued run: --expect-*)" }
             );
         }
         Err(e) => {

@@ -84,6 +84,27 @@ fn wasm_checks_the_issued_run() {
     assert!(e.contains("\"what\":\"population_multiplier\""), "{e}");
     let e = sim_wasm::verify_level(&r.to_json(), LEVEL, Some(r#"{"seeed": 1}"#.into())).unwrap_err().as_string().unwrap();
     assert!(e.contains("bad_expected"), "{e}");
+    // Only `undefined` means no expectation: an empty string, `null` or an
+    // object with no field would switch every check off, so they're refused.
+    for x in ["", "  ", "null", "{}", " { } "] {
+        let e = sim_wasm::verify_level(&r.to_json(), LEVEL, Some(x.into())).unwrap_err().as_string().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&e).unwrap();
+        assert_eq!(v["error"], "bad_expected", "{x:?}: {e}");
+    }
+    let e = sim_wasm::verify_level(&r.to_json(), LEVEL, Some("{}".into())).unwrap_err().as_string().unwrap();
+    assert!(e.contains("no field given"), "{e}");
+}
+
+/// `setup_checked`: whether the summary's setup was compared with an
+/// issued run (WASM and native agree; `None` = not checked).
+#[wasm_bindgen_test]
+fn wasm_summary_says_whether_the_setup_was_checked() {
+    let r = sim_core::RunRecord::from_json(GOLDEN).unwrap();
+    let issued = format!(r#"{{"seed": "{}"}}"#, r.setup.seed);
+    let s: serde_json::Value = serde_json::from_str(&sim_wasm::verify_level(GOLDEN, LEVEL, Some(issued)).unwrap()).unwrap();
+    assert_eq!(s["setup_checked"], true);
+    let s: serde_json::Value = serde_json::from_str(&sim_wasm::verify_level(GOLDEN, LEVEL, None).unwrap()).unwrap();
+    assert_eq!(s["setup_checked"], false);
 }
 
 const CHUNKS: &str = include_str!("../../sim-core/tests/fixtures/map_chunks.json");

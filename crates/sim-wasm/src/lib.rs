@@ -545,7 +545,9 @@ impl WasmMatch {
 /// config and cards. `expected_json` (optional) is what the server issued,
 /// `{"seed"?: "123" | 123, "deck"?: [card ids], "population_multiplier"?:
 /// number}` (`ExpectedRun`); a record that differs is rejected as
-/// `unexpected`. Returns the `ReplaySummary` JSON; throws the
+/// `unexpected`. Only `undefined` means no expectation: `""`, `"null"`
+/// and `{}` throw `bad_expected`. Returns the `ReplaySummary` JSON
+/// (`setup_checked` says whether the expectation ran); throws the
 /// `VerifyError` JSON (with `message`).
 #[wasm_bindgen]
 pub fn verify_level(record_json: &str, level_json: &str, expected_json: Option<String>) -> Result<String, JsValue> {
@@ -568,8 +570,16 @@ pub fn verify_chunks(record_json: &str, shell_json: &str, chunks_json: &str, exp
 }
 
 fn verify_on(record: &RunRecord, map: ReplayMap, expected_json: Option<String>) -> Result<String, JsValue> {
-    let expected = match expected_json.as_deref().filter(|s| !s.trim().is_empty() && s.trim() != "null") {
-        Some(s) => Some(sim_core::record::ExpectedRun::from_json(s).map_err(|e| js_msg("bad_expected", e))?),
+    // Only `undefined` / `None` means "no expectation": `""`, `"null"` and
+    // `{}` are refused, so a caller's bug can't switch every check off.
+    let expected = match expected_json.as_deref() {
+        Some(s) => {
+            let x = sim_core::record::ExpectedRun::from_json(s).map_err(|e| js_msg("bad_expected", e))?;
+            if x.is_empty() {
+                return Err(js_msg("bad_expected", "expected run: no field given (pass undefined for no expectation)"));
+            }
+            Some(x)
+        }
         None => None,
     };
     let cfg = Config::default_config();

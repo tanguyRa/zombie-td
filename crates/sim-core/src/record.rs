@@ -296,6 +296,11 @@ impl ExpectedRun {
     pub fn from_json(s: &str) -> Result<ExpectedRun, String> {
         serde_json::from_str(s).map_err(|e| format!("expected run: {e}"))
     }
+
+    /// No field given: nothing would be checked.
+    pub fn is_empty(&self) -> bool {
+        *self == ExpectedRun::default()
+    }
 }
 
 /// Bounds that keep a replay cheap whatever the record says (DECISIONS.md,
@@ -360,6 +365,10 @@ pub struct ReplaySummary {
     /// The record's setup (seed, multiplier, deck): what the run was
     /// played with, for the server to store or check.
     pub setup: RecordSetup,
+    /// Whether `setup` was checked against what the server issued: an
+    /// `ExpectedRun` with at least one field was given (`replay_with`).
+    /// `false` for `replay` and for `None` (tests and tools).
+    pub setup_checked: bool,
     pub map_source: MapSource,
     /// `mapsnap::snapshot_hash` of the buildings replayed on (= the record's).
     #[serde(with = "hex64")]
@@ -776,6 +785,7 @@ pub fn replay_with(
     out("waves", format!("{:?}", e.waves), format!("{waves:?}"))?;
     Ok(ReplaySummary {
         setup: record.setup.clone(),
+        setup_checked: expected.is_some_and(|x| !x.is_empty()),
         map_source: record.map.source,
         snapshot_hash: record.map.snapshot_hash,
         shell_hash,
