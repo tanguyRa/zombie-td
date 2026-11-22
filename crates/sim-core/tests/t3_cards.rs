@@ -707,8 +707,7 @@ fn repair_and_pull_down() {
         for &c in &cells {
             s.grid.fence_hp[c as usize] = cell_hp * 0.5;
         }
-        s.grid.fence_hp[cells[0] as usize] = 0.0;
-        s.grid.set_kind(cells[0] as usize, WALK);
+        s.debug_break_fence_cell(cells[0] as usize);
     }
     let n = cells.len() as f32;
     let missing = 0.5 * cell_hp * (n - 1.0) + cell_hp;
@@ -1007,8 +1006,7 @@ fn pulling_down_a_fence_gives_taken_over_cells_back() {
     // Break the first cell, then draw barbed wire over it: it takes the cell over.
     {
         let s = m.debug_sim_mut();
-        s.grid.fence_hp[cells[0] as usize] = 0.0;
-        s.grid.set_kind(cells[0] as usize, WALK);
+        s.debug_break_fence_cell(cells[0] as usize);
     }
     let before = m.structures().to_vec();
     let repair = m.repair_cost(fence.id);
@@ -1031,8 +1029,7 @@ fn pulling_down_a_fence_gives_taken_over_cells_back() {
     // An older fence pulled down later also gives back the cells it still holds.
     {
         let s = m.debug_sim_mut();
-        s.grid.fence_hp[cells[1] as usize] = 0.0;
-        s.grid.set_kind(cells[1] as usize, WALK);
+        s.debug_break_fence_cell(cells[1] as usize);
     }
     m.apply(Action::PlayCard { hand_index: hand_index_of(&m, "barbed_wire"), target: Target::Polyline(line) }).unwrap();
     let wire = m.structures()[1].clone();
@@ -1048,8 +1045,7 @@ fn pulling_down_a_fence_gives_taken_over_cells_back() {
 /// Break cell `c` (open ground, 0 hp), as a lost fight would.
 fn break_cell(m: &mut Match, c: u32) {
     let s = m.debug_sim_mut();
-    s.grid.fence_hp[c as usize] = 0.0;
-    s.grid.set_kind(c as usize, WALK);
+    s.debug_break_fence_cell(c as usize);
 }
 
 #[test]

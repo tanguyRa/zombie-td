@@ -5,6 +5,21 @@
     "ok": true
   },
   {
+    "group": "sim-core unit",
+    "name": "sim::tests::agents_far_inside_walls_are_pushed_out",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "sim::tests::splash_is_centred_on_the_hash_time_position",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "match_::tests::state_hash_covers_what_the_rest_of_a_wave_depends_on",
+    "ok": true
+  },
+  {
     "group": "M1 level",
     "name": "synthetic_levels_rasterize",
     "ok": true
@@ -31,12 +46,12 @@
   },
   {
     "group": "M2 rules",
-    "name": "infected_are_never_targeted_by_towers",
+    "name": "infection_delay_is_exactly_20_ticks",
     "ok": true
   },
   {
     "group": "M2 rules",
-    "name": "infection_delay_is_exactly_20_ticks",
+    "name": "infected_are_never_targeted_by_towers",
     "ok": true
   },
   {
@@ -61,12 +76,12 @@
   },
   {
     "group": "M3 tools",
-    "name": "fences_are_clipped_at_buildings_and_charged_for_placed_part",
+    "name": "rasterized_fences_have_no_diagonal_gaps",
     "ok": true
   },
   {
     "group": "M3 tools",
-    "name": "rasterized_fences_have_no_diagonal_gaps",
+    "name": "fences_are_clipped_at_buildings_and_charged_for_placed_part",
     "ok": true
   },
   {
@@ -76,12 +91,12 @@
   },
   {
     "group": "M3 tools",
-    "name": "tower_ignores_zombie_at_41m",
+    "name": "tower_kills_zombie_at_30m_in_exactly_3_shots",
     "ok": true
   },
   {
     "group": "M3 tools",
-    "name": "tower_kills_zombie_at_30m_in_exactly_3_shots",
+    "name": "tower_ignores_zombie_at_41m",
     "ok": true
   },
   {
@@ -96,7 +111,7 @@
   },
   {
     "group": "M3 tools",
-    "name": "fence_break_reopens_cell_and_fields_follow_within_one_interval",
+    "name": "fence_break_reopens_cell_and_fields_follow_within_two_intervals",
     "ok": true
   },
   {
@@ -126,12 +141,307 @@
   },
   {
     "group": "T1 scale",
+    "name": "fence_break_hash_fixture",
+    "ok": true
+  },
+  {
+    "group": "T1 scale",
+    "name": "field_jobs_read_the_grid_of_their_start_tick",
+    "ok": true
+  },
+  {
+    "group": "T1 scale",
+    "name": "lazy_fields_match_eager_with_wake_radius_beyond_the_flee_cap",
+    "ok": true
+  },
+  {
+    "group": "T1 scale",
     "name": "lazy_fields_match_eager_on_paris_with_defenses",
     "ok": true
   },
   {
     "group": "T1 scale",
+    "name": "field_budgets_never_change_results",
+    "ok": true
+  },
+  {
+    "group": "T1 scale",
     "name": "lazy_fields_match_eager_on_grid_city_disc",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "actions_serialize_as_tagged_json",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "config_is_valid_and_rings_fit_the_level",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "an_empty_ring_still_plays",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_reveal_never_walls_off_the_territory_already_played",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_population_capped_match_plays",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "absent_agents_never_move_or_get_bitten",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "chunks_with_bad_bounds_or_coordinates_are_refused",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "placements_persist_and_broken_fences_stay_broken",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "newcomers_come_from_the_new_ring_and_survivors_stay_put",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "raw_grid_write_mid_wave_panics - should panic",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "outbreaks_follow_the_per_wave_placement_rules",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "restart_rebuilds_the_initial_match",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "retry_restores_the_prep_state_exactly",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "ring_ready_waits_for_every_block_the_reveal_would_refuse",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "chunks_give_the_same_match_whatever_their_arrival_order",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "ring_reveal_walls_cells_outside_the_current_radius",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "state_hash_sees_the_defeat_line",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tiny_levels_play_through",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "match_hash_fixture",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "wrong_phase_actions_are_refused",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "win_and_lose_thresholds",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "fatigue_slows_civilians_only",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "debug_fence_break_mid_wave_ignores_field_budgets",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "same_seed_and_actions_give_the_same_hashes",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "ring_ready_and_area_revealed_agree",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "retry_after_fence_breaks_replays_exactly",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "match_hash_ignores_field_budgets_and_eager_jobs",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "cards_json_has_the_v1_cards",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "deck_rules_are_enforced_with_clear_errors",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "fences_from_cards_have_their_length_and_hp",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "garrison_cards_equip_buildings",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "an_empty_keep_choice_keeps_nothing",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "huge_fence_coordinates_are_refused_quickly",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_cell_taken_over_twice_goes_back_whatever_the_pull_down_order",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_mulligan_drops_an_earlier_keep_choice",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "outbreaks_scale_with_squeezed_rings",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "airstrike_and_convoy",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "phase_restrictions_use_the_right_error",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "mortar_splash_and_minimum_range",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "pulling_down_a_fence_gives_taken_over_cells_back",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "mulligan_and_keep_rules",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "repair_and_pull_down",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "paratrooper_lands_after_ten_seconds_and_shoots",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "strikes_hit_an_area_after_their_delay",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "retry_restores_hand_deck_supply_and_structures",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "draw_keep_discard_reshuffle_over_eight_waves",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "card_state_is_in_the_state_hash",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_mulligan_on_an_empty_deck_draws_from_the_reshuffled_discard",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "supply_income_and_carry_over",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "scripted_match_with_the_starter_deck",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "fnv1a64_known_vectors",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "fixture_matches_the_config",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "snapshot_hash_matches_js",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "streaming_match_from_the_fixture",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "scripted_starter_deck_match_clears_the_marais",
     "ok": true
   },
   {
@@ -141,7 +451,17 @@
   },
   {
     "group": "Native = WASM",
+    "name": "wasm_match_hash_matches_native_fixture",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
     "name": "wasm_hash_matches_native_fixture",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_fence_break_hash_matches_native_fixture",
     "ok": true
   }
 ]

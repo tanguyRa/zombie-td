@@ -200,9 +200,6 @@ pub fn walled_compound() -> LevelPack {
     }
 }
 
-/// A `grid_city` centred on the origin and cut to a circle of `radius_m`,
-/// for wave-8-sized benchmarks. Blocks whose centre is not at least half a
-/// block inside the circle are dropped, so the edge is a street ring.
 /// `grid_city_disc` with a straight fence through the middle of every block
 /// row and column, across the whole disc. Every street segment is fenced
 /// once, so the city is sealed into one compartment per crossing: there is
@@ -228,6 +225,9 @@ pub fn grid_city_disc_fenced(radius_m: f32, block_m: f32, street_m: f32, seed: u
     l
 }
 
+/// A `grid_city` centred on the origin and cut to a circle of `radius_m`,
+/// for wave-8-sized benchmarks. Blocks whose centre is not at least half a
+/// block inside the circle are dropped, so the edge is a street ring.
 pub fn grid_city_disc(radius_m: f32, block_m: f32, street_m: f32, seed: u64) -> LevelPack {
     let pitch = block_m + street_m;
     let n = ((2.0 * radius_m) / pitch).ceil() as u32 + 1;

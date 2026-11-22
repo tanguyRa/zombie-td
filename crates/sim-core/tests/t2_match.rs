@@ -336,8 +336,7 @@ fn placements_persist_and_broken_fences_stay_broken() {
     let broken = fence[0];
     {
         let s = m.debug_sim_mut();
-        s.grid.fence_hp[broken] = 0.0;
-        s.grid.set_kind(broken, WALK);
+        s.debug_break_fence_cell(broken);
     }
     clear_outbreak(&mut m);
     m.step();
@@ -915,6 +914,57 @@ fn match_hash_ignores_field_budgets_and_eager_jobs() {
     for t in 0..lazy.len() {
         assert_eq!(lazy[t], eager[t], "eager differs at tick {t}");
         assert_eq!(lazy[t], budget[t], "budget differs at tick {t}");
+    }
+}
+
+/// A fence cell broken by hand mid-wave (`debug_break_fence_cell`, the
+/// tools' way) keeps the hashes independent of the budgets too.
+#[test]
+fn debug_fence_break_mid_wave_ignores_field_budgets() {
+    fn one(_tick: u32, _job: usize, _b: usize) -> usize {
+        1
+    }
+    let sites = outbreak_sites(19);
+    let run = |mode: u8| {
+        let mut m = weak_fence_match(19);
+        match mode {
+            1 => m.debug_sim_mut().eager_fields = true,
+            2 => m.debug_sim_mut().test_budget = Some(one),
+            _ => {}
+        }
+        box_the_outbreak(&mut m, &sites);
+        let fence: Vec<usize> = (0..m.sim().grid.kind.len()).filter(|&c| m.sim().grid.kind[c] == FENCE).collect();
+        let mut hashes = Vec::new();
+        for t in 0..60 {
+            if t % 10 == 1 {
+                m.debug_sim_mut().debug_break_fence_cell(fence[t / 10]);
+            }
+            m.step();
+            hashes.push(m.state_hash());
+        }
+        hashes
+    };
+    let lazy = run(0);
+    assert_eq!(lazy, run(1), "eager differs");
+    assert_eq!(lazy, run(2), "budget differs");
+}
+
+/// Writing the grid mid-wave behind the jobs' backs (no frozen copy) is
+/// caught in release builds too, at the next job advance.
+#[test]
+#[should_panic(expected = "the grid changed under a field job without a frozen copy")]
+fn raw_grid_write_mid_wave_panics() {
+    fn one(_tick: u32, _job: usize, _b: usize) -> usize {
+        1
+    }
+    let mut m = weak_fence_match(19);
+    m.debug_sim_mut().test_budget = Some(one);
+    box_the_outbreak(&mut m, &outbreak_sites(19));
+    m.step();
+    let c = (0..m.sim().grid.kind.len()).find(|&c| m.sim().grid.kind[c] == FENCE).unwrap();
+    m.debug_sim_mut().grid.set_kind(c, WALK);
+    for _ in 0..5 {
+        m.step();
     }
 }
 

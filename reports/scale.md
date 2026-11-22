@@ -37,3 +37,11 @@ Synthetic `grid_city_disc` levels (40 m blocks, 14 m streets) cut to a circle, p
 | marais_tiled_1300m | 907229 (68%) | wasm | 100000 | 4841 | 30.58 | 45.68 | 47.00 | 102.43 | 25.88 | 79.42 | – | – | 135 | 418 |
 | marais_tiled_1300m | 907229 (68%) | wasm | 150000 | 3842 | 38.75 | 56.41 | 58.12 | 138.37 | 26.72 | 112.61 | – | – | 135 | 447 |
 
+### Break-heavy case (`grid_fenced`)
+
+`level::grid_city_disc_fenced`: the 1.3 km grid with a fence through every block row and column (every street segment fenced once, no detour), fence hp 6 per cell, fence path cost 100, 12 outbreak clusters, seed 1, no other defense, 2,000 ticks (the setup of the DECISIONS.md break-heavy figures). Field jobs keep the grid of their start tick (frozen copies on fence breaks). Regenerate with `cargo run --release -p sim-headless -- bench --scale --radii none --level none --fenced 1300 --pops 100000 --ticks 2000`.
+
+| Level | Walkable cells (share) | Runtime | Agents | Ticks | p50 ms | p95 ms | p99 ms | max ms | fields p95 ms | fields max ms | full chase ms | full threat+flee ms | memory MB | setup ms | fence cells broken (ticks) |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| grid_fenced_1300m | 600246 (45%) | native | 100000 | 2000 | 7.99 | 14.19 | 14.88 | 40.22 | 9.07 | 11.51 | 13.6 | 4.2 | 107 | 156 | 454 (364) |
+| grid_fenced_1300m | 600246 (45%) | wasm | 100000 | 2000 | 10.57 | 17.96 | 18.68 | 40.61 | 12.00 | 32.49 | – | – | 111 | 312 | 454 (364) |

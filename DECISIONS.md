@@ -221,7 +221,10 @@ Every choice the spec left open, and every simplification, in one place.
     ticks before, 454 on 364 after: zombies now walk through a hole up to
     one interval later, so the game differs; native and WASM equal in
     both). Fence-free runs do no copies and are unchanged, so the caps
-    below still hold.
+    below still hold. Re-run at the T1 second review (committed in
+    `reports/scale.md`, "Break-heavy case"): native p95 14.2 ms, p99 14.9,
+    fields max 11.5; WASM p95 18.0, p99 18.7; 454 cells on 364 ticks, the
+    same game.
 - **Tested:** `tests/t1_scale.rs` runs a sim and an `eager_fields` reference
   (every job computed in full the moment it starts, original flee seeding,
   uncapped threat) side by side on Paris with towers and fences, on a

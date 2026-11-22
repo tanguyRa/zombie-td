@@ -13,7 +13,7 @@
     "survivors": 0,
     "t50": 110.85,
     "t90": 173.7,
-    "wall_seconds": 18.686718958,
+    "wall_seconds": 18.991870333,
     "zombies_killed": 0
   },
   {
@@ -30,7 +30,7 @@
     "survivors": 0,
     "t50": 116.35,
     "t90": 168.9,
-    "wall_seconds": 19.576728459,
+    "wall_seconds": 19.934064958,
     "zombies_killed": 0
   },
   {
@@ -47,7 +47,7 @@
     "survivors": 0,
     "t50": 111.6,
     "t90": 176.2,
-    "wall_seconds": 21.408869625,
+    "wall_seconds": 21.778933875,
     "zombies_killed": 209
   },
   {
@@ -64,13 +64,13 @@
     "survivors": 0,
     "t50": 117.85,
     "t90": 170.55,
-    "wall_seconds": 14.734159667,
+    "wall_seconds": 15.05060725,
     "zombies_killed": 155
   },
   {
     "defense": "Fence ring, 400 civilians inside, 100 zombies outside",
     "first_breach_s": 10.15,
-    "game_seconds": 27.8,
+    "game_seconds": 23.55,
     "id": "S3",
     "initial_civilians": 400,
     "level": "walled_compound",
@@ -79,15 +79,15 @@
     "seed": 1,
     "survival": 0.0,
     "survivors": 0,
-    "t50": 20.7,
-    "t90": 25.3,
-    "wall_seconds": 0.1176585,
+    "t50": 20.0,
+    "t90": 22.15,
+    "wall_seconds": 0.110131916,
     "zombies_killed": 0
   },
   {
     "defense": "Fence ring, 400 civilians inside, 100 zombies outside",
     "first_breach_s": 8.3,
-    "game_seconds": 27.35,
+    "game_seconds": 24.05,
     "id": "S3",
     "initial_civilians": 400,
     "level": "walled_compound",
@@ -96,9 +96,9 @@
     "seed": 2,
     "survival": 0.0,
     "survivors": 0,
-    "t50": 19.35,
-    "t90": 23.2,
-    "wall_seconds": 0.111765042,
+    "t50": 19.85,
+    "t90": 21.85,
+    "wall_seconds": 0.093615667,
     "zombies_killed": 0
   },
   {
@@ -115,7 +115,7 @@
     "survivors": 0,
     "t50": 83.7,
     "t90": 127.0,
-    "wall_seconds": 9.966869458,
+    "wall_seconds": 10.316799,
     "zombies_killed": 0
   },
   {
@@ -132,7 +132,7 @@
     "survivors": 0,
     "t50": 68.55,
     "t90": 109.2,
-    "wall_seconds": 11.878925959,
+    "wall_seconds": 12.117280875,
     "zombies_killed": 0
   }
 ]

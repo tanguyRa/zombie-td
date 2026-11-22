@@ -201,7 +201,10 @@ impl FrozenGrid {
 fn job_grid<'a>(grid: &'a Grid, frozen: &'a [FrozenGrid; 2], src: JobGrid, version: u32) -> FieldGrid<'a> {
     match src {
         JobGrid::Live => {
-            debug_assert_eq!(grid.version, version, "the grid changed under a field job without a frozen copy");
+            // Release check too (one compare per call): an in-wave grid write
+            // that skipped `freeze_job_grids` would make fields depend on the
+            // budget. Every such write goes through `Sim::break_fence_cell`.
+            assert_eq!(grid.version, version, "the grid changed under a field job without a frozen copy");
             grid.into()
         }
         JobGrid::Frozen(e) => {
@@ -1791,8 +1794,29 @@ impl Sim {
         }
     }
 
+    /// Break fence cell `c` (open ground, 0 hp). The one way the grid
+    /// changes during a wave: jobs in flight first get a frozen copy of the
+    /// grid of their start tick, and the cell is recorded in their breaks.
+    fn break_fence_cell(&mut self, c: usize) {
+        self.freeze_job_grids();
+        self.grid.fence_hp[c] = 0.0;
+        self.grid.set_kind(c, WALK);
+        if self.chase_job {
+            self.chase_breaks.push(c as u32);
+        }
+        if self.threat_job != ThreatJob::Idle {
+            self.threat_breaks.push(c as u32);
+        }
+    }
+
+    /// Break fence cell `c` as a lost fight would, at any phase (tests and
+    /// tools; bypasses the stats). Never write `grid` directly mid-wave.
+    #[doc(hidden)]
+    pub fn debug_break_fence_cell(&mut self, c: usize) {
+        self.break_fence_cell(c);
+    }
+
     fn apply_fence_damage(&mut self) {
-        let mut broke = false;
         for k in 0..self.fence_touched.len() {
             let c = self.fence_touched[k] as usize;
             let dmg = self.fence_damage[c];
@@ -1802,22 +1826,11 @@ impl Sim {
             }
             self.grid.fence_hp[c] -= dmg;
             if self.grid.fence_hp[c] <= 0.0 {
-                self.grid.fence_hp[c] = 0.0;
-                if !broke {
-                    self.freeze_job_grids();
-                }
-                self.grid.set_kind(c, WALK);
-                if self.chase_job {
-                    self.chase_breaks.push(c as u32);
-                }
-                if self.threat_job != ThreatJob::Idle {
-                    self.threat_breaks.push(c as u32);
-                }
+                self.break_fence_cell(c);
                 self.stats.fence_cells_broken += 1;
                 if self.stats.first_breach_tick.is_none() {
                     self.stats.first_breach_tick = Some(self.tick);
                 }
-                broke = true;
             }
         }
         self.fence_touched.clear();

@@ -24,6 +24,9 @@ wasm-pack build crates/sim-wasm --release --target nodejs --out-dir pkg-node
 step "Running tests (native)"
 cargo test --release --workspace
 
+step "Running tests (native, release with debug assertions: the start-grid and other checks)"
+CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo test --release --workspace
+
 step "Running tests (WASM under Node: native = WASM hash)"
 wasm-pack test --node --release crates/sim-wasm
 

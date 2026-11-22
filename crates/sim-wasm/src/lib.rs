@@ -88,7 +88,8 @@ impl WasmSim {
     }
 
     /// [civilians, infected, zombies, dead, dormant, initial_civilians,
-    ///  zombies_killed, tick, towers_left, fence_left_m, first_breach_tick or -1]
+    ///  zombies_killed, tick, towers_left, fence_left_m, first_breach_tick or -1,
+    ///  fence_cells_broken]
     pub fn stats(&self) -> Vec<f64> {
         let s = &self.sim.stats;
         vec![
