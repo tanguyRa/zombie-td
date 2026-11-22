@@ -31,26 +31,42 @@
       <div class="brand">Zombie&nbsp;TD <span id="phase" class="phase">Loading</span></div>
       <button id="back" title="Back to the map">← Map</button>
       <span id="place" class="place"></span>
-      <label class="pop">Population <input id="pop" type="range" min="5000" max="100000" step="5000" value="20000" /> <span id="pop-label">20k</span></label>
-      <label>Seed <input id="seed" type="number" min="0" value="1" /></label>
+      <label title="Match seed: the same seed and the same actions give the same match">Seed <input id="seed" type="number" min="0" value="1" /></label>
       <div class="group">
-        <button id="start" class="primary">Start</button>
+        <button id="start" class="primary">Start wave</button>
         <button id="pause">Pause</button>
       </div>
       <div class="group seg" aria-label="Speed">
         <button id="speed-1">1×</button><button id="speed-2">2×</button><button id="speed-4">4×</button>
       </div>
-      <button id="reset">Reset</button>
+      <div class="group">
+        <button id="retry" title="Back to the start of this wave's prep (same outbreak, same draws)">Retry wave</button>
+        <button id="restart" title="Back to wave 1 with the same seed">Restart match</button>
+      </div>
       <span id="fallback" class="badge" hidden title="SharedArrayBuffer unavailable: positions are copied each tick">fallback mode</span>
     </header>
 
     <aside id="tools">
-      <h2>Setup</h2>
-      <button id="tool-pan" class="tool">Pan <kbd>Esc</kbd></button>
-      <button id="tool-tower" class="tool">Tower <span class="left" id="towers-left">–</span></button>
-      <button id="tool-fence" class="tool">Fence <span class="left" id="fence-left">–</span></button>
-      <div class="row"><button id="undo">Undo</button><button id="clear">Clear</button></div>
-      <p id="hint" class="hint"></p>
+      <h2 id="t-title">Prep</h2>
+      <p id="t-help" class="help"></p>
+      <button id="mulligan" title="Once per wave, before playing a card: draw a new hand">Mulligan</button>
+      <div id="targeting" hidden>
+        <div id="sel-name" class="sel-name"></div>
+        <p id="hint" class="hint"></p>
+        <div class="row">
+          <button id="sel-place" class="primary" hidden>Place</button>
+          <button id="sel-cancel">Cancel <kbd>Esc</kbd></button>
+        </div>
+      </div>
+      <div id="inspect" hidden>
+        <div id="i-name" class="sel-name"></div>
+        <p id="i-info" class="hint"></p>
+        <div class="row">
+          <button id="i-repair">Repair</button>
+          <button id="i-pull">Pull down</button>
+        </div>
+        <button id="i-close" class="small">Close</button>
+      </div>
       <h2>Debug</h2>
       <div class="seg small">
         <button id="field-none" class="on">No field</button><button id="field-chase">Chase</button><button id="field-flee">Flee</button>
@@ -60,30 +76,42 @@
     </aside>
 
     <aside id="hud">
-      <div class="big"><span id="h-time">0:00</span></div>
+      <div class="wave-line"><span class="big">Wave <span id="h-wave">–</span></span><span id="h-time" class="time">0:00</span></div>
+      <div class="saved" title="Civilians alive out of the wave's starting civilians; below the red line the wave is lost">
+        <div class="saved-head"><span>Saved</span><span id="h-saved">–</span></div>
+        <div class="bar"><div id="h-saved-bar" class="fill"></div><div id="h-line" class="line"></div></div>
+        <div class="saved-foot"><span id="h-line-label">lost below 15%</span></div>
+      </div>
+      <div class="fatigue" title="Civilians tire as the wave goes on: their speed falls (zombies never tire)">
+        <div class="saved-head"><span>Civilian stamina</span><span id="h-fatigue">–</span></div>
+        <div class="bar"><div id="h-fatigue-bar" class="fill fat"></div></div>
+      </div>
       <dl>
         <dt><i class="dot civ"></i>Civilians</dt><dd id="h-civ">–</dd>
         <dt><i class="dot inf"></i>Infected</dt><dd id="h-inf">–</dd>
         <dt><i class="dot zom"></i>Zombies</dt><dd id="h-zom">–</dd>
-        <dt><i class="dot dead"></i>Killed</dt><dd id="h-dead">–</dd>
-        <dt>Survival</dt><dd id="h-surv">–</dd>
+        <dt title="Zombies killed since the match started"><i class="dot dead"></i>Killed (match)</dt><dd id="h-dead">–</dd>
+        <dt>Supply</dt><dd id="h-supply" class="strong">–</dd>
+        <dt>Deck / discard</dt><dd id="h-deck">–</dd>
+        <dt>Retries</dt><dd id="h-retries">–</dd>
         <dt>Sim ms/tick <small>last / p95</small></dt><dd id="h-sim">–</dd>
         <dt>Render fps</dt><dd id="h-fps">–</dd>
-        <dt>Dormant</dt><dd id="h-dorm">–</dd>
       </dl>
     </aside>
 
+    <div id="hand" aria-label="Hand"></div>
+
     <div id="result" class="modal" hidden>
       <div class="card">
-        <h2 id="r-title">Game over</h2>
-        <dl>
-          <dt>Outcome</dt><dd id="r-outcome"></dd>
-          <dt>Survival</dt><dd id="r-surv"></dd>
-          <dt>Zombies killed</dt><dd id="r-killed"></dd>
-          <dt>Time</dt><dd id="r-time"></dd>
-        </dl>
+        <h2 id="r-title">Wave over</h2>
+        <p id="r-sub" class="r-sub"></p>
+        <dl id="r-stats"></dl>
+        <table id="r-waves" hidden></table>
         <div class="row">
-          <button id="replay" class="primary">Replay same seed</button>
+          <button id="r-next" class="primary">Next wave</button>
+          <button id="r-retry">Retry wave</button>
+          <button id="r-restart">Restart match</button>
+          <button id="r-download" class="primary">Download run record</button>
           <button id="r-map">New location</button>
           <button id="r-close">Close</button>
         </div>

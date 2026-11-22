@@ -11,11 +11,11 @@ const PORT = Number(process.env.PW_PORT ?? 5199);
 
 export default defineConfig({
   testDir: "./e2e",
-  // Default per-test budget; the smoke test sets its own (it plays a game).
+  // Default per-test budget; the full-match test sets its own (it plays 8 waves).
   timeout: 180_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
-  // The smoke test runs a whole game; three browsers at once on a laptop is
+  // The match test plays a whole match; three browsers at once on a laptop is
   // fine, more workers mostly add CPU contention.
   workers: 3,
   retries: 0,

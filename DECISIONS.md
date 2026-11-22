@@ -433,7 +433,8 @@ Every choice the spec left open, and every simplification, in one place.
   92,303 agents at wave 8 (1,266 in the core), under the 100k cap with room
   for denser places. The committed Marais (400 m) holds about 10.4k over
   the match. Difficulty (T7) scales `MatchSetup::population_multiplier`.
-- **Prep is cosmetic, as before:** civilians wander from their own stream
+- **Prep is cosmetic, as before:** (the browser no longer steps prep at all
+  since T5, see "Browser match (T5)") civilians wander from their own stream
   (`PREP_WANDER`), and Start puts everyone back where the prep began,
   zeroes velocities and reseeds `WANDER`. Kill flashes are cleared when a
   prep opens. So how long the player stays in prep never changes the game.
@@ -864,12 +865,14 @@ Every choice the spec left open, and every simplification, in one place.
   atomics). The worker copies positions and render states from WASM memory
   into the SharedArrayBuffer after each step (about 1 MB at 100k agents).
 - **Setup ticks run at 1×** regardless of the speed setting. Speed applies
-  while running.
-- **Commands** are applied by the worker between ticks, as soon as they
-  arrive. The worker is single-threaded, so that is the start of the next
-  tick.
-- **Replay same seed** re-creates the sim with the same level, population and
-  seed, re-applies the placement history and starts immediately.
+  while running. (Single-wave prototype; since T5 prep is not stepped at
+  all, see "Browser match (T5)".)
+- **Commands** are applied by the worker between ticks. Since T5 they are
+  queued and applied at the start of the worker's next loop turn, which is
+  a tick boundary.
+- **Replay same seed** (single-wave prototype, removed in T5) re-created the
+  sim with the same level, population and seed and re-applied the placement
+  history. The match has Retry wave / Restart match instead.
 - **Debug heatmaps** are refreshed once per second while enabled.
 
 ## Map screen and live levels
@@ -932,25 +935,31 @@ Every choice the spec left open, and every simplification, in one place.
   The port is `PW_PORT` (default 5199) and a running server is reused only
   with `PW_REUSE=1`: by default a busy port fails the run, so a leftover Vite
   or another worktree's server is never tested by mistake.
-- **The smoke test sizes its own timeout** from `max_game_seconds` in
-  `config.default.json`: the result-panel wait is `max_game_seconds / 4 × 1.5`
-  (a game that hits the time limit at 4×, plus slack for slow browsers), and
-  the test timeout adds the setup waits on top.
+- **The smoke test sized its own timeout** from `max_game_seconds` (T0;
+  the smoke test was replaced by the match tests in T5, which derive their
+  timeouts from their own waits: `OPEN_LEVEL_MS` in `e2e/ui.ts` plus the
+  play and verify budgets).
 - **Tests run offline.** A shared fixture (`web/e2e/offline.ts`) routes every
   request: the Vite server passes, the OpenFreeMap style URL gets a blank
   local style (`e2e/fixtures/style.json`, one background layer) so MapLibre
   still loads and fires its events, and everything else (tiles, Nominatim,
   Overpass, fonts) is aborted. The tests only use the built-in levels.
+  Since T5 the fixture's teardown checks, for every test, that each
+  non-local request was handled by the router (answered or aborted),
+  matched per `Request` object rather than per URL (the T0 smoke test
+  checked URLs, once, at its end, so a URL aborted once could hide a later
+  request to it that got through).
 - **Test hook behind `?test=1`.** `main.ts` imports `src/testhook.ts`
   dynamically only in test mode, so the normal page never loads or runs it.
   `window.__zt` exposes read-only snapshots (screen, phase, tick, stats,
   placements, level summary, state hash) and helpers that send exactly the
   worker messages the UI sends. The only protocol addition is a `hash`
   request/reply, answered by the worker with the current tick and hash.
-- **The smoke test clicks through the real UI** (preset chip, population
+  (Version 2 since T5, see "Browser match (T5)".)
+- **The smoke test clicked through the real UI** (preset chip, population
   slider, Tower/Fence tools, a click on a building, a drag for the fence,
-  Start, 4×) and uses the hook only to find screen positions and to assert.
-  It plays Le Vésinet at 5k agents, the quickest built-in game.
+  Start, 4×) and used the hook only to find screen positions and to assert.
+  It played Le Vésinet at 5k agents. T5 replaced it with the match tests.
 - **Chromium runs as full Chromium in new headless mode** (`channel:
   "chromium"`), not the default headless shell. With the shell, every input
   event waited about half a second on software-rendered frames and the smoke
@@ -972,6 +981,127 @@ Every choice the spec left open, and every simplification, in one place.
   build as the game and calls the existing `fixture_hash` export. No new
   WASM export was needed. It runs on the main thread; the worker uses the
   same module, so the engine and the result are the same.
+
+## Browser match (T5)
+
+- **The worker owns a `WasmMatch`** built with `Match::new` on the whole
+  level pack (the built-in levels and the live ones, as before; streaming
+  comes with T6b) and the starter deck (`setup` without `deck`; the deck
+  builder is T7b). The seed is sent as a decimal string.
+- **Protocol** (`web/src/protocol.ts`). To the worker: `init {levelJson,
+  setup {seed, deck?}, test?}`, `stop`, `action {id, action}`, `pause`,
+  `speed`, `pause_at {tick}` (test only), `query {id, query}` (`pick`
+  at a point, `fence_length` of a polyline, `agents` (test only)),
+  `record {id}`, `field`, `hash` (test only). From the worker: `ready
+  {level, shared}`, `geometry` (applied buildings, sent again when a reveal
+  adds some), `frame` (fallback mode), `status` (the `status_json` HUD
+  numbers and the clock: paused, speed, sim ms), `state` (hand,
+  structures, results, attempts), `placements` (shooters and fence cells
+  with their hp share), `action {id, action, error}`, `query`, `record`,
+  `error`, `field`, `hash`. Actions are JSON `Action`s (sim-core's serde
+  format) and refusals the `ActionError` JSON with its `message`.
+- **Actions apply at a tick boundary.** The worker queues them and applies
+  the queue at the start of its next loop turn, before stepping; the loop
+  is the only place that steps, so that is always between two ticks (as the
+  input log assumes: an action is logged with the match tick it was
+  applied before). The worker posts `state`, then `status`, then the
+  `action` replies, so whoever awaits an action (the UI, the test hook)
+  already has the state it produced.
+- **Prep is not stepped.** The worker steps the match only while a wave
+  runs: prep and the result screens are static, with no cosmetic wander.
+  `Match::step` in prep only moves the wander, which Start resets, so the
+  game is the same; but each prep tick is in the record's tick count, is
+  covered by the state hash and must be replayed at full cost (T4, "Prep
+  ticks are replayed"). Not stepping keeps run records short (every prep
+  is zero ticks: an attempt starts on the tick the previous one ended,
+  which the match test checks) and the server's replays cheap, however
+  long the player thinks in prep. It also matches `sim-headless match`,
+  which never steps prep. The cost is a frozen crowd during prep.
+- **Pause and speed never reach the sim.** They only decide how many ticks
+  the worker steps per 50 ms of wall time (1, 2 or 4; result screens and
+  prep step none). A test checks it: the same seed and actions run once
+  with button clicks at 1×, paused, then 4×, and once as fast as possible,
+  hash the same at the same wave tick.
+- **Test-only speeds:** with `?test=1` (the page sends `test: true` in
+  `init`; the worker refuses them otherwise) the speed may also be 16
+  ticks per 50 ms or 0, "as fast as possible": the worker steps for 40 ms
+  slices and yields between them so messages get through. `pause_at` makes
+  the worker pause itself on a given match tick, so a test can act at an
+  exact tick whatever the browser's speed. Both are clock controls: they
+  change when ticks run, never what a tick does.
+- **Triple-buffered rendering is unchanged**, but the slots now hold the
+  capacity (`max_population`, 100k: ~2.7 MB for the three slots) and a new
+  header field `H_COUNT` says how many agents are in play, since newcomers
+  join at each reveal. After any phase change (a reveal or a retry moves
+  everyone) the worker publishes twice so both interpolation slots agree.
+- **Targeting uses the core only.** Building clicks go through
+  `WasmMatch.building_at` (the clicked cell, never the old `Sim` polygon
+  fallback, DECISIONS "Run records"); valid armament targets are
+  highlighted from `WasmMatch.building_info` (added in T5, marshalling
+  only: centroid, area, floors, cell count and the centroid's wave), using
+  the core's rule (cells > 0, centroid wave ≤ current wave, not
+  garrisoned). The core still decides: a refused play shows its
+  `ActionError` message (with a card id replaced by the card's name; the
+  test hook gets the raw error). Fence drags ask the worker for the placed
+  length (`fence_length_m`) at most every 80 ms plus once after the last
+  move, and show it against the card's limit (from `cards.json`) and the
+  cost. Repair and pull-down: a click with no card selected asks the worker
+  for the structure within 3 m of the point (fence cells are 2 m, so a
+  click needn't hit the exact cell) or the garrison on the clicked
+  building, with its repair cost and refund.
+- **Fog** is drawn from `radius_m` and `next_radius_m`: the next ring gets
+  a light dark veil, everything past it a darker one. No agent can be in
+  the fog (cells outside the revealed disc are walls; a test checks it), so
+  nothing is filtered.
+- **Keep marks** are per card toggles that send the whole new list
+  (`keep_cards`); the core refuses a third. The UI cannot send an empty
+  explicit choice other than by unmarking (the core's "no choice" default
+  keeps the first two).
+- **"Total saved" on the match panel** is the civilians alive at the end of
+  wave 8 (survivors carry over from wave to wave, so summing the waves
+  would count people several times), with its share of wave 8's starting
+  civilians and a per-wave table.
+- **The run record** comes from `WasmMatch.record()` in the worker and is
+  saved with a Blob download named after the place and seed. It is
+  `abandoned` unless the match is won (T4's rule); only the match panel
+  offers it for now (the test hook can fetch it at any time).
+- **The single-wave UI is gone** (population slider, Tower/Fence tools and
+  their budgets, Undo/Clear, Replay same seed). `WasmSim` stays in
+  `sim-wasm` for the cross-browser fixture test.
+- **Test hook version 2** (`window.__zt`, `web/src/testhook.ts`): match
+  snapshots (screen, phase, tick, wave, supply, status, hand, structures,
+  results, attempts, towers, buildings, level, result panel, toast, hint,
+  selection, what the last frame drew), `record()`, `stateHash()`, action
+  helpers (`act`, `playCard`, `mulligan`, `keep`, `repair`, `pullDown`,
+  `startWave`, `nextWave`, `retryWave`, `restartMatch`) that go through the
+  same `act` function as the UI controls, read-only queries (`pick`,
+  `fenceLength`, `agents`, `zombies`), the clock (`pause`, `speed` with
+  the test-only 16 and 0, `pauseAt`), and screen helpers. `uiActions`
+  counts the actions the UI controls sent and keeps the last refusal, so a
+  test can wait for a click's outcome.
+- **The full-match test** (`web/e2e/match.spec.ts`) plays a scripted
+  scenario (`e2e/scenario.ts`) on the Marais with seed 2: wave 1 lost with
+  no defence and retried, a mulligan in wave 2, keep choices every wave,
+  one armament by building clicks, one fence by a drag pulled down again
+  by a click on it, the first tactical card by a click on the map, and a
+  bot (`e2e/bot.ts`, a TypeScript port of `sim-headless match`'s
+  strategy) for the rest. While a tactical card is playable it pauses on
+  every 40th wave tick (`pause_at`), like the Node check, so the browser
+  plays exactly the same actions on the same ticks as `node
+  e2e/bot-check.mts 2` (8,463 ticks, 9 attempts, 69 actions in Chromium,
+  Firefox and WebKit alike; UI clicks map to the same building indices,
+  the pulled-down fence leaves no trace, and the tactical click's few
+  centimetres of pixel rounding did not change the outcome). Seed 2 was
+  picked among 1–10 for being quick and having both a pull-down and a
+  repair. The record is downloaded with the panel's button and verified
+  by the native `sim-headless verify` (`cargo run --release`, so it is
+  rebuilt if needed); every attempt's end hash must equal the browser's
+  (`attempts`), and the final hash the browser's state hash. Native
+  rather than Node WASM: it needs no `pkg-node` build and checks the
+  cross-platform claim (browser WASM = native) directly.
+- **Losing wave 1 takes ~3,400 ticks** (no defence until the 15% line),
+  about 40% of the test's ticks. A faster loss isn't available without
+  changing the rules, and it runs at test speed.
 
 ## Map blocks (T6a)
 

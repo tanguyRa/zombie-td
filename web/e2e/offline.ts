@@ -1,9 +1,10 @@
 // Shared Playwright fixture and helpers. Every test runs offline. Requests to the Vite
 // server go through; the street-map style gets a blank local style (so
 // MapLibre still loads and fires its events); everything else (tiles, fonts,
-// Overpass, Nominatim, …) is aborted. Every request URL and every aborted URL
-// are recorded per test.
-import { test as base, expect, type Page } from "@playwright/test";
+// Overpass, Nominatim, …) is aborted. Every request and every request the
+// router handled are recorded per test, and the fixture's teardown fails the
+// test if any non-local request was neither answered locally nor aborted.
+import { test as base, expect, type Page, type Request } from "@playwright/test";
 import type { TestHook } from "../src/testhook";
 import blankStyle from "./fixtures/style.json" with { type: "json" };
 
@@ -19,7 +20,7 @@ export function isLocal(url: string, local: string): boolean {
   }
 }
 
-export const test = base.extend<{ blocked: string[]; requests: string[]; local: string }>({
+export const test = base.extend<{ blocked: string[]; requests: Request[]; local: string }>({
   blocked: async ({}, use) => {
     await use([]);
   },
@@ -30,10 +31,16 @@ export const test = base.extend<{ blocked: string[]; requests: string[]; local: 
     await use(new URL(baseURL!).origin);
   },
   context: async ({ context, local, blocked, requests }, use) => {
-    context.on("request", (req) => requests.push(req.url()));
+    // Requests the router answered locally or aborted (the same Request
+    // objects as the context's "request" events): matched per request, so
+    // a URL blocked once can't hide a later request to it that got out.
+    const handled = new Set<Request>();
+    context.on("request", (req) => requests.push(req));
     await context.route("**/*", (route) => {
-      const url = route.request().url();
+      const req = route.request();
+      const url = req.url();
       if (isLocal(url, local)) return route.continue();
+      handled.add(req);
       if (MAP_STYLE.test(url)) {
         return route.fulfill({
           status: 200,
@@ -46,6 +53,9 @@ export const test = base.extend<{ blocked: string[]; requests: string[]; local: 
       return route.abort("internetdisconnected");
     });
     await use(context);
+    // Teardown, for every test: nothing outside the local server got through.
+    const leaked = requests.filter((r) => !isLocal(r.url(), local) && !handled.has(r)).map((r) => r.url());
+    expect(leaked, "requests that left the test machine").toEqual([]);
   },
 });
 
@@ -59,6 +69,11 @@ declare global {
 
 /** Runs `f(window.__zt)` in the page (`/?test=1`). The function is serialised,
  *  so it can only use its argument. */
-export function hook<T>(page: Page, f: (h: TestHook) => T): Promise<T> {
-  return page.evaluate(`(${f.toString()})(window.__zt)`) as Promise<T>;
+export function hook<T>(page: Page, f: (h: TestHook) => T): Promise<Awaited<T>> {
+  return page.evaluate(`(${f.toString()})(window.__zt)`) as Promise<Awaited<T>>;
+}
+
+/** Like `hook`, with one serialisable argument: `f(window.__zt, arg)`. */
+export function hookWith<A, T>(page: Page, f: (h: TestHook, a: A) => T, arg: A): Promise<Awaited<T>> {
+  return page.evaluate(({ src, arg }) => new Function("h", "a", `return (${src})(h, a)`)(window.__zt, arg), { src: f.toString(), arg }) as Promise<Awaited<T>>;
 }

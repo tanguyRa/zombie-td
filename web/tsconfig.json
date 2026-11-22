@@ -9,7 +9,8 @@
     "noEmit": true,
     "types": ["vite/client"],
     "resolveJsonModule": true,
-    "allowJs": true
+    "allowJs": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "e2e", "playwright.config.ts"]
 }

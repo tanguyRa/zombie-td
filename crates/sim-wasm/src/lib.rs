@@ -515,6 +515,31 @@ impl WasmMatch {
     pub fn building_centroids(&self) -> Vec<f32> {
         self.m.sim().grid.buildings.iter().flat_map(|b| b.centroid).collect()
     }
+    /// Per applied building, `[centroid x, centroid y, area m², floors,
+    /// cell count, wave of the centroid]` (6 numbers each): what the UI needs
+    /// to highlight garrison targets (`cell_count > 0` and the wave at most
+    /// the current one, the core's `not_revealed` rule). Marshalling only.
+    pub fn building_info(&self) -> Vec<f32> {
+        let m = &self.m;
+        m.sim()
+            .grid
+            .buildings
+            .iter()
+            .flat_map(|b| [b.centroid[0], b.centroid[1], b.area_m2, b.floors, b.cell_count as f32, m.wave_of_point(b.centroid[0], b.centroid[1]) as f32])
+            .collect()
+    }
+    /// Debug views (copies): the chase and flee fields and the spatial-hash
+    /// dimensions `[w, h, bucket m]`.
+    pub fn chase_field(&self) -> Vec<i32> {
+        self.m.sim().chase.clone()
+    }
+    pub fn flee_field(&self) -> Vec<i32> {
+        self.m.sim().flee.clone()
+    }
+    pub fn hash_dims(&self) -> Vec<f32> {
+        let s = self.m.sim();
+        vec![s.hash_w as f32, s.hash_h as f32, s.cfg.hash_bucket_m]
+    }
     /// Fence cells as [x, y, hp] triples (cell centres, hp in points).
     pub fn fences(&self) -> Vec<f32> {
         let g = &self.m.sim().grid;

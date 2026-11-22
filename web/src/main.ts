@@ -1,24 +1,37 @@
-// Main thread: renders the level and agents with deck.gl on top of the street
-// map, handles input and UI.
-// All game logic runs in the worker (WASM sim-core).
+// Main thread: renders the match with deck.gl on top of the street map,
+// handles input and UI. All game logic runs in the worker (WASM sim-core
+// `Match`); the page only sends `Action`s and draws what comes back.
 import { COORDINATE_SYSTEM } from "@deck.gl/core";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { BitmapLayer, LineLayer, PathLayer, PolygonLayer, ScatterplotLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import parisUrl from "../../levels/paris-marais.json?url";
 import suburbUrl from "../../levels/suburb.json?url";
+import cardsJson from "../../cards.json?raw";
 import { Place, createExplore } from "./explore";
 import { generateLevel } from "./levelgen";
 import {
+  Action,
+  ActionError,
   FromWorker,
+  Geometry,
+  H_COUNT,
   H_INTERVAL,
   H_LATEST,
   H_SEQ,
   H_TIME,
-  Placement,
+  HandCard,
+  MatchStatus,
+  Perf,
+  Pick,
+  Query,
+  QueryResult,
   SLOTS,
   StaticLevel,
-  Stats,
+  Structure,
+  Target,
   ToWorker,
+  WaveAttempt,
+  WaveResult,
   headerViews,
   nowAbs,
   slotViews,
@@ -30,6 +43,17 @@ const PRESETS: Place[] = [
   { name: "Paris — Le Marais", lat: 48.858, lon: 2.358, presetUrl: parisUrl },
   { name: "Le Vésinet (suburb)", lat: 48.8935, lon: 2.133, presetUrl: suburbUrl },
 ];
+
+// Card texts and limits for the hand and the targeting hints (the rules
+// themselves are checked by the core).
+interface CardDef {
+  id: string;
+  name: string;
+  text: string;
+  kind: string;
+  effect: { type: string; buildings?: number; length_m?: number };
+}
+const CARDS = new Map<string, CardDef>((JSON.parse(cardsJson).cards as CardDef[]).map((c) => [c.id, c]));
 
 // Agent colours (RGBA) indexed by render state: civilian, infected, zombie,
 // corpse, hidden, fresh kill (flashes for kill_flash_seconds, then corpse).
@@ -47,6 +71,13 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 // ---------------------------------------------------------------- state
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
 const send = (m: ToWorker) => worker.postMessage(m);
+// A crash in the worker stops the match: say so instead of freezing.
+worker.addEventListener("error", (e) => {
+  console.error("sim worker error:", e.message);
+  prepError(`The simulation stopped: ${e.message}`);
+});
+
+const TEST_MODE = new URLSearchParams(location.search).get("test") === "1";
 
 let level: StaticLevel | null = null;
 let currentPlace: Place | null = null;
@@ -54,21 +85,44 @@ let currentLevelJson = "";
 const levelCache = new Map<string, string>();
 let prepAbort: AbortController | null = null;
 let shared: SharedArrayBuffer | null = null;
-let n = 0;
-let stats: Stats | null = null;
-let history: Placement[] = [];
+let status: MatchStatus | null = null;
+let perf: Perf | null = null;
+let hand: HandCard[] = [];
+let structures: Structure[] = [];
+let results: WaveResult[] = [];
+let attempts: WaveAttempt[] = [];
 type F32 = Float32Array<ArrayBufferLike>;
 type U8 = Uint8Array<ArrayBufferLike>;
 let towers: F32 = new Float32Array(0);
 let fences: F32 = new Float32Array(0);
-let buildings: { polygon: number[][]; index: number }[] = [];
-let tool: "pan" | "tower" | "fence" = "pan";
-let fenceDraft: number[][] | null = null;
+interface Bld {
+  polygon: number[][];
+  index: number;
+  x: number;
+  y: number;
+  area: number;
+  floors: number;
+  cells: number;
+  wave: number;
+}
+let buildings: Bld[] = [];
 let fieldKind: "none" | "chase" | "flee" = "none";
 let fieldImage: HTMLCanvasElement | null = null;
 let showHash = false;
-let autoStartAfterReady = false;
 let fitted = false;
+let lastToast = "";
+
+// Targeting: the selected hand card and what has been picked for it so far.
+interface Selection {
+  handIndex: number;
+  card: HandCard;
+  picked: number[]; // buildings
+  draft: number[][] | null; // polyline being dragged
+  draftInfo: { length: number | null; error: string | null } | null;
+}
+let sel: Selection | null = null;
+// A structure being inspected (repair / pull down).
+let inspected: { id: number; pick: Pick } | null = null;
 
 // Interpolation buffers (alternated so deck.gl sees a new array each frame).
 let posBufs: F32[] = [new Float32Array(0), new Float32Array(0)];
@@ -76,10 +130,70 @@ let colBufs: U8[] = [new Uint8Array(0), new Uint8Array(0)];
 let posFlip = 0;
 let colFlip = 0;
 let lastSeq = -1;
+let n = 0;
 // Fallback (no SharedArrayBuffer): the last two frames from the worker.
-let fbPrev: { pos: F32; render: U8; time: number } | null = null;
-let fbCur: { pos: F32; render: U8; time: number } | null = null;
+let fbPrev: { pos: F32; render: U8; time: number; count: number } | null = null;
+let fbCur: { pos: F32; render: U8; time: number; count: number } | null = null;
 let fbSeq = 0;
+
+// ---------------------------------------------------------------- worker requests
+let nextId = 1;
+const pendingActions = new Map<number, (e: ActionError | null) => void>();
+const pendingQueries = new Map<number, (r: QueryResult) => void>();
+const pendingRecords = new Map<number, (json: string) => void>();
+
+/** Send an action; resolves with the core's refusal or null once applied.
+ *  Every UI control and every test-hook helper goes through here. */
+function act(action: Action): Promise<ActionError | null> {
+  const id = nextId++;
+  return new Promise((resolve) => {
+    pendingActions.set(id, resolve);
+    send({ type: "action", id, action });
+  });
+}
+
+function query(q: Query): Promise<QueryResult> {
+  const id = nextId++;
+  return new Promise((resolve) => {
+    pendingQueries.set(id, resolve);
+    send({ type: "query", id, query: q });
+  });
+}
+/** What is at a map point (building, structure, costs): read-only. */
+const pickAt = async (x: number, y: number) => ((await query({ q: "pick", x, y })) as Extract<QueryResult, { q: "pick" }>).pick;
+/** Placed length of a polyline, or why it can't be placed. */
+const fenceLength = async (pts: number[]) => (await query({ q: "fence_length", pts })) as Extract<QueryResult, { q: "fence_length" }>;
+
+function fetchRecord(): Promise<string> {
+  const id = nextId++;
+  return new Promise((resolve) => {
+    pendingRecords.set(id, resolve);
+    send({ type: "record", id });
+  });
+}
+
+/** Play an action from the UI: a refusal is shown with the core's message. */
+// The last action a UI control sent and how it ended (read by the test hook
+// to wait for a click's outcome).
+const uiActions = { count: 0, type: "", error: null as ActionError | null };
+/** The core's message, with a card id (some errors name the card by id)
+ *  replaced by the card's name. */
+function errorText(e: ActionError): string {
+  const id = typeof e.card === "string" ? e.card : null;
+  const def = id ? CARDS.get(id) : undefined;
+  return def && e.message.startsWith(`${id} `) ? def.name + e.message.slice(id!.length) : e.message;
+}
+async function uiAct(action: Action): Promise<ActionError | null> {
+  let e = await act(action);
+  if (e) {
+    e = { ...e, message: errorText(e) };
+    toast(e.message);
+  }
+  uiActions.count++;
+  uiActions.type = action.type;
+  uiActions.error = e;
+  return e;
+}
 
 // ---------------------------------------------------------------- map + deck overlay
 // The street map from the map screen stays on screen; deck.gl draws the game
@@ -118,9 +232,15 @@ function toSim(ll: { lng: number; lat: number }): number[] | null {
   return [(ll.lng - geo.lon0) * geo.kx + level.center[0], (ll.lat - geo.lat0) * geo.ky + level.center[1]];
 }
 
+function toLngLat(x: number, y: number): { lng: number; lat: number } | null {
+  if (!geo || !level) return null;
+  return { lng: geo.lon0 + (x - level.center[0]) / geo.kx, lat: geo.lat0 + (y - level.center[1]) / geo.ky };
+}
+
+/** Frame the revealed disc and the next ring. */
 function fitView(animate = true) {
   if (!geo) return;
-  const r = level?.radius ?? 400;
+  const r = status ? Math.min(status.next_radius_m, status.radius_m * 1.25) : (level?.rings[0] ?? 400);
   const dlon = r / geo.kx;
   const dlat = r / geo.ky;
   map.fitBounds(
@@ -128,44 +248,47 @@ function fitView(animate = true) {
       [geo.lon0 - dlon, geo.lat0 - dlat],
       [geo.lon0 + dlon, geo.lat0 + dlat],
     ],
-    { padding: { top: 68, bottom: 16, left: 228, right: 264 }, duration: animate ? 1200 : 0 },
+    { padding: { top: 68, bottom: 150, left: 228, right: 264 }, duration: animate ? 1200 : 0 },
   );
-}
-
-function toLngLat(x: number, y: number): { lng: number; lat: number } | null {
-  if (!geo || !level) return null;
-  return { lng: geo.lon0 + (x - level.center[0]) / geo.kx, lat: geo.lat0 + (y - level.center[1]) / geo.ky };
 }
 
 // Test hook (`?test=1`): loaded on demand so the normal page never runs it.
 // See testhook.ts for the `window.__zt` API.
-const TEST_MODE = new URLSearchParams(location.search).get("test") === "1";
 let testTap: ((m: FromWorker) => boolean) | null = null;
 if (TEST_MODE) {
   void import("./testhook").then(({ installTestHook }) => {
     testTap = installTestHook({
       send,
+      act,
+      query,
+      record: fetchRecord,
       map,
       overlay,
       presets: PRESETS.map((p) => p.name),
       screen: () => document.body.dataset.screen ?? "",
-      stats: () => stats,
+      status: () => status,
+      perf: () => perf,
+      hand: () => hand,
+      structures: () => structures,
+      results: () => results,
+      attempts: () => attempts,
+      towers: () => towers,
       level: () => level,
       placeName: () => currentPlace?.name ?? null,
-      history: () => history,
       buildings: () => buildings,
-      resultVisible: () => !$("result").hidden,
+      result: () => ($("result").hidden ? null : ($("result").dataset.kind ?? null)),
+      toast: () => lastToast,
+      uiActions: () => ({ ...uiActions }),
+      drawn: () => structuredClone(drawn),
+      hint: () => $("hint").textContent ?? "",
+      selection: () => (sel ? { handIndex: sel.handIndex, card: sel.card.card, picked: [...sel.picked] } : null),
       toSim,
       toLngLat,
       enterPreset: (i) => enterGame(PRESETS[i]),
-      setup: (population, seed) => {
-        ($("pop") as HTMLInputElement).value = String(population);
+      newMatch: (seed) => {
         ($("seed") as HTMLInputElement).value = String(seed);
-        popLabel();
-        reset();
+        newMatch();
       },
-      reset: () => reset(),
-      replay: () => $("replay").click(),
     });
   });
 } else if (import.meta.env.DEV) {
@@ -173,54 +296,243 @@ if (TEST_MODE) {
 }
 
 const inGame = () => document.body.dataset.screen === "game";
+const phase = () => status?.phase ?? null;
 
+// ---------------------------------------------------------------- input
 map.on("click", (e) => {
-  if (!inGame() || tool !== "tower" || stats?.phase !== 0) return;
-  const p = toSim(e.lngLat);
-  if (p) send({ type: "tower", x: p[0], y: p[1] });
-});
-
-// Fence drawing: click-drag while the Fence tool is active (map panning is
-// disabled meanwhile, see setTool).
-map.on("mousedown", (e) => {
-  if (!inGame() || tool !== "fence" || stats?.phase !== 0 || e.originalEvent.button !== 0) return;
+  if (!inGame() || !status) return;
   const p = toSim(e.lngLat);
   if (!p) return;
-  fenceDraft = [p];
-  updateFenceHint();
+  void onMapClick(p[0], p[1]);
+});
+
+async function onMapClick(x: number, y: number) {
+  if (sel) {
+    const c = sel.card;
+    if (c.target === "point") {
+      const hi = sel.handIndex;
+      clearSelection();
+      await uiAct({ type: "play_card", hand_index: hi, target: { point: [x, y] } });
+    } else if (c.target === "buildings") {
+      const pick = await pickAt(x, y);
+      if (!sel || sel.card.target !== "buildings") return;
+      if (pick.building < 0) {
+        setHint("Click a building (inside the revealed area)");
+        return;
+      }
+      const i = sel.picked.indexOf(pick.building);
+      if (i >= 0) sel.picked.splice(i, 1);
+      else sel.picked.push(pick.building);
+      const max = CARDS.get(c.card)?.effect.buildings ?? 1;
+      if (sel.picked.length >= max) await playSelection();
+      else updateTargeting();
+    }
+    return;
+  }
+  // No card selected: inspect a structure (repair / pull down).
+  const pick = await pickAt(x, y);
+  if (pick.structure >= 0) {
+    inspected = { id: pick.structure, pick };
+  } else inspected = null;
+  updateInspect();
+}
+
+async function playSelection() {
+  if (!sel) return;
+  const s = sel;
+  let target: Target;
+  if (s.card.target === "buildings") target = { buildings: [...s.picked] };
+  else if (s.card.target === "polyline" && s.draft) target = { polyline: s.draft.map((p) => [p[0], p[1]] as [number, number]) };
+  else return;
+  clearSelection();
+  await uiAct({ type: "play_card", hand_index: s.handIndex, target });
+}
+
+// Line drag for polyline cards (fortifications, convoy routes): map panning
+// is disabled while such a card is selected.
+let lastLengthQuery = 0;
+let trailingMeasure = 0;
+map.on("mousedown", (e) => {
+  if (!inGame() || !sel || sel.card.target !== "polyline" || e.originalEvent.button !== 0) return;
+  const p = toSim(e.lngLat);
+  if (!p) return;
+  sel.draft = [p];
+  sel.draftInfo = null;
+  updateTargeting();
 });
 map.on("mousemove", (e) => {
-  if (!fenceDraft) return;
+  if (!sel?.draft) return;
   const p = toSim(e.lngLat);
   if (!p) return;
-  const last = fenceDraft[fenceDraft.length - 1];
-  if (Math.hypot(p[0] - last[0], p[1] - last[1]) >= 2) fenceDraft.push(p);
-  updateFenceHint();
+  const last = sel.draft[sel.draft.length - 1];
+  if (Math.hypot(p[0] - last[0], p[1] - last[1]) >= 2) sel.draft.push(p);
+  // Ask the core for the placed length at most every 80 ms, plus once
+  // after the last move, so the hint always ends on the whole line.
+  const now = performance.now();
+  clearTimeout(trailingMeasure);
+  if (now - lastLengthQuery > 80 && sel.draft.length >= 2) {
+    lastLengthQuery = now;
+    void measureDraft();
+  } else trailingMeasure = window.setTimeout(() => void measureDraft(), 100);
+  updateTargeting();
 });
 window.addEventListener("mouseup", () => {
-  if (!fenceDraft) return;
-  if (fenceDraft.length >= 2) send({ type: "fence", pts: fenceDraft.flat() });
-  fenceDraft = null;
-  updateFenceHint();
+  if (!sel?.draft) return;
+  if (sel.draft.length >= 2) void playSelection();
+  else {
+    sel.draft = null;
+    updateTargeting();
+  }
 });
 
-function draftLength(): number {
-  if (!fenceDraft) return 0;
+async function measureDraft() {
+  const s = sel;
+  if (!s?.draft) return;
+  const points = s.draft.length;
+  const r = await fenceLength(s.draft.flat());
+  if (sel === s && s.draft && s.draft.length === points) {
+    s.draftInfo = { length: r.length, error: r.error };
+    updateTargeting();
+  }
+}
+
+function drawnLength(d: number[][] | null): number {
+  if (!d) return 0;
   let l = 0;
-  for (let i = 1; i < fenceDraft.length; i++) l += Math.hypot(fenceDraft[i][0] - fenceDraft[i - 1][0], fenceDraft[i][1] - fenceDraft[i - 1][1]);
+  for (let i = 1; i < d.length; i++) l += Math.hypot(d[i][0] - d[i - 1][0], d[i][1] - d[i - 1][1]);
   return l;
 }
 
-function updateFenceHint() {
+function selectCard(i: number) {
+  const c = hand[i];
+  if (!c) return;
+  if (sel?.handIndex === i) {
+    clearSelection();
+    return;
+  }
+  inspected = null;
+  updateInspect();
+  sel = { handIndex: i, card: c, picked: [], draft: null, draftInfo: null };
+  if (c.target === "polyline") map.dragPan.disable();
+  else map.dragPan.enable();
+  map.getCanvas().style.cursor = c.target === "polyline" ? "crosshair" : "pointer";
+  updateTargeting();
+  renderHand();
+}
+
+function clearSelection() {
+  sel = null;
+  map.dragPan.enable();
+  map.getCanvas().style.cursor = "";
+  updateTargeting();
+  renderHand();
+}
+
+function setHint(t: string, over = false) {
   const h = $("hint");
-  if (fenceDraft) {
-    const l = draftLength();
-    const left = stats?.fenceLeft ?? 0;
-    h.textContent = `Fence ${l.toFixed(0)} m / ${left.toFixed(0)} m left`;
-    h.classList.toggle("over", l > left);
+  h.textContent = t;
+  h.classList.toggle("over", over);
+}
+
+function updateTargeting() {
+  $("targeting").hidden = !sel;
+  if (!sel) return;
+  const c = sel.card;
+  const def = CARDS.get(c.card);
+  $("sel-name").textContent = `${c.name} · ${c.cost} supply`;
+  const place = $("sel-place") as HTMLButtonElement;
+  place.hidden = c.target !== "buildings";
+  if (c.target === "buildings") {
+    const max = def?.effect.buildings ?? 1;
+    setHint(`Click up to ${max} highlighted building${max > 1 ? "s" : ""} (${sel.picked.length}/${max})`);
+    place.textContent = `Place (${sel.picked.length}/${max})`;
+    place.disabled = sel.picked.length === 0;
+  } else if (c.target === "polyline") {
+    const limit = def?.effect.length_m;
+    if (!sel.draft) setHint(limit ? `Drag a line on open ground (up to ${limit} m)` : "Drag the route");
+    else {
+      const info = sel.draftInfo;
+      if (info?.error) setHint(info.error, true);
+      else {
+        const placed = info?.length ?? null;
+        const shown = placed !== null ? `${placed.toFixed(0)} m placed` : `${drawnLength(sel.draft).toFixed(0)} m drawn`;
+        setHint(`${shown}${limit ? ` / ${limit} m` : ""} · cost ${c.cost}`, !!limit && placed !== null && placed > limit);
+      }
+    }
   } else {
-    h.textContent = tool === "tower" ? "Click a building to garrison it" : tool === "fence" ? "Drag on open ground to draw a fence" : "";
-    h.classList.remove("over");
+    setHint(c.kind === "tactical" ? "Click a point in the revealed area (during the wave)" : "Click a point");
+  }
+}
+
+function updateInspect() {
+  $("inspect").hidden = !inspected;
+  if (!inspected) return;
+  const s = structures.find((x) => x.id === inspected!.id);
+  if (!s) {
+    inspected = null;
+    $("inspect").hidden = true;
+    return;
+  }
+  const name = CARDS.get(s.card)?.name ?? s.card;
+  const prep = phase() === "prep";
+  const { repairCost, refund } = inspected.pick;
+  $("i-name").textContent = `${name} (wave ${s.wave})`;
+  const what = s.kind.type === "fence" ? `${s.kind.length_m.toFixed(0)} m of fence` : `${s.kind.buildings.length} building${s.kind.buildings.length > 1 ? "s" : ""}`;
+  $("i-info").textContent = prep ? what : `${what} · repair and pull-down in prep only`;
+  const rep = $("i-repair") as HTMLButtonElement;
+  rep.hidden = s.kind.type !== "fence";
+  rep.textContent = repairCost >= 0 ? `Repair (${repairCost} supply)` : "Repair (intact)";
+  rep.disabled = !prep || repairCost < 0;
+  const pull = $("i-pull") as HTMLButtonElement;
+  pull.textContent = `Pull down (+${Math.max(0, refund)} supply)`;
+  pull.disabled = !prep || refund < 0;
+}
+
+async function refreshInspect() {
+  if (!inspected) return;
+  // Costs change with damage and phase: ask again for the same spot's numbers.
+  const s = structures.find((x) => x.id === inspected!.id);
+  if (!s) {
+    inspected = null;
+    updateInspect();
+    return;
+  }
+  updateInspect();
+}
+
+// ---------------------------------------------------------------- hand
+function renderHand() {
+  const el = $("hand");
+  el.replaceChildren();
+  for (const c of hand) {
+    const def = CARDS.get(c.card);
+    const b = document.createElement("div");
+    b.className = `hcard rarity-${c.rarity}${c.playable ? "" : " unplayable"}${sel?.handIndex === c.hand_index ? " selected" : ""}`;
+    b.dataset.card = c.card;
+    b.dataset.index = String(c.hand_index);
+    b.setAttribute("role", "button");
+    b.setAttribute("aria-label", `${c.name}, ${c.kind}, cost ${c.cost}`);
+    b.tabIndex = 0;
+    const kindLabel = c.kind === "tactical" ? "tactical · wave" : `${c.kind} · prep`;
+    b.innerHTML = `<span class="c-cost"></span><span class="c-name"></span><span class="c-kind"></span><span class="c-rarity"></span><span class="c-text"></span>`;
+    (b.querySelector(".c-cost") as HTMLElement).textContent = String(c.cost);
+    (b.querySelector(".c-name") as HTMLElement).textContent = c.name;
+    (b.querySelector(".c-kind") as HTMLElement).textContent = kindLabel;
+    (b.querySelector(".c-rarity") as HTMLElement).textContent = c.rarity;
+    (b.querySelector(".c-text") as HTMLElement).textContent = def?.text ?? "";
+    b.addEventListener("click", () => selectCard(c.hand_index));
+    const keep = document.createElement("button");
+    keep.className = `c-keep${c.keep ? " on" : ""}`;
+    keep.textContent = c.keep ? "Kept for next wave" : "Keep";
+    keep.title = "Keep this card for the next wave (up to 2); the others are discarded";
+    keep.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const kept = hand.filter((h) => h.keep).map((h) => h.hand_index);
+      const next = c.keep ? kept.filter((k) => k !== c.hand_index) : [...kept, c.hand_index];
+      void uiAct({ type: "keep_cards", hand_indices: next });
+    });
+    b.appendChild(keep);
+    el.appendChild(b);
   }
 }
 
@@ -228,7 +540,7 @@ function updateFenceHint() {
 function fenceColor(hp: number): [number, number, number, number] {
   // Intact fences are near-black (readable on the light map), red when nearly broken.
   const t = Math.max(0, Math.min(1, hp));
-  return [Math.round(230 - 190 * t), Math.round(40 + 0 * t), Math.round(40 + 12 * t), 255];
+  return [Math.round(230 - 190 * t), 40, Math.round(40 + 12 * t), 255];
 }
 
 function buildFieldImage(data: Int32Array, w: number, h: number): HTMLCanvasElement {
@@ -249,7 +561,6 @@ function buildFieldImage(data: Int32Array, w: number, h: number): HTMLCanvasElem
       const o = ((h - 1 - y) * w + x) * 4; // canvas row 0 = top = highest y
       if (v >= INF) continue;
       const t = Math.max(0, Math.min(1, (v - lo) / Math.max(1, hi - lo)));
-      // Single-hue sequential ramp: near = dark violet, far = light.
       img.data[o] = 40 + 200 * t;
       img.data[o + 1] = 20 + 180 * t;
       img.data[o + 2] = 120 + 120 * t;
@@ -272,9 +583,10 @@ function frame() {
     fps = (frames * 1000) / (now - fpsT);
     frames = 0;
     fpsT = now;
-    updateHud();
+    $("h-fps").textContent = fps.toFixed(0);
+    if (fieldKind !== "none" && phase() === "running") send({ type: "field", kind: fieldKind });
   }
-  if (!level || n === 0) return;
+  if (!level) return;
 
   // Pick the two latest snapshots and the interpolation factor.
   let prev: F32, cur: F32, render: U8, seq: number, alpha: number;
@@ -282,22 +594,24 @@ function frame() {
     const h = headerViews(shared);
     const latest = Atomics.load(h.i32, H_LATEST);
     seq = Atomics.load(h.i32, H_SEQ);
-    const a = slotViews(shared, n, (latest + SLOTS - 1) % SLOTS);
-    const b = slotViews(shared, n, latest);
+    n = Atomics.load(h.i32, H_COUNT);
+    const a = slotViews(shared, level.capacity, (latest + SLOTS - 1) % SLOTS);
+    const b = slotViews(shared, level.capacity, latest);
     prev = a.pos;
     cur = b.pos;
     render = b.render;
     alpha = (nowAbs() - h.f64[H_TIME]) / Math.max(1, h.f64[H_INTERVAL]);
   } else {
     if (!fbCur) return;
-    prev = (fbPrev ?? fbCur).pos;
+    n = fbCur.count;
+    prev = fbPrev && fbPrev.count >= n ? fbPrev.pos : fbCur.pos;
     cur = fbCur.pos;
     render = fbCur.render;
     seq = fbSeq;
     const interval = fbPrev ? Math.max(1, fbCur.time - fbPrev.time) : 50;
     alpha = (nowAbs() - fbCur.time) / interval;
   }
-  if (stats && (stats.paused || stats.phase >= 2)) alpha = 1;
+  if (perf?.paused || phase() !== "running") alpha = 1;
   alpha = Math.max(0, Math.min(1, alpha));
 
   posFlip ^= 1;
@@ -317,32 +631,40 @@ function frame() {
       col[o + 3] = c[3];
     }
   }
-  render_layers(pos, colBufs[colFlip]);
+  renderLayers(pos, colBufs[colFlip]);
 }
 
 // Layer data derived from placements, rebuilt only when the arrays change so
 // deck.gl doesn't re-process unchanged layers every frame.
-let pdCache: { t: F32 | null; f: F32 | null; garrisonData: typeof buildings; towerData: { x: number; y: number }[]; fenceData: { x: number; y: number; hp: number }[] } = {
+type Pt = { x: number; y: number };
+let pdCache: { t: F32 | null; f: F32 | null; s: Structure[] | null; garrisonData: Bld[]; towerData: (Pt & { r: number })[]; unitData: Pt[]; fenceData: (Pt & { hp: number })[] } = {
   t: null,
   f: null,
+  s: null,
   garrisonData: [],
   towerData: [],
+  unitData: [],
   fenceData: [],
 };
 function placementData() {
-  if (pdCache.t !== towers) {
+  if (pdCache.t !== towers || pdCache.s !== structures) {
     const garrisoned = new Set<number>();
-    const towerData: { x: number; y: number }[] = [];
+    const towerData: (Pt & { r: number })[] = [];
+    const unitData: Pt[] = [];
     for (let i = 0; i < towers.length; i += 5) {
-      garrisoned.add(towers[i]);
-      towerData.push({ x: towers[i + 1], y: towers[i + 2] });
+      if (towers[i] >= 0) {
+        garrisoned.add(towers[i]);
+        towerData.push({ x: towers[i + 1], y: towers[i + 2], r: towers[i + 3] });
+      } else unitData.push({ x: towers[i + 1], y: towers[i + 2] });
     }
     pdCache.t = towers;
+    pdCache.s = structures;
     pdCache.towerData = towerData;
+    pdCache.unitData = unitData;
     pdCache.garrisonData = buildings.filter((b) => garrisoned.has(b.index));
   }
   if (pdCache.f !== fences) {
-    const fenceData: { x: number; y: number; hp: number }[] = [];
+    const fenceData: (Pt & { hp: number })[] = [];
     for (let i = 0; i < fences.length; i += 3) fenceData.push({ x: fences[i], y: fences[i + 1], hp: fences[i + 2] });
     pdCache.f = fences;
     pdCache.fenceData = fenceData;
@@ -350,10 +672,23 @@ function placementData() {
   return pdCache;
 }
 
+/** Buildings an armament can go on now: revealed (the core's rule: centroid
+ *  inside the current ring, at least one cell) and not garrisoned yet. */
+function garrisonable(): Bld[] {
+  if (!status) return [];
+  const taken = new Set<number>();
+  for (let i = 0; i < towers.length; i += 5) if (towers[i] >= 0) taken.add(towers[i]);
+  return buildings.filter((b) => b.cells > 0 && b.wave <= status!.wave && !taken.has(b.index));
+}
+let validCache: { key: unknown[]; data: Bld[] } = { key: [], data: [] };
+function validBuildings(): Bld[] {
+  const key = [towers, buildings, status?.wave];
+  if (key.some((k, i) => k !== validCache.key[i])) validCache = { key, data: garrisonable() };
+  return validCache.data;
+}
+
 // One stable data object for the agent layer: replacing `data` every frame
 // would make deck.gl rebuild every attribute (including 100k picking colours).
-// Only the external buffers inside it change; updateTriggers re-read just
-// those two attributes.
 let agentDataObj: { length: number; attributes: Record<string, unknown> } | null = null;
 let frameId = 0;
 function agentData(pos: F32, col: U8) {
@@ -364,38 +699,51 @@ function agentData(pos: F32, col: U8) {
   return agentDataObj;
 }
 
-// Darkens everything outside the play area: a big square with the circle as a hole.
-let maskCache: { key: string; poly: number[][][] } | null = null;
-function maskPolygon(): number[][][] {
-  if (!level) return [];
-  const [cx, cy] = level.center;
-  const key = `${cx},${cy},${level.radius}`;
-  if (maskCache?.key !== key) {
-    const R = 20000;
-    const outer = [[cx - R, cy - R], [cx + R, cy - R], [cx + R, cy + R], [cx - R, cy + R]];
-    const hole: number[][] = [];
-    for (let i = 0; i < 96; i++) {
-      const t = (-i / 96) * 2 * Math.PI;
-      hole.push([cx + level.radius * Math.cos(t), cy + level.radius * Math.sin(t)]);
-    }
-    maskCache = { key, poly: [outer, hole] };
+function circle(cx: number, cy: number, r: number, reverse: boolean): number[][] {
+  const pts: number[][] = [];
+  for (let i = 0; i < 128; i++) {
+    const t = ((reverse ? -i : i) / 128) * 2 * Math.PI;
+    pts.push([cx + r * Math.cos(t), cy + r * Math.sin(t)]);
   }
-  return maskCache.poly;
+  return pts;
 }
 
-function render_layers(pos: F32, col: U8) {
+// Fog: the next ring (between the revealed radius and the next ring's) is
+// darkened but stays readable; everything past it is darker still. No
+// agents are ever there (cells outside the revealed disc are walls).
+let fogCache: { key: string; outside: number[][][]; ring: number[][][] | null } | null = null;
+function fogRadii() {
+  const r = status?.radius_m ?? level!.rings[0];
+  return { revealed: r, next: status && status.wave < status.waves ? status.next_radius_m : r };
+}
+function fogPolygons() {
+  const [cx, cy] = level!.center;
+  const { revealed: r, next } = fogRadii();
+  const key = `${cx},${cy},${r},${next}`;
+  if (fogCache?.key !== key) {
+    const R = 20000;
+    const outer = [[cx - R, cy - R], [cx + R, cy - R], [cx + R, cy + R], [cx - R, cy + R]];
+    fogCache = {
+      key,
+      outside: [outer, circle(cx, cy, next, true)],
+      ring: next > r ? [circle(cx, cy, next, false), circle(cx, cy, r, true)] : null,
+    };
+  }
+  return fogCache;
+}
+
+function renderLayers(pos: F32, col: U8) {
   if (!level || !geo) return;
-  const { garrisonData, towerData, fenceData } = placementData();
+  const { garrisonData, towerData, unitData, fenceData } = placementData();
   const half = level.cell / 2;
   const g = geoProps;
+  const fog = fogPolygons();
+  const picking = sel?.card.target === "buildings";
+  const pickedSet = new Set(sel?.picked ?? []);
+  const inspectedCells = inspectedFenceCells();
   const layers: unknown[] = [
-    new SolidPolygonLayer({
-      ...g,
-      id: "outside",
-      data: [maskPolygon()],
-      getPolygon: (d: number[][][]) => d as never,
-      getFillColor: [16, 18, 22, 150],
-    }),
+    new SolidPolygonLayer({ ...g, id: "outside", data: [fog.outside], getPolygon: (d: number[][][]) => d as never, getFillColor: [16, 18, 22, 160] }),
+    fog.ring && new SolidPolygonLayer({ ...g, id: "fog", data: [fog.ring], getPolygon: (d: number[][][]) => d as never, getFillColor: [16, 18, 22, 95] }),
     fieldImage &&
       new BitmapLayer({
         ...g,
@@ -409,17 +757,29 @@ function render_layers(pos: F32, col: U8) {
       ...g,
       id: "buildings",
       data: buildings,
-      getPolygon: (d: { polygon: number[][] }) => d.polygon,
+      getPolygon: (d: Bld) => d.polygon,
       getFillColor: [70, 62, 56, 40],
       getLineColor: [70, 62, 56, 90],
       lineWidthMinPixels: 0.5,
       stroked: true,
     }),
+    picking &&
+      new PolygonLayer({
+        ...g,
+        id: "valid",
+        data: validBuildings(),
+        getPolygon: (d: Bld) => d.polygon,
+        getFillColor: (d: Bld) => (pickedSet.has(d.index) ? [60, 140, 255, 170] : [60, 140, 255, 45]),
+        getLineColor: [40, 110, 230, 220],
+        lineWidthMinPixels: 1.2,
+        stroked: true,
+        updateTriggers: { getFillColor: [...pickedSet].join(",") },
+      }),
     new PolygonLayer({
       ...g,
       id: "garrisons",
       data: garrisonData,
-      getPolygon: (d: { polygon: number[][] }) => d.polygon,
+      getPolygon: (d: Bld) => d.polygon,
       filled: true,
       stroked: true,
       getFillColor: [30, 170, 90, 110],
@@ -430,20 +790,20 @@ function render_layers(pos: F32, col: U8) {
       ...g,
       id: "ranges",
       data: towerData,
-      getPosition: (d: { x: number; y: number }) => [d.x, d.y],
-      getRadius: level.towerRange,
+      getPosition: (d: Pt) => [d.x, d.y],
+      getRadius: (d: { r: number }) => d.r,
       radiusUnits: "meters",
       stroked: true,
-      getFillColor: [30, 170, 90, 28],
-      getLineColor: [20, 140, 70, 160],
-      lineWidthMinPixels: 1.5,
+      getFillColor: [30, 170, 90, 22],
+      getLineColor: [20, 140, 70, 150],
+      lineWidthMinPixels: 1.2,
     }),
     showHash && hashLayer(),
     new SolidPolygonLayer({
       ...g,
       id: "fences",
       data: fenceData,
-      getPolygon: (d: { x: number; y: number }) => [
+      getPolygon: (d: Pt) => [
         [d.x - half, d.y - half],
         [d.x + half, d.y - half],
         [d.x + half, d.y + half],
@@ -451,6 +811,16 @@ function render_layers(pos: F32, col: U8) {
       ],
       getFillColor: (d: { hp: number }) => fenceColor(d.hp),
     }),
+    inspectedCells.length > 0 &&
+      new ScatterplotLayer({
+        ...g,
+        id: "inspected",
+        data: inspectedCells,
+        getPosition: (d: Pt) => [d.x, d.y],
+        getRadius: level.cell,
+        radiusUnits: "meters",
+        getFillColor: [255, 200, 40, 150],
+      }),
     new ScatterplotLayer({
       ...g,
       id: "agents",
@@ -466,19 +836,52 @@ function render_layers(pos: F32, col: U8) {
       getLineWidth: 0.6,
       parameters: { depthCompare: "always" },
     }),
-    fenceDraft &&
+    unitData.length > 0 &&
+      new ScatterplotLayer({
+        ...g,
+        id: "units",
+        data: unitData,
+        getPosition: (d: Pt) => [d.x, d.y],
+        radiusUnits: "meters",
+        getRadius: 2.5,
+        radiusMinPixels: 4,
+        stroked: true,
+        getFillColor: [40, 200, 110, 255],
+        getLineColor: [10, 60, 30, 255],
+        lineWidthMinPixels: 1.5,
+      }),
+    sel?.draft &&
       new PathLayer({
         ...g,
         id: "draft",
-        data: [fenceDraft],
+        data: [sel.draft],
         getPath: (d: number[][]) => d as [number, number][],
-        getColor: draftLength() > (stats?.fenceLeft ?? 0) ? [230, 40, 40, 255] : [40, 40, 48, 230],
+        getColor: sel.draftInfo?.error || draftOver() ? [230, 40, 40, 255] : [40, 40, 48, 230],
         getWidth: level.cell,
         widthUnits: "meters",
         widthMinPixels: 2,
       }),
   ].filter(Boolean);
+  drawn = { layers: (layers as { id: string }[]).map((l) => l.id), fogRadius: fogRadii(), agents: n };
   overlay.setProps({ layers: layers as never });
+}
+// What the last frame drew (the test hook reads it).
+let drawn: { layers: string[]; fogRadius: { revealed: number; next: number }; agents: number } = { layers: [], fogRadius: { revealed: 0, next: 0 }, agents: 0 };
+
+function draftOver(): boolean {
+  if (!sel?.draftInfo || sel.draftInfo.length === null) return false;
+  const limit = CARDS.get(sel.card.card)?.effect.length_m;
+  return !!limit && sel.draftInfo.length > limit;
+}
+
+function inspectedFenceCells(): Pt[] {
+  if (!inspected || !level) return [];
+  const s = structures.find((x) => x.id === inspected!.id);
+  if (!s) return [];
+  const w = level.gridW;
+  const c = level.cell;
+  if (s.kind.type === "fence") return s.kind.cells.map((i) => ({ x: ((i % w) + 0.5) * c, y: (Math.floor(i / w) + 0.5) * c }));
+  return s.kind.buildings.map((b) => buildings[b]).filter(Boolean).map((b) => ({ x: b.x, y: b.y }));
 }
 
 let hashLines: { s: number[]; t: number[] }[] = [];
@@ -504,61 +907,78 @@ function hashLayer() {
 worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   const m = ev.data;
   if (testTap?.(m)) return;
+  // Replies resolve whatever is waiting, even after "← Map".
+  if (m.type === "action") {
+    pendingActions.get(m.id)?.(m.error);
+    pendingActions.delete(m.id);
+    return;
+  }
+  if (m.type === "query") {
+    pendingQueries.get(m.id)?.(m.result);
+    pendingQueries.delete(m.id);
+    return;
+  }
+  if (m.type === "record") {
+    pendingRecords.get(m.id)?.(m.json);
+    pendingRecords.delete(m.id);
+    return;
+  }
   if (document.body.dataset.screen !== "game") return; // late messages after "← Map"
   switch (m.type) {
     case "ready": {
       level = m.level;
       shared = m.shared;
-      n = level.count;
-      posBufs = [new Float32Array(n * 2), new Float32Array(n * 2)];
-      colBufs = [new Uint8Array(n * 4), new Uint8Array(n * 4)];
+      posBufs = [new Float32Array(level.capacity * 2), new Float32Array(level.capacity * 2)];
+      colBufs = [new Uint8Array(level.capacity * 4), new Uint8Array(level.capacity * 4)];
       lastSeq = -1;
+      n = 0;
       fbPrev = fbCur = null;
       hashLines = [];
       fieldImage = null;
-      buildings = [];
-      pdCache = { t: null, f: null, garrisonData: [], towerData: [], fenceData: [] };
-      const o = level.buildingOffsets;
-      const c = level.buildingCoords;
-      for (let b = 0; b + 1 < o.length; b++) {
-        const poly: number[][] = [];
-        for (let k = o[b]; k < o[b + 1]; k++) poly.push([c[2 * k], c[2 * k + 1]]);
-        buildings.push({ polygon: poly, index: b });
-      }
+      fogCache = null;
+      pdCache = { t: null, f: null, s: null, garrisonData: [], towerData: [], unitData: [], fenceData: [] };
       $("fallback").hidden = !!shared;
       $("result").hidden = true;
-      maskCache = null;
+      shownResult = null;
       updateGeoProps();
-      if (!fitted) {
-        fitView();
-        fitted = true;
-      }
       $("loading").hidden = true;
-      if (autoStartAfterReady) {
-        autoStartAfterReady = false;
-        send({ type: "start" });
-      }
       break;
     }
+    case "geometry":
+      setGeometry(m.geometry);
+      break;
     case "frame":
       fbPrev = fbCur;
-      fbCur = { pos: m.pos, render: m.render, time: m.time };
+      fbCur = { pos: m.pos, render: m.render, time: m.time, count: m.count };
       fbSeq++;
       break;
-    case "stats": {
-      const was = stats?.phase;
-      stats = m.stats;
-      if (was !== undefined && was < 2 && stats.phase >= 2) showResult();
+    case "status": {
+      const was = status?.phase;
+      const wave = status?.wave;
+      status = m.status;
+      perf = m.perf;
+      if (!fitted || (wave !== undefined && wave !== status.wave)) {
+        fitView(fitted);
+        fitted = true;
+      }
+      if (was !== status.phase) onPhaseChange();
       updateControls();
+      updateHud();
       break;
     }
-    case "placements":
-      towers = m.towers;
-      fences = m.fences;
-      history = m.history;
+    case "state":
+      hand = m.hand;
+      structures = m.structures;
+      results = m.results;
+      attempts = m.attempts;
+      if (sel && !hand[sel.handIndex]) clearSelection();
+      else if (sel) sel.card = hand[sel.handIndex];
+      renderHand();
+      void refreshInspect();
       updateControls();
       break;
-    case "fences":
+    case "placements":
+      towers = m.towers;
       fences = m.fences;
       break;
     case "error":
@@ -571,32 +991,51 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   }
 };
 
+function setGeometry(g: Geometry) {
+  buildings = [];
+  const o = g.buildingOffsets;
+  const c = g.buildingCoords;
+  const info = g.buildingInfo;
+  for (let b = 0; b + 1 < o.length; b++) {
+    const poly: number[][] = [];
+    for (let k = o[b]; k < o[b + 1]; k++) poly.push([c[2 * k], c[2 * k + 1]]);
+    const j = 6 * b;
+    buildings.push({ polygon: poly, index: b, x: info[j], y: info[j + 1], area: info[j + 2], floors: info[j + 3], cells: info[j + 4], wave: info[j + 5] });
+  }
+  pdCache.t = null;
+}
+
 // ---------------------------------------------------------------- UI
 function toast(msg: string) {
   const t = $("toast");
+  lastToast = msg;
   t.textContent = msg;
   t.hidden = false;
   clearTimeout((t as unknown as { _h: number })._h);
-  (t as unknown as { _h: number })._h = window.setTimeout(() => (t.hidden = true), 2600);
+  (t as unknown as { _h: number })._h = window.setTimeout(() => (t.hidden = true), 3200);
 }
 
-function settings() {
-  return {
-    population: Number(($("pop") as HTMLInputElement).value),
-    seed: Math.max(0, Math.floor(Number(($("seed") as HTMLInputElement).value) || 0)),
-  };
+function seed(): string {
+  return String(Math.max(0, Math.floor(Number(($("seed") as HTMLInputElement).value) || 0)));
 }
 
-function reset(replay?: Placement[]) {
+/** A new match on the current level (the seed input's seed, starter deck). */
+function newMatch() {
   if (!currentLevelJson) return;
-  const s = settings();
-  prepStatus(`Spawning ${s.population.toLocaleString()} civilians…`);
-  stats = null;
+  prepStatus("Preparing the match…");
+  status = null;
+  hand = [];
+  structures = [];
+  results = [];
+  attempts = [];
   towers = new Float32Array(0);
   fences = new Float32Array(0);
-  history = [];
+  buildings = [];
+  inspected = null;
+  clearSelection();
   updateControls();
-  send({ type: "init", levelJson: currentLevelJson, population: s.population, seed: s.seed, replay });
+  // The starter deck ("Civil Defence Issue") until the deck builder (T7b).
+  send({ type: "init", levelJson: currentLevelJson, setup: { seed: seed() }, test: TEST_MODE });
 }
 
 // ---------------------------------------------------------------- screens
@@ -621,14 +1060,14 @@ async function enterGame(place: Place) {
   explore.setActive(false);
   overlay.setProps({ layers: [] });
   setGeo(place.lat, place.lon);
-  fitView(); // fly to the spot while the buildings download
   currentPlace = place;
   $("place").textContent = place.name;
   $("place").title = place.name;
   $("result").hidden = true;
   level = null;
-  n = 0;
-  stats = null;
+  status = null;
+  fitted = false;
+  fitView();
   updateControls();
   prepAbort?.abort();
   const abort = new AbortController();
@@ -647,13 +1086,10 @@ async function enterGame(place: Place) {
     }
     if (abort.signal.aborted) return;
     const meta = JSON.parse(json) as { radius_m: number; center_lat: number; center_lon: number; buildings: unknown[] };
-    const radius = meta.radius_m;
-    const count = meta.buildings.length;
     setGeo(meta.center_lat, meta.center_lon);
-    $("place").title = `${place.name} · ${count} buildings · radius ${radius} m`;
+    $("place").title = `${place.name} · ${meta.buildings.length} buildings · radius ${meta.radius_m} m`;
     currentLevelJson = json;
-    fitted = false;
-    reset();
+    newMatch();
   } catch (e) {
     if (abort.signal.aborted) return;
     prepError(e instanceof Error ? e.message : String(e));
@@ -664,23 +1100,17 @@ function backToMap() {
   prepAbort?.abort();
   send({ type: "stop" });
   level = null;
-  n = 0;
-  stats = null;
+  status = null;
+  hand = [];
   currentLevelJson = "";
   $("result").hidden = true;
-  setTool("pan");
+  clearSelection();
+  inspected = null;
+  updateInspect();
+  renderHand();
   document.body.dataset.screen = "explore";
   overlay.setProps({ layers: [] });
   explore.setActive(true);
-}
-
-function setTool(t: typeof tool) {
-  tool = t;
-  for (const id of ["tool-pan", "tool-tower", "tool-fence"]) $(id).classList.toggle("on", id === `tool-${t}`);
-  if (t === "fence") map.dragPan.disable();
-  else map.dragPan.enable();
-  map.getCanvas().style.cursor = t === "fence" ? "crosshair" : t === "tower" ? "pointer" : "";
-  updateFenceHint();
 }
 
 function fmtTime(ticks: number) {
@@ -688,73 +1118,176 @@ function fmtTime(ticks: number) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+const PHASE_LABEL: Record<string, string> = { prep: "Prep", running: "Outbreak", wave_won: "Wave won", wave_lost: "Wave lost", match_won: "Match won" };
+
 function updateControls() {
-  const setup = stats?.phase === 0;
-  const running = stats?.phase === 1;
-  for (const id of ["tool-tower", "tool-fence", "undo", "clear"]) ($(id) as HTMLButtonElement).disabled = !setup;
-  ($("undo") as HTMLButtonElement).disabled = !setup || history.length === 0;
-  ($("clear") as HTMLButtonElement).disabled = !setup || history.length === 0;
-  ($("start") as HTMLButtonElement).disabled = !setup;
-  ($("pause") as HTMLButtonElement).disabled = !running;
-  $("pause").textContent = stats?.paused ? "Resume" : "Pause";
-  for (const s of [1, 2, 4]) $(`speed-${s}`).classList.toggle("on", stats?.speed === s);
-  $("towers-left").textContent = String(stats?.towersLeft ?? "–");
-  $("fence-left").textContent = stats ? `${stats.fenceLeft.toFixed(0)} m` : "–";
-  if (!setup && tool !== "pan") setTool("pan");
-  $("phase").textContent = !stats ? "Loading" : stats.phase === 0 ? "Setup" : stats.phase === 1 ? (stats.paused ? "Paused" : "Outbreak") : "Over";
-  $("phase").dataset.phase = String(stats?.phase ?? -1);
+  const p = phase();
+  const startBtn = $("start") as HTMLButtonElement;
+  startBtn.disabled = p !== "prep" && p !== "wave_won";
+  startBtn.textContent = p === "wave_won" ? "Next wave" : "Start wave";
+  ($("pause") as HTMLButtonElement).disabled = p !== "running";
+  $("pause").textContent = perf?.paused ? "Resume" : "Pause";
+  for (const s of [1, 2, 4]) $(`speed-${s}`).classList.toggle("on", perf?.speed === s);
+  ($("retry") as HTMLButtonElement).disabled = !p || p === "match_won";
+  ($("restart") as HTMLButtonElement).disabled = !p;
+  const mull = $("mulligan") as HTMLButtonElement;
+  mull.textContent = `Mulligan (${status?.mulligan_cost ?? 1} supply)`;
+  mull.disabled = !status?.mulligan_available;
+  $("phase").textContent = !p ? "Loading" : perf?.paused && p === "running" ? "Paused" : PHASE_LABEL[p];
+  $("phase").dataset.phase = p ?? "";
+  $("t-title").textContent = p === "running" ? "Wave" : p === "prep" ? "Prep" : "Between waves";
+  $("t-help").textContent =
+    p === "prep"
+      ? "Play fortifications and armaments from your hand, click a structure to repair or pull it down, then Start wave."
+      : p === "running"
+        ? "Only tactical cards can be played now."
+        : "";
+  updateInspect();
 }
 
 function updateHud() {
-  const s = stats;
+  const s = status;
   if (!s) return;
   const set = (id: string, v: string) => ($(id).textContent = v);
-  set("h-time", fmtTime(s.phase === 0 ? 0 : s.tick));
-  set("h-civ", s.civilians.toLocaleString());
-  set("h-inf", s.infected.toLocaleString());
-  set("h-zom", s.zombies.toLocaleString());
-  set("h-dead", s.dead.toLocaleString());
-  set("h-surv", s.initial ? `${((100 * s.civilians) / s.initial).toFixed(1)}%` : "–");
-  set("h-sim", `${s.simMsLast.toFixed(1)} / ${s.simMsP95.toFixed(1)} ms`);
-  set("h-fps", fps.toFixed(0));
-  set("h-dorm", s.phase === 1 && s.civilians ? `${((100 * s.dormant) / s.civilians).toFixed(0)}%` : "–");
-  if (fieldKind !== "none" && s.phase >= 1) send({ type: "field", kind: fieldKind });
+  set("h-wave", `${s.wave}/${s.waves}`);
+  set("h-time", fmtTime(s.phase === "prep" ? 0 : s.wave_tick));
+  set("h-civ", s.stats.civilians.toLocaleString());
+  set("h-inf", s.stats.infected.toLocaleString());
+  set("h-zom", s.stats.zombies.toLocaleString());
+  set("h-dead", s.stats.zombies_killed.toLocaleString());
+  set("h-supply", String(s.supply));
+  set("h-deck", `${s.deck_count} / ${s.discard_count}`);
+  set("h-retries", String(s.retries));
+  // Saved: civilians now over the wave's starting civilians (in prep: who
+  // will start it), against the defeat line.
+  const start = s.phase === "prep" ? s.stats.civilians : s.wave_start_civilians;
+  const share = start > 0 ? s.stats.civilians / start : 0;
+  const line = start > 0 ? s.defeat_threshold / start : 0.15;
+  set("h-saved", start > 0 ? `${(100 * share).toFixed(1)}% · ${s.stats.civilians.toLocaleString()}/${start.toLocaleString()}` : "–");
+  const bar = $("h-saved-bar");
+  bar.style.width = `${Math.min(100, 100 * share)}%`;
+  bar.classList.toggle("low", share < line * 1.5);
+  $("h-line").style.left = `${100 * line}%`;
+  set("h-line-label", s.phase === "prep" ? "lost below 15%" : `lost below ${s.defeat_threshold.toLocaleString()} civilians (15%)`);
+  set("h-fatigue", `${Math.round(100 * s.fatigue)}% speed`);
+  $("h-fatigue-bar").style.width = `${Math.round(100 * s.fatigue)}%`;
+  if (perf) set("h-sim", `${perf.simMsLast.toFixed(1)} / ${perf.simMsP95.toFixed(1)} ms`);
 }
 
-function showResult() {
-  if (!stats) return;
-  const s = stats;
-  const label = s.phase === 2 ? "Outbreak contained" : s.phase === 3 ? "Everyone is lost" : "Time's up";
-  $("r-title").textContent = label;
-  $("r-outcome").textContent = s.phase === 2 ? "Win" : s.phase === 3 ? "Loss" : "Timeout";
-  $("r-surv").textContent = s.initial ? `${((100 * s.civilians) / s.initial).toFixed(1)}%` : "–";
-  $("r-killed").textContent = s.killed.toLocaleString();
-  $("r-time").textContent = fmtTime(s.tick);
+// ---------------------------------------------------------------- results
+let shownResult: string | null = null;
+
+function onPhaseChange() {
+  const p = phase();
+  if (sel && !(p === "prep" || p === "running")) clearSelection();
+  // The worker sends the state (hand, results) before the status that
+  // changed the phase, so the results are already here.
+  if (p === "wave_won" || p === "wave_lost" || p === "match_won") showResult(p);
+  else {
+    $("result").hidden = true;
+    shownResult = null;
+  }
+}
+
+function showResult(kind: string) {
+  if (!status) return;
+  const s = status;
+  const r = results[results.length - 1];
+  const stats = $("r-stats");
+  stats.replaceChildren();
+  const row = (k: string, v: string) => {
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v;
+    stats.append(dt, dd);
+  };
+  const pct = (a: number, b: number) => (b > 0 ? `${((100 * a) / b).toFixed(1)}%` : "–");
+  const table = $("r-waves") as HTMLTableElement;
+  table.hidden = true;
+  if (kind === "match_won") {
+    $("r-title").textContent = `Match won: ${s.waves} waves cleared`;
+    $("r-sub").textContent = s.retries === 0 ? "No retry: the no-retry bonus applies." : `${s.retries} ${s.retries === 1 ? "retry" : "retries"}.`;
+    const last = results[results.length - 1];
+    row("Civilians saved", last ? `${last.end_civilians.toLocaleString()} (${pct(last.end_civilians, last.start_civilians)} of wave ${last.wave})` : "–");
+    row("Zombies killed", results.reduce((a, w) => a + w.zombies_killed, 0).toLocaleString());
+    row("Retries", String(s.retries));
+    row("Wave attempts", String(attempts.length));
+    row("Game time", fmtTime(results.reduce((a, w) => a + w.ticks, 0)));
+    table.replaceChildren();
+    const head = table.insertRow();
+    for (const h of ["Wave", "Start", "Saved", "%", "Killed"]) {
+      const th = document.createElement("th");
+      th.textContent = h;
+      head.appendChild(th);
+    }
+    for (const w of results) {
+      const tr = table.insertRow();
+      for (const v of [String(w.wave), w.start_civilians.toLocaleString(), w.end_civilians.toLocaleString(), pct(w.end_civilians, w.start_civilians), w.zombies_killed.toLocaleString()]) tr.insertCell().textContent = v;
+    }
+    table.hidden = false;
+  } else {
+    const won = kind === "wave_won";
+    $("r-title").textContent = won ? `Wave ${s.wave} held` : `Wave ${s.wave} lost`;
+    $("r-sub").textContent = won ? "No zombies or infected left." : "Fewer than 15% of the wave's civilians are left.";
+    if (r) {
+      row("Outcome", won ? "Won" : "Lost");
+      row("Saved", `${r.end_civilians.toLocaleString()} / ${r.start_civilians.toLocaleString()} (${pct(r.end_civilians, r.start_civilians)})`);
+      row("Zombies killed", r.zombies_killed.toLocaleString());
+      row("Supply earned", won ? `+${r.supply_earned}` : "0");
+      row("Time", fmtTime(r.ticks));
+    }
+  }
+  $("result").dataset.kind = kind;
+  ($("r-next") as HTMLButtonElement).hidden = kind !== "wave_won";
+  ($("r-retry") as HTMLButtonElement).hidden = kind === "match_won";
+  ($("r-download") as HTMLButtonElement).hidden = kind !== "match_won";
+  ($("r-map") as HTMLButtonElement).hidden = kind !== "match_won";
+  $("r-retry").classList.toggle("primary", kind === "wave_lost");
   $("result").hidden = false;
+  shownResult = kind;
 }
 
+async function downloadRecord() {
+  const json = await fetchRecord();
+  const blob = new Blob([json], { type: "application/json" });
+  const a = document.createElement("a");
+  const place = (currentPlace?.name ?? "match").normalize("NFKD").replace(/[^\w]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
+  a.href = URL.createObjectURL(blob);
+  a.download = `zombie-td-run-${place}-seed${seed()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ---------------------------------------------------------------- wiring
 $("back").addEventListener("click", backToMap);
 $("prep-back").addEventListener("click", backToMap);
 $("r-map").addEventListener("click", backToMap);
 $("prep-retry").addEventListener("click", () => currentPlace && enterGame(currentPlace));
-const pop = $("pop") as HTMLInputElement;
-const popLabel = () => ($("pop-label").textContent = `${(Number(pop.value) / 1000).toFixed(0)}k`);
-pop.addEventListener("input", popLabel);
-pop.addEventListener("change", () => reset());
-$("seed").addEventListener("change", () => reset());
-$("start").addEventListener("click", () => send({ type: "start" }));
-$("pause").addEventListener("click", () => send({ type: "pause", paused: !stats?.paused }));
+$("seed").addEventListener("change", () => newMatch());
+$("start").addEventListener("click", () => void uiAct({ type: phase() === "wave_won" ? "next_wave" : "start_wave" }));
+$("pause").addEventListener("click", () => send({ type: "pause", paused: !perf?.paused }));
 for (const s of [1, 2, 4]) $(`speed-${s}`).addEventListener("click", () => send({ type: "speed", speed: s }));
-$("reset").addEventListener("click", () => reset());
-$("tool-pan").addEventListener("click", () => setTool("pan"));
-$("tool-tower").addEventListener("click", () => setTool("tower"));
-$("tool-fence").addEventListener("click", () => setTool("fence"));
-$("undo").addEventListener("click", () => send({ type: "undo" }));
-$("clear").addEventListener("click", () => send({ type: "clear" }));
-$("replay").addEventListener("click", () => {
-  autoStartAfterReady = true;
-  reset(history);
+$("retry").addEventListener("click", () => void uiAct({ type: "retry_wave" }));
+$("restart").addEventListener("click", () => void uiAct({ type: "restart_match" }));
+$("mulligan").addEventListener("click", () => {
+  clearSelection();
+  void uiAct({ type: "mulligan" });
 });
+$("sel-place").addEventListener("click", () => void playSelection());
+$("sel-cancel").addEventListener("click", () => clearSelection());
+$("i-repair").addEventListener("click", () => inspected && void uiAct({ type: "repair", fence_id: inspected.id }).then(() => (inspected = null, updateInspect())));
+$("i-pull").addEventListener("click", () => inspected && void uiAct({ type: "pull_down", placement_id: inspected.id }).then(() => (inspected = null, updateInspect())));
+$("i-close").addEventListener("click", () => {
+  inspected = null;
+  updateInspect();
+});
+$("r-next").addEventListener("click", () => void uiAct({ type: "next_wave" }));
+$("r-retry").addEventListener("click", () => void uiAct({ type: "retry_wave" }));
+$("r-restart").addEventListener("click", () => void uiAct({ type: "restart_match" }));
+$("r-download").addEventListener("click", () => void downloadRecord());
 $("r-close").addEventListener("click", () => ($("result").hidden = true));
 $("fit").addEventListener("click", () => fitView());
 for (const k of ["none", "chase", "flee"] as const) {
@@ -768,14 +1301,15 @@ for (const k of ["none", "chase", "flee"] as const) {
 $("hash-toggle").addEventListener("change", (e) => (showHash = (e.target as HTMLInputElement).checked));
 window.addEventListener("keydown", (e) => {
   if ((e.target as HTMLElement).tagName === "INPUT") return;
-  if (e.key === "Escape") setTool("pan");
-  if ((e.metaKey || e.ctrlKey) && e.key === "z") send({ type: "undo" });
-  if (e.key === " " && stats?.phase === 1) {
+  if (e.key === "Escape") {
+    clearSelection();
+    inspected = null;
+    updateInspect();
+  }
+  if (e.key === " " && phase() === "running") {
     e.preventDefault();
-    send({ type: "pause", paused: !stats.paused });
+    send({ type: "pause", paused: !perf?.paused });
   }
 });
 
-popLabel();
-setTool("pan");
 requestAnimationFrame(frame);

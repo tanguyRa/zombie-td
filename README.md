@@ -5,12 +5,15 @@ place on a street map; its buildings are downloaded from OpenStreetMap. Up to 10
 one Rust core that runs natively (headless tests, scenarios, benchmarks) and
 as WASM in the browser.
 
-![The browser prototype: Paris Le Marais, 20k agents, two garrisons and a fence, two minutes into the outbreak](docs/screenshot.jpg)
+![The browser match: Paris Le Marais, wave 6 of 8 in progress, with the wave HUD, the hand and the fogged next ring](docs/screenshot.jpg)
 
-*Paris Le Marais, 20k agents, two rifle garrisons (green) and a fence, two
-minutes in. Civilians are blue, zombies red. The "Render fps 1" in this
-capture comes from the hidden preview pane it was taken in, not from the app.
-Taken before the map screen, the faster agents and the corpses were added.*
+*Paris Le Marais, wave 6 of 8, 27 s into the outbreak: about 2,900
+civilians (blue), a few zombies (red), the garrisons placed over six preps
+(green, with their ranges) and corpses (violet). The darker band at the edge
+of the disc is the fogged next ring. Right: the wave HUD (saved share
+against the 15% line, stamina, supply, deck and discard); bottom: the hand
+(tactical cards playable now, prep cards greyed). The "Render fps 2" comes
+from the hidden preview pane it was taken in, not from the app.*
 
 ## Prerequisites
 
@@ -47,7 +50,7 @@ wasm-pack and Node 22 on the host, the commands below also work without the
 | Verify a run record | `./dev.sh cargo run --release -p sim-headless -- verify run.json --level paris-marais` | `verified: …` and the replay summary (exit 0), or `rejected: …` naming the first diverging wave attempt (exit 1) |
 | Headless report | `./dev.sh cargo run --release -p sim-headless -- report` | `reports/headless-report.md` and `.html` (charts), raw `reports/*.json` and `*.csv` |
 | Web unit tests (Node, Vitest) | `./dev.sh bash -c "cd web && npm ci && npm run test:unit"` | Map blocks, projection, snapshot hash, block cache and loader tests pass (no network, no browser); `cargo test --release -p sim-core --test t6_chunks` checks their Rust fixture. The local profile tests (`web/src/profile/`: collection, decks, payouts, daily caps, crates, tiers, coverage, storage) run in the same suite |
-| Browser tests (Chromium, Firefox, WebKit) | `./dev.sh bash -c "cd web && npm ci && npm run e2e"` | Smoke test and native = browser hash test pass in all three browsers |
+| Browser tests (Chromium, Firefox, WebKit) | `./dev.sh bash -c "cd web && npm ci && npm run e2e"` | A full 8-wave match through the UI (its run record verified headless), the match UI tests and the native = browser hash test pass in all three browsers |
 | Browser prototype | `./dev.sh bash -c "cd web && npm install && npm run dev"` | Playable page at http://localhost:5173 |
 
 Useful extras:
@@ -114,18 +117,37 @@ Playwright starts its own Vite server on port 5199 (after `npm run wasm`), so
   at once (`--strictPort`) instead of testing whatever server is there.
 - `PW_REUSE=1` reuses a server already running on that port instead. It skips
   `npm run wasm`, so rebuild the WASM yourself first.
- The tests need no network: map tiles, search and
-Overpass are blocked and the built-in levels are used. The Docker image has
-the browsers already, and `./run-all.sh` runs these tests too.
 
-- `smoke.spec.ts`: Le Vésinet at 5k agents; places a tower and a fence with
-  the mouse, starts at 4× and checks the result panel (about 1.5 minutes).
+The tests need no network: map tiles, search and Overpass are blocked and the
+built-in levels are used (every test fails if a request leaves the machine).
+The Docker image has the browsers already, and `./run-all.sh` runs these
+tests too.
+
+- `match.spec.ts`: a full 8-wave match on Paris Le Marais (seed 2) through
+  the UI: wave 1 lost on purpose and retried, a mulligan, keep choices,
+  armament building clicks, a fence drag pulled down again with a click,
+  a tactical card clicked mid-wave; a test bot (`e2e/bot.ts`, the
+  `sim-headless match` strategy) plays the rest at a test-only "as fast as
+  possible" speed. The run record is downloaded from the match result panel
+  and must verify with `sim-headless verify` (run through `cargo run
+  --release`), with every wave attempt's hash equal to the browser's. About
+  25 s in Chromium and WebKit, 1–1.5 min in Firefox.
+  `node e2e/bot-check.mts 2` plays the same scenario on WASM under Node in
+  a few seconds (useful when the balance changes and seed 2 no longer
+  clears it).
+- `match-ui.spec.ts`: the HUD and the hand, invalid plays and their
+  messages (fence too long, building not revealed, too many buildings,
+  mulligan after a play, a tactical card in prep), keep marks, a tactical
+  card clicked mid-wave, the fog, and pause/speed leaving the state hash
+  unchanged.
 - `determinism.spec.ts`: runs the native/WASM fixture in each browser and
   compares its hash to `crates/sim-core/tests/fixtures/native_hash.json`.
 
 Opening the app with `?test=1` (for example http://localhost:5173/?test=1)
-installs the test hook `window.__zt` (state snapshots and action helpers, see
-`web/src/testhook.ts`). Without the flag it is never loaded.
+installs the test hook `window.__zt` (version 2: match state snapshots, the
+run record, action helpers that send exactly what the UI sends, and
+test-only clock controls; see `web/src/testhook.ts`). Without the flag it is
+never loaded.
 
 The generated report is committed in [`reports/`](reports/headless-report.md),
 so you can read the results without running anything.
@@ -138,36 +160,57 @@ so you can read the results without running anything.
    until it holds 600–1,200 buildings, up to 600 m. The two built-in levels
    (Paris Le Marais, Le Vésinet) start without any download. The last place
    you started is remembered.
-2. **Setup.** The street map stays on screen: the game is drawn on top of it,
-   with street names and icons hidden and everything outside the play area
-   darkened. Pick a population (5k–100k) and seed. Civilians wander; the
-   outbreak locations are hidden. **← Map** goes back to choose another place.
-3. **Tower** (8 available): click a building to garrison it. It shoots the
-   nearest zombie within 40 m, 2 shots/s, 3 hits to kill.
-4. **Fence** (400 m): drag on the ground. The parts that fall on buildings
-   are clipped off, so a line drawn from wall to wall seals a street. Zombies
-   detour when a cheap way around exists and otherwise break through
-   (300 hp per 2 m cell, 10 hp/s per zombie). Civilians never cross fences.
-5. **Undo** (also Ctrl/⌘-Z) and **Clear** while in setup.
-6. **Start.** The outbreak begins in 3 clusters. **Pause** (Space), speed
-   1× / 2× / 4×, **Reset**.
-7. The game ends when no zombies or infected are left (**win**), no civilians
-   are left (**loss**), or after 10 minutes (**timeout**). Score = surviving
-   civilians. **Replay same seed** re-runs the same setup and gives the same
-   result. **New location** returns to the map.
+2. **The match.** 8 waves at that place. Wave 1 plays a core of 150 m around
+   the pin; each wave reveals a ring around it, up to the level's radius.
+   The street map stays on screen with street names hidden; the next ring is
+   drawn darker (its buildings and streets stay visible, nothing about the
+   people there) and everything past it darker still. The **Seed** box
+   starts a new match with another seed. **← Map** goes back.
+3. **Prep.** Your deck is the starter deck "Civil Defence Issue" (20 cards).
+   Each prep you draw 5 cards (up to 2 kept from the last wave) and get
+   supply (shown in the HUD with the deck and discard counts). The hand is
+   at the bottom: name, supply cost, kind, rarity. Click a card, then:
+   - **armaments** (Rifles, Mortar…): click buildings; the ones you can arm
+     are highlighted, the card plays when you have picked as many as it
+     equips (or press **Place** with fewer);
+   - **fortifications** (fences): drag a line; while dragging the panel
+     shows the placed length (parts on buildings are clipped off) against
+     the card's limit, and the cost.
+   A refused play says why (for example "fence is 512 m, Light fence allows
+   400 m"). **Mulligan** (1 supply, once per wave, before playing a card)
+   draws a new hand. **Keep** on a card keeps it for the next wave (up to
+   2; without a choice the first two stay). Click a fence or a garrisoned
+   building to **Repair** it (cost shown) or **Pull it down** (refund
+   shown: the full cost and the card back for something placed in this
+   prep, half otherwise). Then **Start wave**.
+4. **The wave.** The outbreak starts (its locations are hidden). Only
+   **tactical** cards can be played now (Grenades, Paratrooper…): click the
+   card, then a point. The HUD shows the wave n/8, civilians, infected and
+   zombies, the share saved against the red **15%** line, and the
+   civilians' stamina: they tire as the wave goes on (zombies don't), so
+   stalling punishes itself. **Pause** (Space) and 1× / 2× / 4× only change
+   how fast you watch; they never change the outcome.
+5. **Result.** A wave is won when no zombies or infected are left, lost when
+   fewer than 15% of its civilians are. The panel shows the saved share and
+   the supply earned, with **Next wave**, **Retry wave** (same outbreak,
+   same draws) and **Restart match**. After wave 8, the match panel shows
+   the retries, the civilians saved and a table per wave, and **Download run
+   record** saves the run (seed, deck, every action with its tick, the
+   state hash after every wave attempt), which `sim-headless verify`
+   replays and checks.
 
-Pan by dragging the map (except with the Fence tool), zoom with the wheel or
-the +/− buttons, **Frame level** to re-centre. The debug
-panel shows the chase or flee field as a heatmap and the spatial-hash grid.
+Pan by dragging the map (except while drawing a fence), zoom with the wheel
+or the +/− buttons, **Frame level** to re-centre. The debug panel shows the
+chase or flee field as a heatmap and the spatial-hash grid.
 
 Colours: civilians blue, infected (1 s before turning) yellow, zombies red
-(all with a thin dark rim so they read on the map), garrisons green, fences
-near-black turning red as they take damage. A zombie killed by a
-garrison flashes pale for 1 s and then stays on the map as a violet corpse,
-so you can see where the garrisons are working.
+(all with a thin dark rim so they read on the map), garrisons green with
+their range, paratroopers and convoys as green dots, fences near-black
+turning red as they take damage. A zombie killed by a garrison flashes pale
+for 1 s and then stays on the map as a violet corpse.
 
 Speeds: civilians wander at 1.2 m/s and flee at 4.4 m/s; zombies run at
-7.5 m/s. An undefended 20k game in Paris is over in about 3 minutes.
+7.5 m/s.
 
 ## Results
 
@@ -222,14 +265,17 @@ don't change the outcome (S2). The fence ring in S3 is first breached after
   in prep, tactical cards during the wave.
   Run records (`record.rs`) and the replay verifier: `RunRecord::from_match`
   and `replay(record, map)`; the map snapshot hash is `mapsnap.rs`.
-  The browser still plays the single-wave `Sim` until T5.
+  The browser plays the match through `WasmMatch` since T5.
 - **`crates/sim-headless`**: tests support, scenarios S1–S5, benchmarks and
   the report writer (SVG charts, no Python).
 - **`crates/sim-wasm`**: wasm-bindgen wrapper with no logic of its own:
   `WasmSim` (the single-wave prototype), `WasmMatch` (the 8-wave match:
   JSON actions in, state and the run record out) and `verify_level` /
   `verify_chunks`.
-- **`web/`**: the sim runs in a Web Worker on a fixed 20 Hz accumulator. It
+- **`web/`**: the match runs in a Web Worker on a fixed 20 Hz accumulator,
+  stepped only while a wave runs (prep and result screens are static). The
+  page sends actions (JSON `Action`s) that the worker applies at the next
+  tick boundary. It
   publishes positions and states through a triple-buffered SharedArrayBuffer
   (COOP/COEP headers set by Vite). If the page is not cross-origin isolated,
   it posts transferable snapshots instead and shows a "fallback mode" badge.
