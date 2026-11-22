@@ -1,10 +1,10 @@
 {
-  "host_cpu": "Apple M1 Pro",
+  "host_cpu": "unknown (set HOST_CPU)",
   "container_cpu": "aarch64 (model not exposed inside the container)",
   "cores": 8,
-  "os": "Debian GNU/Linux 12 (bookworm) (6.12.76-linuxkit aarch64)",
+  "os": "macos (23.6.0 arm64)",
   "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
-  "node": "v22.23.5",
-  "git_commit": "b1829d3 (with uncommitted changes)",
-  "generated": "2026-11-22 08:51 UTC"
+  "node": "v26.5.0",
+  "git_commit": "8bc9889 (with uncommitted changes)",
+  "generated": "2026-11-22 17:42 UTC"
 }

@@ -96,6 +96,16 @@ pub struct Tower {
     pub kills: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreatJob {
+    Idle,
+    Threat,
+    /// Building the flee seeds, `flee_scan` cells done so far.
+    FleeScan,
+    Flee,
+    Done,
+}
+
 #[derive(Clone, Debug)]
 pub enum Placement {
     Tower(u32),
@@ -144,9 +154,32 @@ pub struct Sim {
     pub chase: Vec<i32>,
     pub threat: Vec<i32>,
     pub flee: Vec<i32>,
-    dial: Dial,
-    flee_seeds: Vec<(u32, i32)>,
-    fields_dirty: bool,
+    /// Back buffers the field jobs write into (see `update_fields`).
+    chase_next: Vec<i32>,
+    threat_next: Vec<i32>,
+    flee_next: Vec<i32>,
+    chase_dial: Dial,
+    /// Threat stops at the flee cap; cells beyond hold values >= the cap.
+    threat_dial: Dial,
+    flee_dial: Dial,
+    chase_job: bool,
+    threat_job: ThreatJob,
+    /// Cells a field can reach (walkable or fence): bounds the job budgets.
+    field_cells: usize,
+    /// Cells finalized by the last job of each kind (sizes the budgets).
+    chase_work: usize,
+    threat_work: usize,
+    /// Flee field start values (0 on walkable cells, INF elsewhere), cached
+    /// for one `Grid::version`.
+    flee_base: Vec<i32>,
+    flee_base_version: Option<u32>,
+    flee_counts: Vec<u32>,
+    /// Zone cells found by the flee scan, in index order.
+    flee_zone: Vec<u32>,
+    flee_scan: usize,
+    /// Compute every field in full, the pre-T1 way (reference for the
+    /// equivalence tests; same results, slower).
+    pub eager_fields: bool,
     pub field_recomputes: u32,
 
     // Fences.
@@ -216,9 +249,23 @@ impl Sim {
             chase: vec![INF; cells],
             threat: vec![INF; cells],
             flee: vec![INF; cells],
-            dial: Dial::new(cfg.fence_path_cost),
-            flee_seeds: Vec::with_capacity(cells),
-            fields_dirty: true,
+            chase_next: vec![INF; cells],
+            threat_next: vec![INF; cells],
+            flee_next: vec![INF; cells],
+            chase_job: false,
+            threat_job: ThreatJob::Idle,
+            field_cells: cells,
+            chase_work: cells,
+            threat_work: 2 * cells,
+            chase_dial: Dial::new(cfg.fence_path_cost),
+            threat_dial: Dial::new(cfg.fence_path_cost),
+            flee_dial: Dial::new(cfg.fence_path_cost),
+            flee_base: Vec::new(),
+            flee_base_version: None,
+            flee_counts: Vec::new(),
+            flee_zone: Vec::new(),
+            flee_scan: 0,
+            eager_fields: false,
             field_recomputes: 0,
             fence_damage: vec![0.0; cells],
             fence_touched: Vec::with_capacity(cells),
@@ -416,7 +463,7 @@ impl Sim {
         let mut new_cells = Vec::new();
         for c in cells {
             if self.grid.kind[c] == WALK {
-                self.grid.kind[c] = FENCE;
+                self.grid.set_kind(c, FENCE);
                 self.grid.fence_hp[c] = self.cfg.fence_cell_hp;
                 new_cells.push(c as u32);
             }
@@ -438,7 +485,7 @@ impl Sim {
             }
             Some(Placement::Fence { cells, length_m }) => {
                 for c in cells {
-                    self.grid.kind[c as usize] = WALK;
+                    self.grid.set_kind(c as usize, WALK);
                     self.grid.fence_hp[c as usize] = 0.0;
                 }
                 self.fence_used_m = (self.fence_used_m - length_m).max(0.0);
@@ -509,12 +556,13 @@ impl Sim {
         self.vy.fill(0.0);
         self.rng = Pcg32::new(self.seed, 0x6f75_7462);
         self.push_agents_off_blocked_cells();
+        self.grid.rebuild_step_masks();
+        self.field_cells = self.grid.kind.iter().filter(|&&k| k == WALK || k == FENCE).count();
         self.tick = 0;
         self.seed_outbreak();
         self.phase = GamePhase::Running;
         self.recompute_chase();
         self.recompute_threat_and_flee();
-        self.fields_dirty = false;
     }
 
     fn seed_outbreak(&mut self) {
@@ -599,11 +647,12 @@ impl Sim {
 
     /// Start without an outbreak (tests place zombies themselves).
     pub fn start_without_outbreak(&mut self) {
+        self.grid.rebuild_step_masks();
+        self.field_cells = self.grid.kind.iter().filter(|&&k| k == WALK || k == FENCE).count();
         self.phase = GamePhase::Running;
         self.tick = 0;
         self.recompute_chase();
         self.recompute_threat_and_flee();
-        self.fields_dirty = false;
     }
 
     // ------------------------------------------------------------- the tick
@@ -763,54 +812,282 @@ impl Sim {
         best
     }
 
+    // ------------------------------------------------------------- fields
+    //
+    // Each field is a job: its seeds are a snapshot of the agents at the
+    // job's start tick, the Dijkstra runs a budget of cells per tick, and the
+    // result is published (swapped into the front buffer the agents read)
+    // one interval later. Chase starts on tick % interval == 0, threat + flee
+    // on tick % interval == interval / 2. A job's result depends only on its
+    // snapshot and the grid, never on the budget, so the budget is free to
+    // adapt. A fence break restarts the jobs in flight on the new grid (same
+    // snapshot). See DECISIONS.md, "Scale".
+
     fn update_fields(&mut self) {
         let iv = self.cfg.field_interval_ticks.max(1);
         let phase = self.tick % iv;
-        if self.fields_dirty || phase == 0 {
-            self.recompute_chase();
+        if phase == 0 {
+            self.publish_chase();
+            self.start_chase_job();
         }
-        if self.fields_dirty || phase == iv / 2 {
-            self.recompute_threat_and_flee();
+        if phase == iv / 2 {
+            self.publish_threat();
+            self.start_threat_job();
         }
-        self.fields_dirty = false;
+        // Budgets: the last job's work + 50%, never more than an upper bound
+        // (a chase job finalizes each passable cell at most once, threat +
+        // flee at most twice, plus the flee seed scan), spread over the
+        // interval. Whatever is left at
+        // the publish tick is finished there. Budgets never change results.
+        let slots = iv as usize;
+        let est = |last: usize, bound: usize| (last + last / 2).min(bound).div_ceil(slots).max(1024);
+        let chase_budget = est(self.chase_work, self.field_cells);
+        let threat_budget = est(self.threat_work, 2 * self.field_cells + self.grid.kind.len() / 2);
+        self.advance_chase_job(chase_budget);
+        self.advance_threat_job(threat_budget);
     }
 
+    fn threat_cap(&self) -> i32 {
+        (self.cfg.flee_threat_cap_m * self.cfg.cost_per_m()) as i32
+    }
+
+    /// Recompute the chase field from the current state and publish it now.
     pub fn recompute_chase(&mut self) {
-        let (grid, x, y, state) = (&self.grid, &self.x, &self.y, &self.state);
-        let seeds = (0..self.n).filter(|&i| state[i] == CIVILIAN).map(|i| (grid.cell_of(x[i], y[i]) as u32, 0));
-        self.dial.run(grid, Mode::Chase, self.cfg.fence_path_cost, &mut self.chase, seeds, false);
+        self.start_chase_job();
+        self.publish_chase();
         self.field_recomputes += 1;
     }
 
+    /// Recompute threat and flee from the current state and publish them now.
     pub fn recompute_threat_and_flee(&mut self) {
-        {
-            let (grid, x, y, state) = (&self.grid, &self.x, &self.y, &self.state);
-            let seeds = (0..self.n).filter(|&i| state[i] == ZOMBIE).map(|i| (grid.cell_of(x[i], y[i]) as u32, 0));
-            self.dial.run(grid, Mode::Chase, self.cfg.fence_path_cost, &mut self.threat, seeds, true);
+        self.start_threat_job();
+        self.publish_threat();
+        self.field_recomputes += 1;
+    }
+
+    fn start_chase_job(&mut self) {
+        let (grid, x, y, state) = (&self.grid, &self.x, &self.y, &self.state);
+        let d = &mut self.chase_dial;
+        d.seeds.clear();
+        d.seeds.extend((0..self.n).filter(|&i| state[i] == CIVILIAN).map(|i| (grid.cell_of(x[i], y[i]) as u32, 0)));
+        self.restart_chase_job();
+    }
+
+    /// (Re)start the chase job from its snapshot on the current grid.
+    fn restart_chase_job(&mut self) {
+        self.chase_next.fill(INF);
+        self.chase_dial.begin(Mode::Chase, self.cfg.fence_path_cost, false);
+        self.chase_job = true;
+        if self.eager_fields {
+            self.advance_chase_job(usize::MAX);
         }
-        // Flee field (Brogue): -k × threat, then one more Dijkstra pass over it.
-        // Seeds sorted by value come for free: capped cells first, then the
-        // threat's finalization order reversed.
-        let cap = (self.cfg.flee_threat_cap_m * self.cfg.cost_per_m()) as i32;
+    }
+
+    fn advance_chase_job(&mut self, budget: usize) {
+        if self.chase_job && !self.chase_dial.finished() {
+            self.chase_dial.advance_budget(&self.grid, &mut self.chase_next, i32::MAX, budget);
+        }
+    }
+
+    fn publish_chase(&mut self) {
+        if !self.chase_job {
+            return;
+        }
+        self.advance_chase_job(usize::MAX);
+        std::mem::swap(&mut self.chase, &mut self.chase_next);
+        self.chase_work = self.chase_dial.pops;
+        self.chase_job = false;
+    }
+
+    fn start_threat_job(&mut self) {
+        let (grid, x, y, state) = (&self.grid, &self.x, &self.y, &self.state);
+        let d = &mut self.threat_dial;
+        d.seeds.clear();
+        d.seeds.extend((0..self.n).filter(|&i| state[i] == ZOMBIE).map(|i| (grid.cell_of(x[i], y[i]) as u32, 0)));
+        self.restart_threat_job();
+    }
+
+    fn restart_threat_job(&mut self) {
+        self.threat_next.fill(INF);
+        // The reference flee seeding reads the finalization order.
+        let order = self.eager_fields || self.cfg.flee_multiplier < 0.0;
+        self.threat_dial.begin(Mode::Chase, self.cfg.fence_path_cost, order);
+        self.threat_job = ThreatJob::Threat;
+        if self.eager_fields {
+            self.advance_threat_job(usize::MAX);
+        }
+    }
+
+    fn advance_threat_job(&mut self, budget: usize) {
+        let before = self.threat_dial.pops;
+        if self.threat_job == ThreatJob::Threat {
+            // Only values below the cap are ever read exactly (dormancy
+            // compares with the wake radius, flee caps the threat): stop there.
+            let limit = if self.eager_fields { i32::MAX } else { self.threat_cap() - 1 };
+            self.threat_dial.advance_budget(&self.grid, &mut self.threat_next, limit, budget);
+            if self.threat_dial.settled < limit {
+                return;
+            }
+            self.setup_flee();
+        }
+        // Work spent in this call, in finalized-cell units; a scanned (or
+        // placed) flee seed cell costs about a quarter of one.
+        let mut spent = self.threat_dial.pops - before;
+        if self.threat_job == ThreatJob::FleeScan {
+            let cells = budget.saturating_sub(spent).max(1).saturating_mul(4);
+            let (scanned, done) = self.scan_flee_zone(cells);
+            spent += scanned / 4;
+            if !done {
+                return;
+            }
+            spent += self.flee_zone.len() / 4;
+        }
+        if self.threat_job == ThreatJob::Flee {
+            if spent >= budget {
+                return;
+            }
+            let left = budget - spent;
+            self.flee_dial.advance_budget(&self.grid, &mut self.flee_next, i32::MAX, left);
+            if self.flee_dial.finished() {
+                self.threat_job = ThreatJob::Done;
+            }
+        }
+    }
+
+    fn publish_threat(&mut self) {
+        if self.threat_job == ThreatJob::Idle {
+            return;
+        }
+        self.advance_threat_job(usize::MAX);
+        std::mem::swap(&mut self.threat, &mut self.threat_next);
+        std::mem::swap(&mut self.flee, &mut self.flee_next);
+        // Same units as `advance_threat_job` (a scanned cell is a quarter).
+        let scan = if self.eager_fields { 0 } else { (self.grid.kind.len() + self.flee_zone.len()) / 4 };
+        self.threat_work = self.threat_dial.pops + self.flee_dial.pops + scan;
+        self.threat_job = ThreatJob::Idle;
+    }
+
+    /// Flee field (Brogue): -k × threat, then one more Dijkstra pass over it.
+    /// Prepares the flee job from the finished threat job (`threat_next`).
+    fn setup_flee(&mut self) {
+        let cap = self.threat_cap();
         let k = self.cfg.flee_multiplier;
         let off = (cap as f32 * k) as i32;
-        self.flee_seeds.clear();
-        for c in 0..self.grid.kind.len() {
-            if self.grid.kind[c] == WALK && self.threat[c] >= cap {
-                self.flee_seeds.push((c as u32, 0));
+        if self.eager_fields || k < 0.0 {
+            // Reference version: seeds sorted by value come for free (capped
+            // cells first, then the threat's finalization order reversed).
+            let fd = &mut self.flee_dial;
+            fd.seeds.clear();
+            for c in 0..self.grid.kind.len() {
+                if self.grid.kind[c] == WALK && self.threat_next[c] >= cap {
+                    fd.seeds.push((c as u32, 0));
+                }
             }
-        }
-        for &c in self.dial.order.iter().rev() {
-            let c = c as usize;
-            let th = self.threat[c];
-            if self.grid.kind[c] == WALK && th < cap {
-                self.flee_seeds.push((c as u32, off - (th as f32 * k) as i32));
+            for &c in self.threat_dial.order.iter().rev() {
+                let c = c as usize;
+                let th = self.threat_next[c];
+                if self.grid.kind[c] == WALK && th < cap {
+                    fd.seeds.push((c as u32, off - (th as f32 * k) as i32));
+                }
             }
+            self.flee_next.fill(INF);
+            fd.begin(Mode::Flee, 0, false);
+            self.threat_job = ThreatJob::Flee;
+        } else {
+            self.start_flee_zone_scan(off);
         }
-        let seeds = std::mem::take(&mut self.flee_seeds);
-        self.dial.run(&self.grid, Mode::Flee, 0, &mut self.flee, seeds.iter().copied(), false);
-        self.flee_seeds = seeds;
-        self.field_recomputes += 1;
+    }
+
+    /// The same flee field, computed only inside the threat zone (cells with
+    /// threat < cap). Capped cells are seeds at 0, so they end at exactly 0
+    /// and only matter through their zone neighbours: each zone cell next to
+    /// one is seeded with min(its own seed, that step's cost). Seeds are >= 0
+    /// because k >= 0, which is what makes capped cells final at 0.
+    /// Seeds are counting-sorted by value over cells in index order
+    /// (sequential memory); the order among equal values doesn't change any
+    /// distance.
+    fn start_flee_zone_scan(&mut self, off: i32) {
+        if self.flee_base_version != Some(self.grid.version) {
+            let g = &self.grid;
+            self.flee_base.clear();
+            self.flee_base.extend(g.kind.iter().map(|&kd| if kd == WALK { 0 } else { INF }));
+            self.flee_base_version = Some(g.version);
+        }
+        // Capped walkable cells end at 0; zone cells start at their seed.
+        self.flee_next.copy_from_slice(&self.flee_base);
+        self.flee_counts.clear();
+        self.flee_counts.resize(off.max(0) as usize + 2, 0);
+        self.flee_zone.clear();
+        self.flee_scan = 0;
+        self.threat_job = ThreatJob::FleeScan;
+    }
+
+    /// Scan up to `cells` more cells for the flee seeds. Returns the cells
+    /// scanned and whether the scan is complete (the flee Dijkstra has then
+    /// begun).
+    fn scan_flee_zone(&mut self, cells: usize) -> (usize, bool) {
+        let cap = self.threat_cap();
+        let k = self.cfg.flee_multiplier;
+        let off = (cap as f32 * k) as i32;
+        let g = &self.grid;
+        let threat = &self.threat_next;
+        let flee = &mut self.flee_next;
+        let offs = field::offsets(g.w);
+        let counts = &mut self.flee_counts;
+        let start = self.flee_scan;
+        let end = start.saturating_add(cells).min(g.kind.len());
+        for c in self.flee_scan..end {
+            let th = threat[c];
+            if th >= cap || g.kind[c] != WALK {
+                continue;
+            }
+            let seed = off - (th as f32 * k) as i32;
+            let mut best = seed;
+            let mut m = g.step_flee[c];
+            while m != 0 {
+                let d = m.trailing_zeros() as usize;
+                m &= m - 1;
+                if threat[(c as isize + offs[d]) as usize] >= cap {
+                    best = best.min(if d < 4 { field::STRAIGHT } else { field::DIAGONAL });
+                    if d < 4 {
+                        break;
+                    }
+                }
+            }
+            flee[c] = best;
+            counts[best as usize + 1] += 1;
+            self.flee_zone.push(c as u32);
+        }
+        self.flee_scan = end;
+        if end < g.kind.len() {
+            return (end - start, false);
+        }
+        for v in 1..counts.len() {
+            counts[v] += counts[v - 1];
+        }
+        let fd = &mut self.flee_dial;
+        fd.seeds.clear();
+        fd.seeds.resize(self.flee_zone.len(), (0, 0));
+        for &c in &self.flee_zone {
+            let v = flee[c as usize];
+            let slot = &mut counts[v as usize];
+            fd.seeds[*slot as usize] = (c, v);
+            *slot += 1;
+        }
+        fd.begin_preset(Mode::Flee, 0);
+        self.threat_job = ThreatJob::Flee;
+        (end - start, true)
+    }
+
+    /// The grid changed (a fence broke): restart the jobs in flight so the
+    /// next published fields see the new grid.
+    fn restart_field_jobs(&mut self) {
+        if self.chase_job {
+            self.restart_chase_job();
+        }
+        if self.threat_job != ThreatJob::Idle {
+            self.restart_threat_job();
+        }
     }
 
     fn update_civilians(&mut self, running: bool) {
@@ -848,7 +1125,7 @@ impl Sim {
             } else {
                 self.step_mul[i] = 1;
                 vmax = cfg.civilian_flee_speed;
-                match field::downhill(&self.grid.kind, &self.flee, c, &off, Mode::Flee) {
+                match field::downhill_masked(self.grid.step_flee[c], &self.flee, c, &off) {
                     Some(d) => {
                         dx = DIR_UNIT[d][0] * vmax;
                         dy = DIR_UNIT[d][1] * vmax;
@@ -905,7 +1182,7 @@ impl Sim {
             if let Some((j, d2)) = target {
                 let tc = self.grid.cell_of(self.x[j], self.y[j]);
                 let reachable = tc == c
-                    || (0..8).any(|d| (c as isize + off[d]) as usize == tc && self.grid.kind[tc] == WALK && field::step_allowed(&self.grid.kind, c, d, &off, Mode::Flee));
+                    || (0..8).any(|d| (c as isize + off[d]) as usize == tc && self.grid.kind[tc] == WALK && (self.grid.step_flee[c] >> d) & 1 != 0);
                 if reachable && d2 > 0.0 {
                     let inv = speed / d2.sqrt();
                     desired = Some(((self.x[j] - x) * inv, (self.y[j] - y) * inv));
@@ -913,7 +1190,7 @@ impl Sim {
             }
             let (dx, dy) = match desired {
                 Some(v) => v,
-                None => match field::downhill(&self.grid.kind, &self.chase, c, &off, Mode::Chase) {
+                None => match field::downhill_masked(self.grid.step_chase[c], &self.chase, c, &off) {
                     Some(d) => {
                         let nc = (c as isize + off[d]) as usize;
                         if self.grid.kind[nc] == FENCE {
@@ -964,8 +1241,10 @@ impl Sim {
         self.sep_y[..self.n].fill(0.0);
         // Visit agents in spatial-hash order so neighbouring agents (and their
         // buckets) are processed together: same per-agent result, far fewer
-        // cache misses than index order.
-        for k0 in 0..self.n {
+        // cache misses than index order. Only the live part of `agent_ids`
+        // (dead agents aren't hashed; slots past it are stale).
+        let live = self.bucket_start[self.hash_w * self.hash_h] as usize;
+        for k0 in 0..live {
             let i = self.agent_ids[k0] as usize;
             if self.step_mul[i] == 0 || self.state[i] == DEAD {
                 continue;
@@ -1092,7 +1371,7 @@ impl Sim {
             self.grid.fence_hp[c] -= dmg;
             if self.grid.fence_hp[c] <= 0.0 {
                 self.grid.fence_hp[c] = 0.0;
-                self.grid.kind[c] = WALK;
+                self.grid.set_kind(c, WALK);
                 self.stats.fence_cells_broken += 1;
                 if self.stats.first_breach_tick.is_none() {
                     self.stats.first_breach_tick = Some(self.tick);
@@ -1102,8 +1381,7 @@ impl Sim {
         }
         self.fence_touched.clear();
         if broke {
-            self.recompute_chase();
-            self.recompute_threat_and_flee();
+            self.restart_field_jobs();
         }
     }
 
@@ -1142,6 +1420,23 @@ impl Sim {
             eat(&t.shots.to_le_bytes());
         }
         h
+    }
+
+    /// Approximate heap bytes held by the sim (agent arrays, hash, fields,
+    /// grid). Benchmarks report it; it excludes allocator overhead.
+    pub fn memory_bytes(&self) -> usize {
+        fn b<T>(v: &Vec<T>) -> usize {
+            v.capacity() * std::mem::size_of::<T>()
+        }
+        let agents = b(&self.x) + b(&self.y) + b(&self.vx) + b(&self.vy) + b(&self.state) + b(&self.timer) + b(&self.hp) + b(&self.bite_cd) + b(&self.step_mul);
+        let agents = agents + b(&self.sep_x) + b(&self.sep_y) + b(&self.spawn_x) + b(&self.spawn_y);
+        let hash = b(&self.bucket_start) + b(&self.bucket_civ_end) + b(&self.bucket_fill) + b(&self.agent_ids) + b(&self.agent_bucket) + b(&self.hx) + b(&self.hy) + b(&self.hs);
+        let fields = b(&self.chase) + b(&self.threat) + b(&self.flee) + b(&self.chase_next) + b(&self.threat_next) + b(&self.flee_next) + self.chase_dial.memory_bytes() + self.threat_dial.memory_bytes() + self.flee_dial.memory_bytes();
+        let fields = fields + b(&self.flee_base) + b(&self.flee_counts) + b(&self.flee_zone);
+        let fences = b(&self.fence_damage) + b(&self.fence_touched);
+        let g = &self.grid;
+        let grid = b(&g.kind) + b(&g.building) + b(&g.fence_hp) + b(&g.step_chase) + b(&g.step_flee) + g.buildings.iter().map(|bi| b(&bi.polygon) + std::mem::size_of_val(bi)).sum::<usize>();
+        agents + hash + fields + fences + grid
     }
 
     pub fn is_building_cell(&self, i: usize) -> bool {

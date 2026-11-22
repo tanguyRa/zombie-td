@@ -31,22 +31,22 @@
   },
   {
     "group": "M2 rules",
-    "name": "infection_delay_is_exactly_20_ticks",
-    "ok": true
-  },
-  {
-    "group": "M2 rules",
     "name": "infected_are_never_targeted_by_towers",
     "ok": true
   },
   {
     "group": "M2 rules",
-    "name": "dijkstra_bucket_queue_matches_brute_force",
+    "name": "infection_delay_is_exactly_20_ticks",
     "ok": true
   },
   {
     "group": "M2 rules",
     "name": "outbreak_seeds_clusters",
+    "ok": true
+  },
+  {
+    "group": "M2 rules",
+    "name": "dijkstra_bucket_queue_matches_brute_force",
     "ok": true
   },
   {
@@ -76,12 +76,12 @@
   },
   {
     "group": "M3 tools",
-    "name": "tower_kills_zombie_at_30m_in_exactly_3_shots",
+    "name": "tower_ignores_zombie_at_41m",
     "ok": true
   },
   {
     "group": "M3 tools",
-    "name": "tower_ignores_zombie_at_41m",
+    "name": "tower_kills_zombie_at_30m_in_exactly_3_shots",
     "ok": true
   },
   {
@@ -96,7 +96,7 @@
   },
   {
     "group": "M3 tools",
-    "name": "fence_break_reopens_cell_and_recomputes_fields_same_tick",
+    "name": "fence_break_reopens_cell_and_fields_follow_within_one_interval",
     "ok": true
   },
   {
@@ -107,6 +107,31 @@
   {
     "group": "M3 tools",
     "name": "zombies_attack_the_fence_without_a_gap",
+    "ok": true
+  },
+  {
+    "group": "T1 scale",
+    "name": "lazy_settle_gives_the_full_field",
+    "ok": true
+  },
+  {
+    "group": "T1 scale",
+    "name": "step_masks_follow_kind_changes",
+    "ok": true
+  },
+  {
+    "group": "T1 scale",
+    "name": "lazy_fields_match_eager_through_fence_breaks",
+    "ok": true
+  },
+  {
+    "group": "T1 scale",
+    "name": "lazy_fields_match_eager_on_paris_with_defenses",
+    "ok": true
+  },
+  {
+    "group": "T1 scale",
+    "name": "lazy_fields_match_eager_on_grid_city_disc",
     "ok": true
   },
   {

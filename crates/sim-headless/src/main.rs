@@ -3,12 +3,15 @@
 //!   cargo run --release -p sim-headless -- report      # everything, writes reports/
 //!   cargo run --release -p sim-headless -- run --level paris-marais --pop 20000 --seed 1
 //!   cargo run --release -p sim-headless -- bench --pop 100000
+//!   cargo run --release -p sim-headless -- bench --scale [--radii 1100,1300,1600] [--pops 20000,...]
+//!        [--ticks 8000] [--clusters 12] [--level marais-tiled:1300,<levels/ name>|none] [--skip-wasm] [--out reports/scale.md]
 //!   cargo run --release -p sim-headless -- scenarios
 
 mod bench;
 mod charts;
 mod common;
 mod report;
+mod scale;
 mod scenarios;
 
 use std::time::Instant;
@@ -30,12 +33,14 @@ fn main() {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "run" => cmd_run(&args),
+        "bench" if args.iter().any(|a| a == "--scale") => cmd_scale(&args),
         "bench" => {
             let pop: u32 = arg(&args, "--pop", 100_000);
             let ticks: u32 = arg(&args, "--ticks", bench::BENCH_TICKS);
             let r = bench::run_native(pop, ticks);
             println!("{}", serde_json::to_string_pretty(&r.summary()).unwrap());
         }
+        "fieldbench" => cmd_fieldbench(&args),
         "scenarios" => {
             let seeds: u32 = arg(&args, "--seeds", 5);
             let only: String = arg(&args, "--only", String::new());
@@ -50,6 +55,79 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+fn list<T: std::str::FromStr>(args: &[String], name: &str, default: &[T]) -> Vec<T>
+where
+    T: Clone,
+{
+    let s: String = arg(args, name, String::new());
+    if s.is_empty() {
+        return default.to_vec();
+    }
+    s.split(',').filter_map(|v| v.trim().parse().ok()).collect()
+}
+
+fn cmd_scale(args: &[String]) {
+    let o = scale::ScaleOpts {
+        radii: list(args, "--radii", &scale::SCALE_RADII),
+        pops: list(args, "--pops", &scale::SCALE_POPS),
+        ticks: arg(args, "--ticks", scale::SCALE_TICKS),
+        clusters: arg(args, "--clusters", scale::SCALE_CLUSTERS),
+        wasm: !args.iter().any(|a| a == "--skip-wasm"),
+        real_levels: list::<String>(args, "--level", &["marais-tiled:1300".to_string()]).into_iter().filter(|l| l != "none").collect(),
+    };
+    if o.wasm {
+        let st = std::process::Command::new("wasm-pack")
+            .current_dir(repo_root())
+            .args(["build", "crates/sim-wasm", "--release", "--target", "nodejs", "--out-dir", "pkg-node"])
+            .status();
+        if !st.map_or(false, |s| s.success()) {
+            eprintln!("[scale] wasm-pack build failed");
+            std::process::exit(1);
+        }
+    }
+    let runs = scale::run_all(&o);
+    let md = scale::section_md(&runs, o.ticks, o.clusters);
+    println!("{md}");
+    let out: String = arg(args, "--out", String::new());
+    if !out.is_empty() {
+        let p = repo_root().join(&out);
+        std::fs::write(&p, &md).unwrap();
+        let summaries: Vec<scale::ScaleSummary> = runs.iter().map(|r| r.summary()).collect();
+        std::fs::write(p.with_extension("json"), serde_json::to_string_pretty(&summaries).unwrap()).unwrap();
+        eprintln!("[scale] wrote {}", p.display());
+    }
+}
+
+/// Time full field recomputes on a wave-8-sized level in a late-game state
+/// (most agents zombies, spread everywhere): the worst case for the fields.
+fn cmd_fieldbench(args: &[String]) {
+    let r: f32 = arg(args, "--radius", 1300.0);
+    let pop: u32 = arg(args, "--pop", 100_000);
+    let zshare: f32 = arg(args, "--zombies", 0.9);
+    let reps: u32 = arg(args, "--reps", 10);
+    let level = scale::scale_level(r);
+    let mut sim = Sim::new(&level, load_config(), pop, 1);
+    sim.start();
+    let nz = (pop as f32 * zshare) as usize;
+    for i in 0..nz {
+        let (x, y) = (sim.x[i], sim.y[i]);
+        sim.force_zombie(i, x, y);
+    }
+    let walk = sim.grid.walkable_count();
+    let (mut tc, mut tt) = (Vec::new(), Vec::new());
+    for _ in 0..reps {
+        let t = Instant::now();
+        sim.recompute_chase();
+        tc.push(t.elapsed().as_secs_f64() * 1000.0);
+        let t = Instant::now();
+        sim.recompute_threat_and_flee();
+        tt.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    tc.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    tt.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!("radius {r} m, {walk} walkable cells, {pop} agents, {nz} zombies: chase {:.2} ms, threat+flee {:.2} ms (median of {reps})", tc[tc.len() / 2], tt[tt.len() / 2]);
 }
 
 fn cmd_run(args: &[String]) {

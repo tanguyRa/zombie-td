@@ -66,15 +66,18 @@ Every choice the spec left open, and every simplification, in one place.
   because the Infected phase of the same tick decrements it once. So a
   civilian bitten at tick t is Infected from t and a Zombie exactly at t + 20
   (tested).
-- **Field schedule:** chase is recomputed when `tick % 5 == 0`, threat + flee
-  when `tick % 5 == 2` ("alternating ticks"), plus both at Start and both,
-  immediately, in the fence phase of any tick where a fence cell breaks.
+- **Field schedule (changed in T1, see "Scale"):** a chase job starts when
+  `tick % 5 == 0` and a threat + flee job when `tick % 5 == 2`, each from a
+  snapshot of the agents at that tick; each is published 5 ticks later.
+  Start computes both at once. A fence break restarts the jobs in flight on
+  the new grid instead of recomputing immediately.
 - **Field units:** 10 per straight step = 5 cost units per meter. The wake
   radius (60 m) is therefore a threat value of 300.
 - **Flee field:** threat is capped at `flee_threat_cap_m` (200 m) before
   multiplying by −1.2, so far-away regions are flat instead of infinite. The
   "one more Dijkstra pass" runs Dial's algorithm seeded with every walkable
-  cell at its scaled value. The seeds come pre-sorted for free: capped cells
+  cell at its scaled value. Since T1 it only runs inside the threat zone (see
+  "Scale"); the reference version (`eager_fields`) still seeds capped cells
   first, then the threat field's finalization order reversed.
 - **Corner cutting:** a diagonal step is allowed only if neither orthogonal
   neighbour blocks (building, wall, and for civilians also fences). The same
@@ -123,6 +126,110 @@ Every choice the spec left open, and every simplification, in one place.
   trig, sqrt only, PCG32, and index-order iteration. The fixture run (Paris,
   5k agents, seed 2026, one tower, one fence, 400 ticks) hashes identically
   native and in WASM under Node (tested).
+
+## Scale (T1, wave-8 size)
+
+- **Wave-8 caps: `wave8_radius_m` 1300, `max_population` 100,000** (in
+  `config.default.json`; the 8-wave loop that reads them comes in T2). With
+  them, the WASM tick p95 stays under 50 ms on the heaviest real geometry we
+  have (the Marais tiled to 1.3 km), so 1× is playable in the browser
+  worker. Measurements below and in `reports/scale.md`.
+- **Benchmark (`sim-headless bench --scale`).** Levels: `grid_city_disc`
+  (40 m blocks, 14 m streets, cut to a circle; 47% walkable) at 1.1, 1.3 and
+  1.6 km, and the committed Marais tiled to 1.3 km (`marais-tiled:1300`;
+  alternate tiles mirrored so streets meet at the seams; 68% walkable, real
+  street geometry). 20k / 50k / 100k / 150k agents, no defense, seed 1, 12
+  outbreak clusters ("wave 8 is massive"), run until civilians drop below
+  15% (the T2 defeat rule; nothing runs past it). Native and WASM under Node
+  (`tools/wasm-bench.mjs --level-file --config-file`). Single thread, host
+  M1 Pro, macOS 14, not in Docker. Max tick is dominated by isolated host
+  hiccups (different ticks on each run, also in phases that do no field
+  work); p95/p99 are the figures to read.
+- **No real 1.3 km level is committed.** One Overpass query at 1.3 km
+  (48.862, 2.376, Paris 11e) got a 502 from overpass-api.de and a read
+  timeout from the fallback instance; we did not insist. The tiled Marais
+  stands in for real geometry offline and is generated in the bench.
+- **Before (pre-T1 code), 1.3 km:** WASM p95 53 / 62 / 70 / 81 ms at 20k /
+  50k / 100k / 150k on `grid_city_disc`, 74 / 75 / 86 / 93 ms on the tiled
+  Marais. The cost was the fields, not the agents: one threat + flee
+  recompute over the whole map (30–40 ms native, 2× that in WASM) landing
+  on a single tick.
+- **What changed (all in sim-core, native == WASM bit for bit):**
+  - *Step masks* (`Grid::step_chase` / `step_flee`): one byte per cell with
+    the allowed directions, so Dijkstra and steering skip the corner checks.
+    Kept in sync by `Grid::set_kind`, rebuilt at start. Same results.
+  - *Resumable Dial* (`Dial::begin` / `advance_budget` / `settle`): a run can
+    pause at a bucket boundary and continue later; the result never depends
+    on where it paused. Ring size rounded to a power of two (mask instead of
+    `rem_euclid`). Same results.
+  - *Threat stops at the flee cap* (200 m): values at or above the cap are
+    only ever compared with the cap or the wake radius. Same results.
+  - *Flee only inside the threat zone*: capped cells end at exactly 0, so
+    only zone cells are seeded (each next to a capped cell at min(seed,
+    step cost)), counting-sorted by value over cells in index order, with
+    their values preset. Bit-identical flee field (tested against the
+    reference seeding every 7 ticks).
+  - *Field jobs spread over ticks* (**rule change**): instead of computing a
+    field inside the tick that needs it, each field is a job seeded from a
+    snapshot, advanced by a budget every tick, and published one interval
+    (5 ticks) later. Agents therefore steer on fields 5–9 ticks old instead
+    of 0–4 (0.25 s more). Budget = the last job's work + 50%, capped by an
+    upper bound (each passable cell finalized at most once for chase, twice
+    for threat + flee, plus the flee seed scan at a quarter per cell); the
+    flee seed scan is itself incremental. Any leftover is finished at the
+    publish tick. The budget never changes results, only where the work
+    happens. A fence break restarts the jobs in flight on the new grid (the
+    published fields catch up within one interval instead of the same tick).
+    This is the change that moved the hash: **fixture
+    `db5a39a980ef2a0a` → `0ea142296a5795a9`**, updated on purpose. WASM
+    under Node reproduces it.
+- **Tested:** `tests/t1_scale.rs` runs a sim and an `eager_fields` reference
+  (every job computed in full the moment it starts, original flee seeding,
+  uncapped threat) side by side on Paris with towers and fences, on a
+  `grid_city_disc` and through fence breaks: same hash every tick, same
+  chase and flee fields, same threat below the cap. Plus resumable Dial vs
+  brute force and step masks vs `step_allowed`.
+- **Tried and dropped:** a lazy chase field (zombies settle it up to their
+  own cell): civilians are everywhere, so it still settles almost the whole
+  map, just inside the zombie phase. Coarser cells were not needed.
+- **WASM inner loop:** the Dijkstra visits directions with a fixed 8-step
+  loop in WASM (25% faster in V8) and with bit scanning natively (10%
+  faster there). Same order, same results.
+- **Measurements, tick p95 in ms (before → after T1), WASM under Node:**
+
+  | Level | 20k | 50k | 100k | 150k |
+  |---|---|---|---|---|
+  | grid 1.1 km | – | – | 50.7 → 34.2 | – |
+  | grid 1.3 km | 53.3 → 23.7 | 62.5 → 28.4 | 69.8 → 38.6 | 81.0 → 46.9 |
+  | grid 1.6 km | – | – | 88.4 → 49.0 | – |
+  | Marais tiled 1.3 km | 74.4 → 30.1 | 74.8 → 35.6 | 86.1 → **45.7** | 93.1 → 56.4 |
+
+  Native, same order: grid 1.3 km 45.7 / 52.4 / 58.2 / 68.4 → 18.5 / 23.4 /
+  32.8 / 41.0; Marais tiled 73.8 / 78.2 / 79.4 / 90.3 → 23.5 / 28.2 / 36.2
+  / 45.2. Fields p95 at 1.3 km went from ~43 (native) / ~52 (WASM) to ~16 /
+  ~20 on the grid and ~20 / ~26 on the Marais. Full table (p50, p99, max,
+  memory, setup): `reports/scale.md`. Memory at the caps: ~125 MB native
+  (`Sim::memory_bytes`, double-buffered fields included), ~135 MB WASM
+  linear memory; setup (`Sim::new` + start) ~0.4 s in WASM.
+- **Why 1.3 km / 100k:** the heaviest case we have (real Paris geometry,
+  68% walkable) stays at 45.7 ms p95 / 47 ms p99 in WASM, with ~10% left
+  for the browser's own overhead. 150k misses there (56 ms): agent phases
+  (separation, zombie steering) grow with the population while the field
+  work is set by the area. 1.6 km fits 100k only on the synthetic grid
+  (49 ms); with real geometry, ~45% more walkable cells, it would hold about
+  50k, too few for "wave 8 is massive". 1.3 km is the middle of the
+  1.1–1.6 km target (about 5.3 km² per match, ~15 matches for 75% of
+  Paris).
+- **Firefox runs our WASM ~6× slower** (p50 8.3 ms vs 1.4 ms Chromium and
+  1.3 ms WebKit, Marais 5k agents, same hash). Measured on Playwright's
+  Firefox 151 (build 1532, macOS arm64): same speed outside Playwright (the
+  binary launched directly, so not Juggler), same with a non-SIMD build, no
+  tier-up after 2,500 ticks, and with `javascript.options.wasm_baselinejit`
+  off the page fails with "no WebAssembly compiler available". So this build
+  has no optimizing wasm tier and runs everything in the baseline compiler.
+  Nothing in our code can fix that; stock Firefox (with Ion) was not
+  available on the host to compare. Wave-8 sizes are therefore not playable
+  in that Firefox build.
 
 ## Player tools
 

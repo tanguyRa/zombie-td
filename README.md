@@ -54,6 +54,10 @@ Useful extras:
 - `./dev.sh cargo run --release -p sim-headless -- report --quick` makes a
   fast report (2 seeds, no S5, short benchmarks) for iteration. It is marked
   "QUICK MODE".
+- `./dev.sh cargo run --release -p sim-headless -- bench --scale --out reports/scale.md`
+  runs the wave-8 scale benchmark (1.1 / 1.3 / 1.6 km levels and the tiled
+  Marais, 20k–150k agents, native and WASM; about an hour). `--radii`,
+  `--pops`, `--level`, `--ticks` and `--skip-wasm` narrow it down.
 - `./dev.sh python3 tools/levelgen/levelgen.py --name paris-marais --lat 48.8580 --lon 2.3580 --query-radius 500`
   regenerates a committed level from Overpass (one query).
 

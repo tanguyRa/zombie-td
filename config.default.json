@@ -38,5 +38,8 @@
   "separation_radius_m": 0.6,
   "separation_max_neighbors": 8,
   "separation_max_scan": 48,
-  "kill_flash_seconds": 1.0
+  "kill_flash_seconds": 1.0,
+
+  "wave8_radius_m": 1300.0,
+  "max_population": 100000
 }

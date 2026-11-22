@@ -1,6 +1,7 @@
 //! Rasterized level: a uniform grid of 2 m cells built from the level's polygons.
 
 use crate::config::Config;
+use crate::field::{self, Mode};
 use crate::level::{self, BuildingKind, LevelPack};
 
 pub const WALK: u8 = 0;
@@ -36,6 +37,15 @@ pub struct Grid {
     pub buildings: Vec<BuildingInfo>,
     /// Walkable cells removed because they were cut off from the main area.
     pub enclosed_cells_removed: u32,
+    /// Per-cell bit masks of allowed steps (bit d: the step in `field::DIRS[d]`
+    /// passes `field::step_allowed`), for zombies (`Mode::Chase`) and civilians
+    /// (`Mode::Flee`). Border cells are 0. Kept in sync by `set_kind`; call
+    /// `rebuild_step_masks` after writing `kind` directly.
+    pub step_chase: Vec<u8>,
+    pub step_flee: Vec<u8>,
+    /// Bumped whenever `kind` changes through `set_kind` or the masks are
+    /// rebuilt, so caches derived from `kind` know when to refresh.
+    pub version: u32,
 }
 
 impl Grid {
@@ -81,6 +91,9 @@ impl Grid {
             fence_hp: vec![0.0; n],
             buildings: Vec::with_capacity(level.buildings.len()),
             enclosed_cells_removed: 0,
+            step_chase: vec![0; n],
+            step_flee: vec![0; n],
+            version: 0,
         };
 
         // Walls: grid border, outside the circle, outside synthetic bounds.
@@ -151,7 +164,54 @@ impl Grid {
                 }
             }
         }
+        g.rebuild_step_masks();
         g
+    }
+
+    fn masks_at(&self, c: usize) -> (u8, u8) {
+        let off = field::offsets(self.w);
+        let (mut mc, mut mf) = (0u8, 0u8);
+        for d in 0..8 {
+            if field::step_allowed(&self.kind, c, d, &off, Mode::Chase) {
+                mc |= 1 << d;
+            }
+            if field::step_allowed(&self.kind, c, d, &off, Mode::Flee) {
+                mf |= 1 << d;
+            }
+        }
+        (mc, mf)
+    }
+
+    /// Recompute every cell's step masks from `kind`.
+    pub fn rebuild_step_masks(&mut self) {
+        self.version = self.version.wrapping_add(1);
+        for cy in 1..self.h - 1 {
+            for cx in 1..self.w - 1 {
+                let c = cy * self.w + cx;
+                let (mc, mf) = self.masks_at(c);
+                self.step_chase[c] = mc;
+                self.step_flee[c] = mf;
+            }
+        }
+    }
+
+    /// Change a cell's kind and refresh the masks of the cells around it (a
+    /// cell's mask depends only on its 8 neighbours).
+    pub fn set_kind(&mut self, c: usize, k: u8) {
+        if self.kind[c] == k {
+            return;
+        }
+        self.kind[c] = k;
+        self.version = self.version.wrapping_add(1);
+        let (cx, cy) = (c % self.w, c / self.w);
+        for y in cy.saturating_sub(1).max(1)..=(cy + 1).min(self.h - 2) {
+            for x in cx.saturating_sub(1).max(1)..=(cx + 1).min(self.w - 2) {
+                let i = y * self.w + x;
+                let (mc, mf) = self.masks_at(i);
+                self.step_chase[i] = mc;
+                self.step_flee[i] = mf;
+            }
+        }
     }
 
     /// Keep only the largest 4-connected walkable region; small pockets fully

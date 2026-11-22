@@ -166,7 +166,7 @@ fn civilians_never_cross_fences() {
 }
 
 #[test]
-fn fence_break_reopens_cell_and_recomputes_fields_same_tick() {
+fn fence_break_reopens_cell_and_fields_follow_within_one_interval() {
     let mut sim = compound(false, 6);
     let [cx, cy] = sim.to_sim(COMPOUND_CENTER[0], COMPOUND_CENTER[1]);
     let east = cx + COMPOUND_HALF + 1.0;
@@ -184,17 +184,25 @@ fn fence_break_reopens_cell_and_recomputes_fields_same_tick() {
     assert!(sim.stats.fence_cells_broken > 0, "the weak cell never broke");
     let broken: Vec<usize> = fences_before.iter().copied().filter(|&c| sim.grid.kind[c] == WALK).collect();
     assert_eq!(broken.len() as u32, sim.stats.fence_cells_broken, "broken cells are walkable again");
-    // Fields already reflect the break at the end of the breaking tick.
+    // The field jobs in flight restart on the new grid, so the fields the
+    // agents read reflect the break once both were published again: within
+    // one field interval.
+    let fresh_flee = {
+        let mut probe = Sim::new(&level::walled_compound(), common::cfg(), 1, 9);
+        probe.grid = sim.grid.clone();
+        probe.recompute_threat_and_flee();
+        probe.flee
+    };
+    for &c in &broken {
+        assert!(fresh_flee[c] < sim_core::field::INF, "the broken cell is open for civilians");
+    }
+    for _ in 0..sim.cfg.field_interval_ticks {
+        sim.step();
+    }
     for &c in &broken {
         assert!(sim.chase[c] < fence_cost, "chase field still charges the fence cost");
         assert!(sim.flee[c] < sim_core::field::INF, "flee field still treats the cell as a fence");
     }
-    let (chase, flee, threat) = (sim.chase.clone(), sim.flee.clone(), sim.threat.clone());
-    sim.recompute_chase();
-    sim.recompute_threat_and_flee();
-    assert_eq!(chase, sim.chase);
-    assert_eq!(threat, sim.threat);
-    assert_eq!(flee, sim.flee);
 }
 
 #[test]

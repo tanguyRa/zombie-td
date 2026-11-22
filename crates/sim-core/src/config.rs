@@ -44,6 +44,13 @@ pub struct Config {
     pub separation_max_neighbors: u32,
     pub separation_max_scan: u32,
     pub kill_flash_seconds: f32,
+
+    /// Playable radius of the last (8th) wave, in meters. The match loop (T2)
+    /// grows the rings up to it. Chosen in T1 from the scale benchmarks.
+    pub wave8_radius_m: f32,
+    /// Most agents a match may hold (every civilian, zombie and corpse of
+    /// all waves). Agent arrays are sized for it up front (T2).
+    pub max_population: u32,
 }
 
 /// The repository's `config.default.json`, embedded so tests and the WASM

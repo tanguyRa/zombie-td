@@ -199,3 +199,26 @@ pub fn walled_compound() -> LevelPack {
         bounds: Some([0.0, 0.0, 200.0, 200.0]),
     }
 }
+
+/// A `grid_city` centred on the origin and cut to a circle of `radius_m`,
+/// for wave-8-sized benchmarks. Blocks whose centre is not at least half a
+/// block inside the circle are dropped, so the edge is a street ring.
+pub fn grid_city_disc(radius_m: f32, block_m: f32, street_m: f32, seed: u64) -> LevelPack {
+    let pitch = block_m + street_m;
+    let n = ((2.0 * radius_m) / pitch).ceil() as u32 + 1;
+    let mut l = grid_city(n, block_m, street_m, seed);
+    let half = (n as f32 * pitch + street_m) * 0.5;
+    let keep = radius_m - block_m * 0.75;
+    l.buildings.retain_mut(|b| {
+        for p in b.polygon.iter_mut() {
+            p[0] -= half;
+            p[1] -= half;
+        }
+        let [cx, cy] = polygon_centroid(&b.polygon);
+        cx * cx + cy * cy <= keep * keep
+    });
+    l.name = format!("grid_city_disc_{radius_m}m");
+    l.radius_m = Some(radius_m);
+    l.bounds = None;
+    l
+}

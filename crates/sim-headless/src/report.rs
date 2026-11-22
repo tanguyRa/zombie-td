@@ -2,7 +2,8 @@
 //! WASM under Node), then writes reports/headless-report.{md,html} plus the
 //! raw JSON and CSV files.
 //!
-//! Options: --quick (2 seeds, no S5, 600 bench ticks), --skip-tests, --skip-wasm.
+//! Options: --quick (2 seeds, no S5, 600 bench ticks, small scale run),
+//! --skip-tests, --skip-wasm, --skip-scale.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -13,6 +14,7 @@ use sim_core::sim::PHASES;
 
 use crate::bench::{self, BenchRun, BenchSummary};
 use crate::charts::{self, Series};
+use crate::scale;
 use crate::common::*;
 use crate::scenarios::{self, RunResult, SCENARIOS};
 
@@ -67,6 +69,8 @@ fn group_of(running_line: &str) -> String {
         "M2 rules".into()
     } else if l.contains("tests/m3_tools.rs") {
         "M3 tools".into()
+    } else if l.contains("tests/t1_scale.rs") {
+        "T1 scale".into()
     } else if l.contains("native_equals_wasm") {
         "Native = WASM".into()
     } else if l.contains("sim_core") || l.contains("sim-core") {
@@ -349,6 +353,26 @@ pub fn run(args: &[String]) {
         }
     }
 
+    // ------------------------------------------------------ scale (wave 8)
+    let scale_sec = if args.iter().any(|a| a == "--skip-scale") {
+        None
+    } else {
+        let o = scale::ScaleOpts {
+            radii: if quick { vec![1300.0] } else { scale::SCALE_RADII.to_vec() },
+            pops: if quick { vec![20_000, 100_000] } else { scale::SCALE_POPS.to_vec() },
+            ticks: if quick { 600 } else { scale::SCALE_TICKS },
+            clusters: scale::SCALE_CLUSTERS,
+            wasm: !skip_wasm && wasm_note.is_none(),
+            real_levels: if quick { vec![] } else { vec!["marais-tiled:1300".into()] },
+        };
+        eprintln!("[report] scale runs (wave 8)");
+        let runs = scale::run_all(&o);
+        let summaries: Vec<scale::ScaleSummary> = runs.iter().map(|r| r.summary()).collect();
+        // Not scale.json: that one belongs to `bench --scale --out reports/scale.md`.
+        std::fs::write(reports.join("headless-scale.json"), serde_json::to_string_pretty(&summaries).unwrap()).unwrap();
+        Some((scale::intro_md(o.ticks, o.clusters), scale::table_md(&runs)))
+    };
+
     // ------------------------------------------------------ targets
     let find = |rt: &str| summaries.iter().find(|s| s.runtime == rt && s.population == 100_000).cloned();
     let mut targets = Vec::new();
@@ -380,7 +404,7 @@ pub fn run(args: &[String]) {
     }
     let rows = scenario_rows(&runs);
 
-    let ctx = Ctx { quick, env, targets, groups, tests, test_notes, rows, summaries, wasm_note, ticks, seeds };
+    let ctx = Ctx { quick, env, targets, groups, tests, test_notes, rows, summaries, wasm_note, ticks, seeds, scale: scale_sec };
     let md = markdown(&ctx);
     std::fs::write(reports.join("headless-report.md"), &md).unwrap();
     let html = html(&ctx, &runs, &bench_runs);
@@ -403,6 +427,8 @@ struct Ctx {
     wasm_note: Option<String>,
     ticks: u32,
     seeds: u32,
+    /// Scale section: intro paragraph and table (markdown).
+    scale: Option<(String, String)>,
 }
 
 fn pf(p: Option<bool>) -> &'static str {
@@ -514,6 +540,9 @@ fn markdown(c: &Ctx) -> String {
             let _ = writeln!(s, "Top hot spots, {rt} 100k: {hs}.\n");
         }
     }
+    if let Some((intro, table)) = &c.scale {
+        let _ = writeln!(s, "## Scale (wave 8)\n\n{intro}\n\n{table}");
+    }
     let _ = writeln!(s, "## Known issues and simplifications\n");
     for k in known_issues(c) {
         let _ = writeln!(s, "- {k}");
@@ -609,6 +638,10 @@ fn html(c: &Ctx, runs: &[RunResult], bench_runs: &[BenchRun]) -> String {
         }
     }
     body.push_str("</section>");
+
+    if let Some((intro, table)) = &c.scale {
+        let _ = write!(body, "<section><h2>Scale (wave 8)</h2><p>{}</p>{}</section>", esc(intro), md_table_to_html(table));
+    }
 
     // Tests
     let _ = write!(body, "<section><h2>Tests</h2>");
