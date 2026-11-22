@@ -16,9 +16,10 @@
 // the second commit sees a newer revision, aborts and the service retries
 // on fresh data, so a match can't be paid twice from two tabs.
 
+import { cityKeyOf } from "./coverage";
 import { isCityId } from "./place";
 import { checkSummary } from "./rewards";
-import { sanitizePlace } from "./sanitize";
+import { looksLikeAddress, sanitizePlace } from "./sanitize";
 import { TIERS, type CoverageCell, type MatchRecord, type ProfileState } from "./types";
 
 export const DB_NAME = "zt-profile";
@@ -325,7 +326,29 @@ export const MIGRATIONS: Record<number, Migration> = {};
 /// (as `claimMatch` ignores it), `summary.city` and `summary.district` are
 /// sanitised again (city and district mode), and every coverage city key
 /// must be `id:osm:relation:<1-12 digits>` or `name:<non-empty>`.
-export function validateBundle(b: Bundle, opts: { maxRadiusM: number; isCard?: (id: string) => boolean }): void {
+///
+/// The same holds for every other place-bearing string of the state, as a
+/// hand-edited export can put an address anywhere:
+/// - card stamps and tickets: `district` and `city` sanitised again (their
+///   `mvpCard` must be null or a card);
+/// - crate lore: rebuilt with `rebuildLore` (the template it reads as, the
+///   place from its cards' sanitised stamps, else its match); a line that
+///   reads as no template is refused when `looksLikeAddress` says so;
+/// - achievements: `city` sanitised again, a `name:` `cityKey` must be
+///   `cityKeyOf(city)`, and `id` must be `city_cleared:<cityKey>:<tier>`
+///   (refused otherwise);
+/// - coverage: a `name:` key that isn't `cityKeyOf` of its own name sanitised
+///   again is dropped from the cell (the cell stays).
+/// A valid export is left unchanged by all of this (sanitising is idempotent).
+export function validateBundle(
+  b: Bundle,
+  opts: {
+    maxRadiusM: number;
+    isCard?: (id: string) => boolean;
+    /// See `rebuildLore` (crates.ts). Without it, lore is only checked with `looksLikeAddress`.
+    rebuildLore?: (source: string, lore: string, district: string, city: string) => string | null;
+  },
+): void {
   const fail = (m: string): never => {
     throw new ProfileError("bad_import", `not a valid profile: ${m}`);
   };
@@ -390,6 +413,56 @@ export function validateBundle(b: Bundle, opts: { maxRadiusM: number; isCard?: (
       isObj(x.bounds) &&
       ["south", "west", "north", "east"].every((k) => fin((x.bounds as Record<string, unknown>)[k])),
   );
+
+  // ---- every other place-bearing string of the state ----
+  const st0 = s as unknown as ProfileState;
+  const okCard = (v: unknown) => v === null || (isStr(v, true) && (!opts.isCard || opts.isCard(v)));
+  // Card stamps (the provenance shown on tradeable cards) and tickets (the
+  // stamps of the cards they will open): district and city sanitised again.
+  st0.instances.forEach((x, i) => {
+    const sp = x.stamp as unknown;
+    if (sp === null) return;
+    if (!isObj(sp) || !isStr(sp.district) || !isStr(sp.city)) return fail(`instances[${i}].stamp is malformed`);
+    if (!okCard(sp.mvpCard)) fail(`instances[${i}].stamp.mvpCard is not a card`);
+    sp.district = sanitizePlace(sp.district);
+    sp.city = sanitizePlace(sp.city, "city");
+  });
+  st0.tickets.forEach((x, i) => {
+    const tk = x as unknown as Record<string, unknown>;
+    if (!isStr(tk.district) || !isStr(tk.city)) fail(`tickets[${i}] district and city must be strings`);
+    if (!okCard(tk.mvpCard)) fail(`tickets[${i}].mvpCard is not a card`);
+    x.district = sanitizePlace(x.district);
+    x.city = sanitizePlace(x.city, "city");
+  });
+  // Crate lore: rebuilt from the template it reads as, with the place taken
+  // from the (now sanitised) stamps of its cards, else from its match. A line
+  // that reads as no template is kept only if it doesn't look like an address.
+  const byInstance = new Map(st0.instances.map((x) => [x.instanceId, x]));
+  const byMatch = new Map(b.matches.map((m) => [m.summary.matchId, m.summary]));
+  st0.crates.forEach((c, i) => {
+    if (!isStr(c.lore)) return fail(`crates[${i}].lore is not a string`);
+    if (!Array.isArray(c.instanceIds)) return fail(`crates[${i}].instanceIds is not an array`);
+    const stamp = c.instanceIds.map((id) => byInstance.get(id)?.stamp).find((sp) => sp);
+    const src = stamp ?? byMatch.get(c.matchId) ?? { district: "", city: "" };
+    const lore = opts.rebuildLore?.(c.source, c.lore, src.district, src.city) ?? null;
+    if (lore !== null) c.lore = lore;
+    else if (looksLikeAddress(c.lore)) fail(`crates[${i}].lore looks like an address`);
+  });
+  // A name key must be the key of a sanitised city name: `name:<folded name>`
+  // that sanitising again leaves unchanged.
+  const canonicalName = (k: string) => !k.startsWith("name:") || cityKeyOf(sanitizePlace(k.slice(5), "city")) === k;
+  st0.achievements.forEach((a, i) => {
+    const r = a as unknown as Record<string, unknown>;
+    if (r.kind !== "city_cleared" || !isTier(r.tier) || !isStr(r.city) || !isStr(r.cityKey) || !CITY_KEY_RE.test(r.cityKey)) return fail(`achievements[${i}] is malformed`);
+    if (typeof r.provisional !== "boolean" || !isIso(r.at)) fail(`achievements[${i}] is malformed`);
+    a.city = sanitizePlace(a.city, "city");
+    if (a.cityKey.startsWith("name:") && a.cityKey !== cityKeyOf(a.city)) fail(`achievements[${i}].cityKey is not the key of its city`);
+    if (a.id !== `city_cleared:${a.cityKey}:${a.tier}`) fail(`achievements[${i}].id is not city_cleared:<cityKey>:<tier>`);
+  });
+  // Coverage: a name key that isn't the key of a sanitised name (a hand-edited
+  // "name:12 rue de rivoli") is dropped from the cell. The cell and its tier
+  // stay; only the progress towards that "city" goes.
+  for (const c of b.coverage) for (const k of Object.keys(c.cities)) if (!canonicalName(k)) delete c.cities[k];
   const unique = (ids: unknown[], name: string) => {
     const seen = new Set<unknown>();
     for (const id of ids) {
@@ -402,6 +475,7 @@ export function validateBundle(b: Bundle, opts: { maxRadiusM: number; isCard?: (
   unique(st.decks.map((x) => x.id), "deck id");
   unique(st.tickets.map((x) => x.id), "ticket id");
   unique(st.crates.map((x) => x.id), "crate id");
+  unique(st.achievements.map((x) => x.id), "achievement id");
   unique(b.matches.map((m) => m.summary.matchId), "match id");
   unique(b.coverage.map((c) => c.cell), "coverage cell");
 }

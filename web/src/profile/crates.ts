@@ -68,3 +68,32 @@ export function crateLore(rng: Rng, rewards: RewardsTable, source: CrateSource, 
   const w = WAVE_WORDS[Math.min(8, Math.max(1, wave)) - 1];
   return t.replace(/\{place\}/g, placeLabel(district, city)).replace(/\{wave\}/g, w).replace(/\{tier\}/g, TIER_NAMES[tier]);
 }
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/// Rebuild a stored lore line (import): when `lore` reads as one of the
+/// source's templates, the same line with `{place}` made again from the
+/// sanitised `district` and `city`. The wave word and the tier name are
+/// kept: they can only be one of the fixed words. null when no template
+/// matches (unknown source, or a line from other tables): the caller decides.
+export function rebuildLore(rewards: RewardsTable, source: string, lore: string, district: string, city: string): string | null {
+  const templates = Object.hasOwn(rewards.crates.lore, source) ? rewards.crates.lore[source as CrateSource] : undefined;
+  if (!Array.isArray(templates) || typeof lore !== "string") return null;
+  const word = (ws: string[]) => `(${ws.map(escapeRe).join("|")})`;
+  for (const t of templates) {
+    const parts = t.split(/(\{place\}|\{wave\}|\{tier\})/);
+    const pattern = parts.map((p) => (p === "{place}" ? "([\\s\\S]*?)" : p === "{wave}" ? word(WAVE_WORDS) : p === "{tier}" ? word(Object.values(TIER_NAMES)) : escapeRe(p)));
+    const m = new RegExp(`^${pattern.join("")}$`).exec(lore);
+    if (!m) continue;
+    const place = placeLabel(district, city);
+    let g = 0;
+    return parts
+      .map((p) => {
+        if (p !== "{place}" && p !== "{wave}" && p !== "{tier}") return p;
+        g += 1;
+        return p === "{place}" ? place : m[g];
+      })
+      .join("");
+  }
+  return null;
+}

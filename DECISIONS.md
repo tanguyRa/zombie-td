@@ -1291,6 +1291,30 @@ later).
   without `savedPerWave` can't be imported and crash
   `claimHometownCrate`). A valid export round-trips, fresh and after
   claims and crates, on memory and on IndexedDB (tested).
+- **Import sanitises every place-bearing string, not only match
+  summaries.** A hand-edited export can put an address anywhere, and card
+  stamps are the provenance shown on tradeable cards. `validateBundle`
+  also: sanitises again each instance stamp and each ticket (`district`
+  in district mode, `city` in city mode; `mvpCard` must be `null` or a
+  card); rebuilds each crate's lore (`rebuildLore`, crates.ts: the lore
+  template the line reads as, with `{place}` made again from the sanitised
+  stamps of the crate's cards, else from its match, keeping the wave word
+  and tier name, which can only be fixed words), and refuses a line that
+  reads as no template (other tables) when `looksLikeAddress` is true;
+  sanitises each achievement `city` and refuses an achievement whose
+  `cityKey` fails the key pattern, whose `name:` key isn't
+  `cityKeyOf(city)`, or whose `id` isn't `city_cleared:<cityKey>:<tier>`
+  (achievement ids must be unique too). A coverage `name:` key that isn't
+  `cityKeyOf(sanitizePlace(<name>, "city"))` is **dropped** from its cell,
+  not refused: the cell and its tier stay, only that key's progress goes
+  (a cell's city entries are derived data; re-keying it to the sanitised
+  name could credit another city). A key that fails the pattern is still
+  refused. Sanitising is idempotent, so a valid export still round-trips
+  byte for byte (tested, with a profile holding stamps, tickets, both
+  crate kinds, an achievement and coverage, all hand-edited with "12 Rue
+  de Rivoli, 75004 Paris"). Not place fields, left as they are: deck
+  `name` (the player's own text), ids and dates, and the run record
+  (opaque JSON until T4).
 - **Summary field types**: `checkSummary` also requires `savedPerWave` to be
   finite integers ≥ 0 (no `Infinity`), `city` and `district` to be strings
   and `mvpCard` to be a card id of `cards.json` or `null`;

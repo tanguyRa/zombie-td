@@ -596,6 +596,100 @@ describe("export and import", () => {
     expect(await q.coverageInBox(world)).toEqual(await p.coverageInBox(world));
   });
 
+  it("an import sanitises every place-bearing field (stamps, tickets, lore, achievements, coverage keys)", async () => {
+    const ADDR = "12 Rue de Rivoli, 75004 Paris";
+    const BANNED = /\d|rue|rivoli/i;
+    // A 1 km² Paris: one cleared match clears it.
+    const mk = (seed: bigint) => memoryProfile({ clock: new FakeClock(T0), seed, profileId: "pl", cityArea: ({ cityKey }) => (cityKey === "name:paris" ? 1 : null) });
+    const p = await mk(3n);
+    const home = summary({ city: "Paris", district: "Le Marais" });
+    await p.claimMatch(home, { r: 1 });
+    await p.openCrate();
+    await p.claimHometownCrate(home.matchId);
+    await p.recordDailyEvent({ kind: "first_blood", matchId: home.matchId, wave: 1, city: "Paris", district: "Le Marais", tier: "recruit", populationSaved: 0 });
+    const good = JSON.parse(JSON.stringify(await p.exportProfile())) as ProfileExport;
+    expect(good.state.achievements.map((a) => a.id)).toEqual(["city_cleared:name:paris:recruit"]);
+    expect(good.state.crates).toHaveLength(2);
+    expect(good.state.tickets.length).toBeGreaterThan(0);
+    expect(good.state.crates.every((c) => c.lore.includes("Le Marais, Paris"))).toBe(true);
+
+    // Every place-bearing field of the export, as one list of strings.
+    const placeFields = (e: ProfileExport) => [
+      ...e.state.instances.flatMap((x) => (x.stamp ? [x.stamp.district, x.stamp.city, String(x.stamp.mvpCard)] : [])),
+      ...e.state.tickets.flatMap((x) => [x.district, x.city]),
+      ...e.state.crates.map((x) => x.lore),
+      ...e.state.achievements.flatMap((x) => [x.id, x.city, x.cityKey]),
+      ...e.matches.flatMap((m) => [m.summary.city, m.summary.district]),
+      ...e.coverage.flatMap((c) => Object.keys(c.cities)),
+    ];
+    expect(placeFields(good).filter((f) => BANNED.test(f))).toEqual([]);
+
+    const edited = JSON.parse(JSON.stringify(good)) as ProfileExport;
+    for (const x of edited.state.instances) if (x.stamp) Object.assign(x.stamp, { district: "12 Rue de Rivoli", city: ADDR });
+    for (const x of edited.state.tickets) Object.assign(x, { district: "Rue de Rivoli 12", city: ADDR });
+    for (const c of edited.state.crates) c.lore = c.lore.replace("Le Marais, Paris", `${ADDR}`);
+    for (const a of edited.state.achievements) a.city = ADDR;
+    for (const m of edited.matches) Object.assign(m.summary, { district: "12 Rue de Rivoli", city: ADDR });
+    for (const c of edited.coverage) c.cities["name:12 rue de rivoli, 75004 paris"] = "recruit";
+    expect(placeFields(edited).filter((f) => BANNED.test(f)).length).toBeGreaterThan(10);
+
+    const q = await mk(9n);
+    await q.importProfile(edited);
+    const out = JSON.parse(JSON.stringify(await q.exportProfile())) as ProfileExport;
+    expect(placeFields(out).filter((f) => BANNED.test(f))).toEqual([]);
+    // What is stored, read back through the service.
+    const stored = [
+      ...(await q.listCards()).flatMap((x) => (x.stamp ? [x.stamp.district, x.stamp.city] : [])),
+      ...(await q.listTickets()).flatMap((x) => [x.district, x.city]),
+      ...(await q.listCrates()).map((x) => x.lore),
+      ...(await q.achievements()).flatMap((x) => [x.id, x.city, x.cityKey]),
+      ...(await q.listMatches()).flatMap((m) => [m.summary.city, m.summary.district]),
+      ...(await q.coverageInBox({ south: -90, west: -180, north: 90, east: 180 })).flatMap((c) => Object.keys(c.cities)),
+    ];
+    expect(stored.length).toBeGreaterThan(20);
+    expect(stored.filter((f) => BANNED.test(f))).toEqual([]);
+    // The address went; the city stayed. Lore keeps its template, wave and tier.
+    expect(out.state.instances.filter((x) => x.stamp).every((x) => x.stamp!.district === "" && x.stamp!.city === "Paris")).toBe(true);
+    expect(out.state.tickets.every((x) => x.district === "" && x.city === "Paris")).toBe(true);
+    expect(out.state.crates.map((c) => c.lore)).toEqual(good.state.crates.map((c) => c.lore.replace("Le Marais, Paris", "Paris")));
+    expect(out.state.achievements).toMatchObject([{ id: "city_cleared:name:paris:recruit", city: "Paris", cityKey: "name:paris" }]);
+    expect(out.coverage.every((c) => Object.keys(c.cities).join() === "name:paris")).toBe(true);
+    // The progress towards Paris survives (the name:paris keys were kept).
+    expect((await q.cityProgress("Paris")).clearedTiers).toEqual(["recruit"]);
+
+    // Refused: a city key or achievement id that isn't the key of the sanitised
+    // city, and a lore line that reads as no template and looks like an address.
+    const refuse: [string, (e: ProfileExport) => void][] = [
+      ["achievement cityKey with an address", (e) => (e.state.achievements[0].cityKey = "name:12 rue de rivoli, 75004 paris")],
+      ["achievement cityKey of another city", (e) => (e.state.achievements[0].cityKey = "name:lyon")],
+      ["achievement cityKey malformed", (e) => (e.state.achievements[0].cityKey = "12 Rue de Rivoli")],
+      ["achievement id with an address", (e) => (e.state.achievements[0].id = "city_cleared:name:paris:recruit:12 rue de rivoli")],
+      ["achievement id of another tier", (e) => (e.state.achievements[0].id = "city_cleared:name:paris:elite")],
+      ["achievement city not a string", (e) => (e.state.achievements[0].city = 12 as never)],
+      ["free lore with an address", (e) => (e.state.crates[0].lore = `Found at ${ADDR}.`)],
+      ["stamp city not a string", (e) => (e.state.instances.find((x) => x.stamp)!.stamp!.city = null as never)],
+      ["stamp mvpCard not a card", (e) => (e.state.instances.find((x) => x.stamp)!.stamp!.mvpCard = "12 Rue de Rivoli")],
+      ["ticket district not a string", (e) => (e.state.tickets[0].district = undefined as never)],
+    ];
+    const before = JSON.stringify({ ...(await q.exportProfile()), exportedAt: "" });
+    for (const [name, f] of refuse) {
+      const e = JSON.parse(JSON.stringify(good)) as ProfileExport;
+      f(e);
+      await expect(q.importProfile(e), name).rejects.toMatchObject({ code: "bad_import" });
+    }
+    expect(JSON.stringify({ ...(await q.exportProfile()), exportedAt: "" })).toBe(before);
+    // Free lore that reads as no template but names no address is kept.
+    const free = JSON.parse(JSON.stringify(good)) as ProfileExport;
+    free.state.crates[0].lore = "Found in Le Marais.";
+    await q.importProfile(free);
+    expect((await q.listCrates())[0].lore).toBe("Found in Le Marais.");
+
+    // The valid export still round-trips byte for byte.
+    await q.importProfile(good);
+    const again = JSON.parse(JSON.stringify(await q.exportProfile())) as ProfileExport;
+    expect(JSON.stringify({ ...again, exportedAt: "", state: { ...again.state, revision: 0 } })).toBe(JSON.stringify({ ...good, exportedAt: "", state: { ...good.state, revision: 0 } }));
+  });
+
   it("exports state, matches and coverage from one transaction", async () => {
     const idb = new IDBFactory();
     const a = await LocalProfileService.open({ indexedDB: idb, clock: new FakeClock(T0), seed: 1n });

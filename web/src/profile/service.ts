@@ -10,7 +10,7 @@
 // timezone, not the client clock) and the crate RNG.
 
 import { cellIdsForBox, cellsInBox, cellsInDisc, cityFractions, cityKeyOf, mergeCoverage } from "./coverage";
-import { crateLore, isTier, rollCrate } from "./crates";
+import { crateLore, isTier, rebuildLore, rollCrate } from "./crates";
 import { DEFAULT_TABLES, STARTER_DECK_ID, checkTables, difficultyOf, mirrorValidateDeck, starterCardIds, tierIndex, type DifficultyParams, type ProfileTables } from "./data";
 import { CRATE_STREAM, Pcg32, randomSeed } from "./pcg32";
 import { checkSummary, computePayout, effectiveDay, localDay, systemClock, type Clock } from "./rewards";
@@ -755,7 +755,11 @@ export class LocalProfileService implements ProfileService {
         if (e instanceof ProfileError) throw e;
         throw new ProfileError("bad_import", `the export could not be migrated: ${String((e as Error)?.message ?? e)}`);
       }
-      validateBundle(b, { maxRadiusM: this.tables.maxDefendedRadiusM, isCard: this.isCard });
+      validateBundle(b, {
+        maxRadiusM: this.tables.maxDefendedRadiusM,
+        isCard: this.isCard,
+        rebuildLore: (source, lore, district, city) => rebuildLore(this.tables.rewards, source, lore, district, city),
+      });
       const cur = await this.backend.loadState();
       b.state.revision = (cur?.revision ?? 0) + 1;
       await this.backend.commit({ expectedRevision: cur?.revision ?? null, state: b.state, matches: b.matches, cells: b.coverage, replaceAll: true });

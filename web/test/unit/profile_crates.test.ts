@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { crateLore, rollCrate } from "../../src/profile/crates";
+import { crateLore, rebuildLore, rollCrate } from "../../src/profile/crates";
 import { DEFAULT_TABLES } from "../../src/profile/data";
 import { CRATE_STREAM, Pcg32 } from "../../src/profile/pcg32";
 import { looksLikeAddress } from "../../src/profile/sanitize";
@@ -150,5 +150,28 @@ describe("crate lore", () => {
     for (const templates of Object.values(DEFAULT_TABLES.rewards.crates.lore)) {
       for (const t of templates) expect(looksLikeAddress(t.replace(/\{\w+\}/g, "X")), t).toBe(false);
     }
+  });
+});
+
+describe("rebuildLore", () => {
+  const rewards = DEFAULT_TABLES.rewards;
+  it("gives back every lore line as it was, and re-makes only the place", () => {
+    for (const source of Object.keys(rewards.crates.lore)) {
+      for (let seed = 0n; seed < 12n; seed++) {
+        for (const tier of TIERS) {
+          for (const wave of [1, 3, 8]) {
+            const line = crateLore(new Pcg32(seed, CRATE_STREAM), rewards, source as never, "Le Marais", "Paris", wave, tier);
+            expect(rebuildLore(rewards, source, line, "Le Marais", "Paris")).toBe(line);
+            const edited = line.replace("Le Marais, Paris", "12 Rue de Rivoli, 75004 Paris");
+            expect(rebuildLore(rewards, source, edited, "", "Paris")).toBe(line.replace("Le Marais, Paris", "Paris"));
+          }
+        }
+      }
+    }
+  });
+  it("returns null for a line that reads as no template, or an unknown source", () => {
+    expect(rebuildLore(rewards, "payout", "Found at 12 Rue de Rivoli.", "", "Paris")).toBeNull();
+    expect(rebuildLore(rewards, "toString", "x", "", "Paris")).toBeNull();
+    expect(rebuildLore(rewards, "nope", "x", "", "Paris")).toBeNull();
   });
 });
