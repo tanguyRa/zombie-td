@@ -1317,6 +1317,14 @@ yet: that comes after T5).
   and needs the same bump (that is the point: a run replays only on the
   rules it was played with). No other fixture changed (`0ea142296a5795a9`,
   `b0b7f9703b3cc1c0`, the fence-break hash).
+- **The config hash covers what the sim reads, not the file.** It hashes
+  `Config` re-serialised, so keys sim-core doesn't parse (T7a's
+  `difficulty` section, read only by the web profile) don't change it: the
+  golden record held through the T7a merge. Difficulty reaches the sim
+  through the record's setup (`population_multiplier`); when T7 makes
+  `outbreak_scale` or `fatigue_scale` sim inputs they must become setup or
+  `Config` fields (and the rules version is bumped), or a record could
+  replay on other difficulty numbers.
 
 ## Profile (T7a)
 
