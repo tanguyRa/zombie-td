@@ -225,6 +225,12 @@ pub enum MatchError {
     RingNotLoaded(u8),
     /// The deck breaks the deck rules (`CardDb::validate_deck`).
     InvalidDeck(Vec<DeckError>),
+    /// `population_multiplier` is not finite or outside
+    /// `population_multiplier_range` (the reason says which).
+    InvalidSetup(String),
+    /// The shell is over a `ShellLimits` bound or not finite (the reason
+    /// says which): checked before the grid is allocated.
+    BadShell(String),
 }
 
 impl std::fmt::Display for MatchError {
@@ -263,6 +269,83 @@ impl MatchSetup {
     pub fn with_deck(mut self, deck: Vec<String>) -> MatchSetup {
         self.deck = deck;
         self
+    }
+}
+
+/// The allowed `MatchSetup::population_multiplier`, as factors of the
+/// config's `match.population_multiplier`: difficulty scales the base by
+/// 1.0 (recruit) to 2.0 (nightmare), so a quarter to four times the base
+/// leaves room for tuning while refusing absurd values (0, negative,
+/// 1000x). DECISIONS.md, "Run records (T4)".
+pub const POPULATION_SCALE_MIN: f32 = 0.25;
+pub const POPULATION_SCALE_MAX: f32 = 4.0;
+
+/// `[min, max]` allowed for `MatchSetup::population_multiplier` with this
+/// config (`POPULATION_SCALE_MIN/MAX` times the base).
+pub fn population_multiplier_range(cfg: &Config) -> (f32, f32) {
+    let base = cfg.match_.population_multiplier;
+    (base * POPULATION_SCALE_MIN, base * POPULATION_SCALE_MAX)
+}
+
+/// Bounds on a match shell (`Match::new_streaming`), so that a shell
+/// can't make the grid or the fence rasterisation arbitrarily expensive.
+/// Every coordinate (bounds, fence points) must be finite and within
+/// `max_extent_m` of the origin, and the bounds at most `max_extent_m`
+/// wide and high: the grid is then at most about the size of the wave-8
+/// disc's. The radius only needs to be finite and positive (the match cuts
+/// it to the last ring).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShellLimits {
+    pub max_extent_m: f32,
+    pub max_fences: usize,
+    pub max_fence_points: usize,
+    /// Total length of all shell fences.
+    pub max_fence_length_m: f64,
+}
+
+impl ShellLimits {
+    /// `max_extent_m` = 2 x `wave8_radius_m` (2.6 km by default), 256
+    /// fences of at most 1,024 points, 16 wave-8 circumferences of fence in
+    /// total (~131 km by default).
+    pub fn for_config(cfg: &Config) -> ShellLimits {
+        let r = cfg.wave8_radius_m;
+        ShellLimits { max_extent_m: 2.0 * r, max_fences: 256, max_fence_points: 1024, max_fence_length_m: 16.0 * std::f64::consts::TAU * r as f64 }
+    }
+
+    /// `Err(reason)` when `shell` breaks a bound.
+    pub fn check(&self, shell: &LevelPack) -> Result<(), String> {
+        let ext = self.max_extent_m;
+        if !shell.center_lat.is_finite() || shell.center_lat.abs() > 90.0 || !shell.center_lon.is_finite() || shell.center_lon.abs() > 180.0 {
+            return Err(format!("centre {} / {} is not a latitude / longitude", shell.center_lat, shell.center_lon));
+        }
+        if let Some(r) = shell.radius_m {
+            if !(r.is_finite() && r > 0.0) {
+                return Err(format!("radius {r} must be finite and positive"));
+            }
+        }
+        if let Some([x0, y0, x1, y1]) = shell.bounds {
+            let inside = [x0, y0, x1, y1].iter().all(|v| v.is_finite() && v.abs() <= ext);
+            if !inside || !(x0 < x1 && y0 < y1) || x1 - x0 > ext || y1 - y0 > ext {
+                return Err(format!("bounds {:?} must be finite, ordered, within {ext} m of the origin and at most {ext} m wide and high", [x0, y0, x1, y1]));
+            }
+        }
+        if shell.fences.len() > self.max_fences {
+            return Err(format!("{} fences, at most {}", shell.fences.len(), self.max_fences));
+        }
+        let mut total = 0.0f64;
+        for (i, f) in shell.fences.iter().enumerate() {
+            if f.len() > self.max_fence_points {
+                return Err(format!("fence {i} has {} points, at most {}", f.len(), self.max_fence_points));
+            }
+            if !f.iter().all(|p| p.iter().all(|v| v.is_finite() && v.abs() <= ext)) {
+                return Err(format!("fence {i} has a point that is not finite or is over {ext} m from the origin"));
+            }
+            total += f.windows(2).map(|w| ((w[1][0] as f64 - w[0][0] as f64).powi(2) + (w[1][1] as f64 - w[0][1] as f64).powi(2)).sqrt()).sum::<f64>();
+        }
+        if total > self.max_fence_length_m {
+            return Err(format!("{total:.0} m of fences, at most {:.0} m", self.max_fence_length_m));
+        }
+        Ok(())
     }
 }
 
@@ -391,6 +474,7 @@ pub enum AttemptResult {
 /// don't drop it, unlike `WaveResult`): what the run record stores so a
 /// replay can check every attempt, lost and abandoned ones too.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WaveAttempt {
     pub wave: u8,
     pub result: AttemptResult,
@@ -410,6 +494,7 @@ pub struct WaveAttempt {
 /// An accepted action and the match tick it was applied on (`Match::tick`:
 /// steps done before it).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoggedAction {
     pub tick: u64,
     pub action: Action,
@@ -648,6 +733,12 @@ impl Match {
     pub fn new_streaming_with_cards(shell: &LevelPack, cfg: Config, cards: CardDb, setup: MatchSetup, chunks: Vec<BuildingChunk>) -> Result<Match, MatchError> {
         cfg.match_.validate(cfg.wave8_radius_m).map_err(MatchError::InvalidConfig)?;
         cards.validate_deck(&setup.deck).map_err(MatchError::InvalidDeck)?;
+        let (kmin, kmax) = population_multiplier_range(&cfg);
+        let k = setup.population_multiplier;
+        if !(k.is_finite() && k >= kmin && k <= kmax) {
+            return Err(MatchError::InvalidSetup(format!("population_multiplier {k} is outside [{kmin}, {kmax}]")));
+        }
+        ShellLimits::for_config(&cfg).check(shell).map_err(MatchError::BadShell)?;
         let deck_list: Vec<u16> = setup.deck.iter().map(|id| cards.index(id).expect("validated") as u16).collect();
         if !shell.buildings.is_empty() {
             return Err(MatchError::LevelHasBuildings);

@@ -542,22 +542,38 @@ impl WasmMatch {
 }
 
 /// Verify a run record (JSON) on a whole level (JSON) with the embedded
-/// config and cards. Returns the `ReplaySummary` JSON; throws the
+/// config and cards. `expected_json` (optional) is what the server issued,
+/// `{"seed"?: "123" | 123, "deck"?: [card ids], "population_multiplier"?:
+/// number}` (`ExpectedRun`); a record that differs is rejected as
+/// `unexpected`. Returns the `ReplaySummary` JSON; throws the
 /// `VerifyError` JSON (with `message`).
 #[wasm_bindgen]
-pub fn verify_level(record_json: &str, level_json: &str) -> Result<String, JsValue> {
+pub fn verify_level(record_json: &str, level_json: &str, expected_json: Option<String>) -> Result<String, JsValue> {
     let record = RunRecord::from_json(record_json).map_err(|e| js_msg("bad_record", e))?;
     let level = LevelPack::from_json(level_json).map_err(|e| js_msg("bad_level", e))?;
-    let s = sim_core::replay(&record, ReplayMap::Level(&level)).map_err(|e| js_err(&e))?;
-    Ok(serde_json::to_string(&s).unwrap())
+    verify_on(&record, ReplayMap::Level(&level), expected_json)
 }
 
 /// Verify a run record (JSON) on streamed chunks (`BuildingChunk[]` JSON,
-/// any order; the record's shell is used). Same results as `verify_level`.
+/// any order) and the server's shell (`LevelPack` JSON without buildings:
+/// centre, radius or bounds, fences), never the record's own: the record's
+/// shell must equal it bit for bit (`map_shell`). `expected_json` as for
+/// `verify_level`. Same results as `verify_level`.
 #[wasm_bindgen]
-pub fn verify_chunks(record_json: &str, chunks_json: &str) -> Result<String, JsValue> {
+pub fn verify_chunks(record_json: &str, shell_json: &str, chunks_json: &str, expected_json: Option<String>) -> Result<String, JsValue> {
     let record = RunRecord::from_json(record_json).map_err(|e| js_msg("bad_record", e))?;
+    let shell = LevelPack::from_json(shell_json).map_err(|e| js_msg("bad_shell", e))?;
     let chunks: Vec<BuildingChunk> = serde_json::from_str(chunks_json).map_err(|e| js_msg("bad_chunks", e))?;
-    let s = sim_core::replay(&record, ReplayMap::Chunks(&chunks)).map_err(|e| js_err(&e))?;
+    verify_on(&record, ReplayMap::Chunks { shell: &shell, chunks: &chunks }, expected_json)
+}
+
+fn verify_on(record: &RunRecord, map: ReplayMap, expected_json: Option<String>) -> Result<String, JsValue> {
+    let expected = match expected_json.as_deref().filter(|s| !s.trim().is_empty() && s.trim() != "null") {
+        Some(s) => Some(sim_core::record::ExpectedRun::from_json(s).map_err(|e| js_msg("bad_expected", e))?),
+        None => None,
+    };
+    let cfg = Config::default_config();
+    let limits = sim_core::record::ReplayLimits::for_config(&cfg);
+    let s = sim_core::record::replay_with(record, map, expected.as_ref(), cfg, sim_core::CardDb::default_cards(), &limits, &mut |_| true).map_err(|e| js_err(&e))?;
     Ok(serde_json::to_string(&s).unwrap())
 }

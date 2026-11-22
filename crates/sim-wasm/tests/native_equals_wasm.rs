@@ -49,7 +49,7 @@ const GOLDEN: &str = include_str!("../../sim-core/tests/fixtures/run_record_gold
 #[wasm_bindgen_test]
 fn wasm_verifies_the_golden_run_record() {
     let g = sim_core::RunRecord::from_json(GOLDEN).unwrap();
-    let s: serde_json::Value = serde_json::from_str(&sim_wasm::verify_level(GOLDEN, LEVEL).unwrap()).unwrap();
+    let s: serde_json::Value = serde_json::from_str(&sim_wasm::verify_level(GOLDEN, LEVEL, None).unwrap()).unwrap();
     assert_eq!(s["final_hash"], format!("{:016x}", g.end.hash));
     let hashes: Vec<String> = g.attempts.iter().map(|a| format!("{:016x}", a.end_hash)).collect();
     assert_eq!(s["attempt_hashes"], serde_json::json!(hashes));
@@ -62,13 +62,56 @@ fn wasm_verifies_the_golden_run_record() {
 fn wasm_rejects_a_tampered_record() {
     let mut g = sim_core::RunRecord::from_json(GOLDEN).unwrap();
     g.setup.seed += 1;
-    let e = sim_wasm::verify_level(&g.to_json(), LEVEL).unwrap_err().as_string().unwrap();
+    let e = sim_wasm::verify_level(&g.to_json(), LEVEL, None).unwrap_err().as_string().unwrap();
     let v: serde_json::Value = serde_json::from_str(&e).unwrap();
     assert_eq!(v["error"], "diverged");
     assert_eq!(v["what"], "prep_hash");
     assert!(v["message"].as_str().unwrap().contains("wave 1"), "{e}");
-    let e = sim_wasm::verify_chunks(GOLDEN, "[]").unwrap_err().as_string().unwrap();
+    let shell = r#"{"name": "s", "radius_m": 400, "buildings": []}"#;
+    let e = sim_wasm::verify_chunks(GOLDEN, shell, "[]", None).unwrap_err().as_string().unwrap();
     assert!(e.contains("map_source"), "{e}");
+}
+
+/// The issued seed, deck and multiplier (`expected_json`) in WASM.
+#[wasm_bindgen_test]
+fn wasm_checks_the_issued_run() {
+    // Checked before any tick: the golden record is refused at once.
+    let r = sim_core::RunRecord::from_json(GOLDEN).unwrap();
+    let e = sim_wasm::verify_level(&r.to_json(), LEVEL, Some(r#"{"seed": "999"}"#.into())).unwrap_err().as_string().unwrap();
+    let v: serde_json::Value = serde_json::from_str(&e).unwrap();
+    assert_eq!((v["error"].as_str(), v["what"].as_str()), (Some("unexpected"), Some("seed")), "{e}");
+    let e = sim_wasm::verify_level(&r.to_json(), LEVEL, Some(r#"{"population_multiplier": 0.6}"#.into())).unwrap_err().as_string().unwrap();
+    assert!(e.contains("\"what\":\"population_multiplier\""), "{e}");
+    let e = sim_wasm::verify_level(&r.to_json(), LEVEL, Some(r#"{"seeed": 1}"#.into())).unwrap_err().as_string().unwrap();
+    assert!(e.contains("bad_expected"), "{e}");
+}
+
+const CHUNKS: &str = include_str!("../../sim-core/tests/fixtures/map_chunks.json");
+const CHUNKS_META: &str = include_str!("../../sim-core/tests/fixtures/map_chunks.meta.json");
+
+/// A streamed run verifies with the server's shell and chunks in WASM; a
+/// forged shell in the record (or a different server shell) is refused.
+#[wasm_bindgen_test]
+fn wasm_verifies_streamed_runs_on_the_servers_shell() {
+    let meta: serde_json::Value = serde_json::from_str(CHUNKS_META).unwrap();
+    let shell_with = |radius: serde_json::Value| serde_json::json!({ "name": "chunks", "center_lat": meta["center_lat"], "center_lon": meta["center_lon"], "radius_m": radius, "buildings": [] }).to_string();
+    let shell = shell_with(meta["level_radius_m"].clone());
+    let mut m = sim_wasm::WasmMatch::new_streaming(&shell, r#"{"seed": 7}"#, CHUNKS).unwrap();
+    m.step(30);
+    m.apply(r#"{"type":"start_wave"}"#).unwrap();
+    m.step(30);
+    let rec = m.record();
+    let s: serde_json::Value = serde_json::from_str(&sim_wasm::verify_chunks(&rec, &shell, CHUNKS, Some(r#"{"seed": "7"}"#.into())).unwrap()).unwrap();
+    assert_eq!(s["map_source"], "chunks");
+    assert_eq!(s["setup"]["seed"], "7");
+    assert_eq!(s["shell_hash"].as_str().unwrap().len(), 16);
+    let mut forged: serde_json::Value = serde_json::from_str(&rec).unwrap();
+    forged["map"]["shell"]["radius_m"] = serde_json::json!(160.0);
+    let e = sim_wasm::verify_chunks(&forged.to_string(), &shell, CHUNKS, None).unwrap_err().as_string().unwrap();
+    assert!(e.contains("\"error\":\"map_shell\""), "{e}");
+    let other = shell_with(serde_json::json!(160.0));
+    let e = sim_wasm::verify_chunks(&rec, &other, CHUNKS, None).unwrap_err().as_string().unwrap();
+    assert!(e.contains("\"error\":\"map_shell\""), "{e}");
 }
 
 /// `WasmMatch` driven by the golden log's JSON actions reproduces its first

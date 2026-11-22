@@ -44,7 +44,7 @@ wasm-pack and Node 22 on the host, the commands below also work without the
 | Headless test suite | `./dev.sh cargo test --release` | All tests green |
 | Headless test suite with debug assertions | `./dev.sh env CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo test --release --workspace` | All tests green with `debug_assert!`s on (release speed, own build cache) |
 | Native = WASM hash test | `./dev.sh wasm-pack test --node --release crates/sim-wasm` | WASM reproduces the native hashes and verifies the golden 8-wave run record |
-| Verify a run record | `./dev.sh cargo run --release -p sim-headless -- verify run.json --level paris-marais` | `verified: …` and the replay summary (exit 0), or `rejected: …` naming the first diverging wave attempt (exit 1) |
+| Verify a run record | `./dev.sh cargo run --release -p sim-headless -- verify run.json --level paris-marais --expect-seed 1` | `verified: …` and the replay summary (exit 0), or `rejected: …` naming the first diverging wave attempt (exit 1) |
 | Headless report | `./dev.sh cargo run --release -p sim-headless -- report` | `reports/headless-report.md` and `.html` (charts), raw `reports/*.json` and `*.csv` |
 | Web unit tests (Node, Vitest) | `./dev.sh bash -c "cd web && npm ci && npm run test:unit"` | Map blocks, projection, snapshot hash, block cache and loader tests pass (no network, no browser); `cargo test --release -p sim-core --test t6_chunks` checks their Rust fixture. The local profile tests (`web/src/profile/`: collection, decks, payouts, daily caps, crates, tiers, coverage, storage) run in the same suite |
 | Browser tests (Chromium, Firefox, WebKit) | `./dev.sh bash -c "cd web && npm ci && npm run e2e"` | Smoke test and native = browser hash test pass in all three browsers |
@@ -73,15 +73,20 @@ Useful extras:
   every wave attempt; not with `--fast-forward-to`, which bypasses the
   action log).
 - `./dev.sh cargo run --release -p sim-headless -- verify run.json --level paris-marais`
-  (or `--level <path to level.json>`, or `--chunks chunks.json` for a match
-  on streamed map blocks) replays a run record and checks every action and
-  every wave hash, as the server will before paying rewards. It prints the
-  replay summary, or why the run was rejected and at which wave attempt it
-  first diverged. `ZT_CONFIG` / `ZT_CARDS` apply as for `match`
+  (or `--level <path to level.json>`, or `--chunks chunks.json --shell
+  shell.json` for a match on streamed map blocks: the shell is the level
+  without buildings, from the verifier, never the record's) replays a run
+  record and checks every action and every wave hash, as the server will
+  before paying rewards. `--expect-seed N`, `--expect-deck id,id,...` and
+  `--expect-multiplier K` reject a record whose setup is not the one the
+  server issued. It prints the replay summary (with the setup and the map
+  and shell hashes), or why the run was rejected and at which wave attempt
+  it first diverged. `ZT_CONFIG` / `ZT_CARDS` apply as for `match`
   (a record only verifies with the config and cards it was played with);
   `--max-ticks` changes the tick bound, `--quiet` drops the progress lines.
   `node tools/verify-run.mjs run.json --level levels/paris-marais.json` does
-  the same with the WASM build (`pkg-node`, see `tools/wasm-bench.mjs`).
+  the same with the WASM build (`pkg-node`, see `tools/wasm-bench.mjs`),
+  with the same flags.
 - `./dev.sh cargo run --release -p sim-headless -- report --quick` makes a
   fast report (2 seeds, no S5, short benchmarks) for iteration. It is marked
   "QUICK MODE".

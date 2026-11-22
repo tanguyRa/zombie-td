@@ -35,6 +35,20 @@ fn recorded_match_verifies_and_tampering_is_rejected() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{s}\n{}", String::from_utf8_lossy(&out.stderr));
     assert!(s.contains("verified: "), "{s}");
+    // The issued seed, deck and multiplier: accepted when they match.
+    let deck = sim_core::CardDb::default_cards().starter_deck_ids().join(",");
+    let out = Command::new(bin).arg("verify").arg(&run).args(["--level", "paris-marais", "--quiet", "--expect-seed", "2", "--expect-multiplier", "0.3", "--expect-deck", &deck]).output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{s}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(s.contains("\"seed\": \"2\""), "the summary echoes the setup: {s}");
+    // Another seed issued: rejected before any tick.
+    let out = Command::new(bin).arg("verify").arg(&run).args(["--level", "paris-marais", "--quiet", "--expect-seed", "3"]).output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{s}");
+    assert!(s.contains("\"error\":\"unexpected\"") && s.contains("seed is 2, the server issued 3"), "{s}");
+    // An expectation that doesn't parse is a usage error, never skipped.
+    let out = Command::new(bin).arg("verify").arg(&run).args(["--level", "paris-marais", "--expect-seed", "x"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
     // Edit the first attempt's end hash.
     let mut r: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&run).unwrap()).unwrap();
     let h = r["attempts"][0]["end_hash"].as_str().unwrap().to_string();
@@ -46,8 +60,54 @@ fn recorded_match_verifies_and_tampering_is_rejected() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{s}");
     assert!(s.contains("rejected: diverged at attempt 0 (wave 1)") && s.contains("end_hash"), "{s}");
-    // Both or neither map argument: usage error.
+    // Both or neither map argument, or chunks without a shell: usage error.
     let out = Command::new(bin).arg("verify").arg(&run).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
+    let out = Command::new(bin).arg("verify").arg(&run).args(["--chunks", "x.json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `verify --chunks --shell`: a streamed run verifies on the server's shell
+/// file and the T6a chunks; the record's own shell, forged, is refused.
+#[test]
+fn streamed_run_verifies_with_a_shell_file() {
+    let dir = std::env::temp_dir().join(format!("zt-verify-chunks-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fx = concat!(env!("CARGO_MANIFEST_DIR"), "/../sim-core/tests/fixtures");
+    let chunks_path = format!("{fx}/map_chunks.json");
+    let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{fx}/map_chunks.meta.json")).unwrap()).unwrap();
+    let shell_json = serde_json::json!({ "name": "map-chunks", "center_lat": meta["center_lat"], "center_lon": meta["center_lon"], "radius_m": meta["level_radius_m"], "buildings": [] });
+    let shell_path = dir.join("shell.json");
+    std::fs::write(&shell_path, shell_json.to_string()).unwrap();
+    let shell = sim_core::LevelPack::from_json(&shell_json.to_string()).unwrap();
+    let chunks: Vec<sim_core::match_::BuildingChunk> = serde_json::from_str(&std::fs::read_to_string(&chunks_path).unwrap()).unwrap();
+    let cfg = sim_core::Config::default_config();
+    let mut m = sim_core::match_::Match::new_streaming(&shell, cfg.clone(), sim_core::match_::MatchSetup::new(5, &cfg), chunks).unwrap();
+    for _ in 0..30 {
+        m.step();
+    }
+    m.apply(sim_core::match_::Action::StartWave).unwrap();
+    for _ in 0..60 {
+        m.step();
+    }
+    let rec = sim_core::RunRecord::from_match(&m);
+    let run = dir.join("run.json");
+    std::fs::write(&run, rec.to_json()).unwrap();
+    let bin = env!("CARGO_BIN_EXE_sim-headless");
+    let verify = |run: &std::path::Path, extra: &[&str]| {
+        let out = Command::new(bin).arg("verify").arg(run).args(["--chunks", &chunks_path, "--shell"]).arg(&shell_path).arg("--quiet").args(extra).output().unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).to_string())
+    };
+    let (code, s) = verify(&run, &["--expect-seed", "5"]);
+    assert_eq!(code, Some(0), "{s}");
+    assert!(s.contains("\"map_source\": \"chunks\"") && s.contains("\"shell_hash\""), "{s}");
+    let mut forged = rec.clone();
+    forged.map.shell.radius_m = Some(160.0);
+    let bad = dir.join("forged.json");
+    std::fs::write(&bad, forged.to_json()).unwrap();
+    let (code, s) = verify(&bad, &[]);
+    assert_eq!(code, Some(1), "{s}");
+    assert!(s.contains("\"error\":\"map_shell\""), "{s}");
     std::fs::remove_dir_all(&dir).ok();
 }

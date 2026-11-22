@@ -86,6 +86,37 @@ pub fn level_snapshot_hash(level: &LevelPack) -> u64 {
     snapshot_hash(std::slice::from_ref(&c)).expect("one chunk")
 }
 
+/// The hash of a shell as the verifier compares it (bit for bit: centre,
+/// radius, bounds, fences; the name and the buildings don't count):
+/// FNV-1a 64 of `"zt-shell-v1\n"`, then lines `c <lat bits> <lon bits>`,
+/// `r <radius bits>|-`, `b <4 bounds bits>|-`, then one `f <point bits>...`
+/// line per fence, bits in lowercase hex (`f64` 16 digits, `f32` 8).
+/// Two shells have the same hash exactly when the verifier takes one for
+/// the other (up to FNV collisions).
+pub fn shell_hash(shell: &LevelPack) -> u64 {
+    use std::fmt::Write;
+    let mut s = String::from("zt-shell-v1\n");
+    let _ = writeln!(s, "c {:016x} {:016x}", shell.center_lat.to_bits(), shell.center_lon.to_bits());
+    match shell.radius_m {
+        Some(r) => writeln!(s, "r {:08x}", r.to_bits()),
+        None => writeln!(s, "r -"),
+    }
+    .unwrap();
+    match shell.bounds {
+        Some(b) => writeln!(s, "b {:08x} {:08x} {:08x} {:08x}", b[0].to_bits(), b[1].to_bits(), b[2].to_bits(), b[3].to_bits()),
+        None => writeln!(s, "b -"),
+    }
+    .unwrap();
+    for f in &shell.fences {
+        s.push('f');
+        for p in f {
+            let _ = write!(s, " {:08x} {:08x}", p[0].to_bits(), p[1].to_bits());
+        }
+        s.push('\n');
+    }
+    fnv1a64(s.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1140,7 +1140,12 @@ yet: that comes after T5).
 
 ## Run records (T4)
 
-- **`RunRecord`** (`sim-core/src/record.rs`, serde JSON, `format: 1`):
+- **`RunRecord`** (`sim-core/src/record.rs`, serde JSON, `format: 1`;
+  every record struct, `LoggedAction` and `WaveAttempt` included, is
+  `deny_unknown_fields`, so an extra key anywhere is refused at parse
+  time and adding a field is a format change. `Action`, `Target` and the
+  shell's `LevelPack` still ignore unknown keys: the browser sends actions
+  and level files carry extra keys; neither is compared through them):
   - `sim {rules, crate_version, git}`: `rules` is `SIM_RULES_VERSION` (1),
     the only part a verifier compares; the crate version and the git commit
     of the build (`build.rs` runs `git rev-parse --short=12 HEAD`, no
@@ -1152,9 +1157,10 @@ yet: that comes after T5).
     re-serialised as compact JSON, so key order and formatting of the file
     don't count) and `cards_hash` (`CardDb::content_hash`).
   - `map {source: level|chunks, snapshot_hash, blocks, shell}`: the level
-    without its buildings (centre lat/lon, radius or bounds, fences: what a
-    chunks replay builds the match on) and the snapshot of the buildings
-    (below).
+    without its buildings (centre lat/lon, radius or bounds, fences) and the
+    snapshot of the buildings (below). The record's shell is only compared:
+    a replay always builds on the verifier's own shell (the level's, or the
+    one given with the chunks).
   - `setup {seed, population_multiplier, deck}`: the seed is a decimal
     string and every hash 16 hex digits, since JS numbers stop at 2^53.
   - `actions`: `Match::log()`, every accepted action with its match tick,
@@ -1185,23 +1191,38 @@ yet: that comes after T5).
   is `snapshot_hash` of one chunk with block id 0, bounds `[0, 0, 0, 0]`
   and every building of the level (`mapsnap::level_snapshot_hash`; the
   match's own block 0 has unbounded bounds, which have no centimetre form).
-  The shell (radius, bounds, centre, fences) is compared bit for bit.
+  The shell (radius, bounds, centre, fences) is compared bit for bit with
+  the verifier's, for levels and chunks alike (T4 review: a chunks replay
+  used to build on the record's own shell, unchecked, so a forged radius,
+  centre or free fence ring verified against genuine chunks).
   Both hashes round to centimetres, so a building moved by 1 cm is refused
   as a map mismatch; a sub-centimetre change that alters the game still
-  fails at the first wave hash.
-- **`replay(record, ReplayMap::Level(&level) | ReplayMap::Chunks(&chunks))
-  -> Result<ReplaySummary, VerifyError>`** uses the embedded config and
-  cards and the default limits; `replay_with(record, map, cfg, cards,
+  fails at the first wave hash. Because of that rounding **the server must
+  replay only on map chunks it fetched itself** (from its own map source,
+  keyed by the block ids of the record), never on chunks a client
+  uploaded: two chunk sets that differ below a centimetre have the same
+  snapshot hash, so a client-supplied set could carry a sub-centimetre
+  edit that the snapshot doesn't see, and a server that stored it would
+  then replay (and accept) a run played on that edited map.
+- **`replay(record, ReplayMap::Level(&level) | ReplayMap::Chunks { shell:
+  &shell, chunks: &chunks }) -> Result<ReplaySummary, VerifyError>`** uses
+  the embedded config and cards, the default limits and no expectation;
+  `replay_with(record, map, expected: Option<&ExpectedRun>, cfg, cards,
   &limits, &mut progress)` takes others. For chunks, the record's blocks
   are picked out of the chunks given (any order, extras ignored, a missing
-  one is `missing_block`). The match is rebuilt from the setup and the map,
-  each action is applied on its tick with plain `step()`s in between, and
-  the replay stops at `end.tick`, never later. Checks, in order:
+  one is `missing_block`). The match is rebuilt from the setup and the
+  verifier's map, each action is applied on its tick with plain `step()`s
+  in between, and the replay stops at `end.tick`, never later. Checks, in
+  order:
   1. no simulation: `format`, `sim_version`, the limits, action sizes, tick
      order (`out_of_order`), ticks past the end (`future_tick`), the end
-     marker, `config_hash`, `cards_hash`;
-  2. the map: `map_source`, `map_shell`, `missing_block`, `map_hash`, then
-     `setup` (the match can't be built: illegal deck, chunks...);
+     marker, `config_hash`, `cards_hash`, the record shell's bounds
+     (`bad_shell`, below), then the expected setup (`unexpected {what:
+     seed|deck|population_multiplier, record, expected}`);
+  2. the map: `map_source`, `map_shell` (the verifier's shell against the
+     record's, in both modes), `missing_block`, `map_hash`, then `setup`
+     (the match can't be built: illegal deck, multiplier out of range,
+     shell over its bounds, chunks...);
   3. replaying: `illegal_action {index, tick, action, reason: ActionError}`
      (card not in hand, wrong phase, not enough supply, bad target: the
      same checks as play), `too_long` (a wave or a prep over its limit),
@@ -1211,12 +1232,61 @@ yet: that comes after T5).
      ends, and a recorded attempt still running past its end tick diverges
      right away. `attempt` indexes `attempts` (`attempts.len()` is the
      attempt open at the end);
-  4. the end: phase, wave and `final_hash` (as `diverged`), then the
-     summary (`outcome`). `cancelled` if the callback stopped it.
+  4. the end: phase, wave, the open attempt's `start_tick` and `prep_hash`
+     (`end.attempt_start_tick`, `end.prep_hash`: checked here in every
+     phase, since a record that ends on a result screen never reopened a
+     prep; T4 review), `final_hash` (all as `diverged`), then the summary
+     (`outcome`). `cancelled` if the callback stopped it.
 
   So an edited seed, deck or multiplier diverges at attempt 0's prep hash
   (tick 0), before any action; a changed play diverges at the attempt it
-  was played in.
+  was played in. The `ReplaySummary` echoes what was verified: `setup`
+  (seed, multiplier, deck), `map_source`, `snapshot_hash` and `shell_hash`
+  (`mapsnap::shell_hash`: FNV-1a 64 of the shell's bit patterns, centre,
+  radius, bounds and fences; name and buildings excluded, so equal hashes
+  mean "the verifier takes one shell for the other"), then the outcome
+  and every attempt hash.
+- **What the server must check** (the replay proves only that the record
+  is a genuine run of *its own* setup on the map given):
+  - **Seed:** the server issues it when the match starts and passes it as
+    `ExpectedRun.seed`. Without that, a player can play many seeds offline
+    and upload the best genuine record.
+  - **Deck:** the server checks the player owns every card of the deck
+    when issuing the run and passes it as `ExpectedRun.deck` (setup order).
+    `Match::new` only checks the deck rules (`CardDb::validate_deck`), not
+    ownership.
+  - **Difficulty:** the server maps the chosen tier to the exact
+    multiplier (`match.population_multiplier` × the tier's
+    `population_multiplier` from the `difficulty` table, as an `f32`) and
+    passes it as `ExpectedRun.population_multiplier` (compared bit for
+    bit). The sim itself only refuses multipliers that are not finite or
+    outside `population_multiplier_range` = [0.25, 4] × the config's base
+    ([0.075, 1.2] by default; `POPULATION_SCALE_MIN/MAX` in `match_.rs`,
+    `MatchError::InvalidSetup`): the tiers span 1.0–2.0, the rest is room
+    for tuning. sim-core doesn't read the `difficulty` table (it isn't in
+    the config hash, see below), so the range can't be derived from it.
+  - **Map:** the level file, or for streamed runs the shell and the chunks
+    from the server's own map source (never the client's, see "Map
+    snapshot" above), the shell for the record's centre as the server
+    computes it.
+  - **Rewards:** paid from the `ReplaySummary`, never from the record's
+    own `end`.
+  `ExpectedRun` fields left `None` are not checked (`replay` passes no
+  expectation at all: tests and tools); a server passes all three.
+- **Shell bounds** (`ShellLimits::for_config`, checked by
+  `Match::new_streaming` itself as `MatchError::BadShell` before the grid
+  is allocated, and by the verifier on the record's shell as `bad_shell`
+  before the map): centre a finite latitude / longitude; radius finite
+  and positive (the match cuts it to the last ring, so its size costs
+  nothing); bounds finite, ordered, every coordinate within `max_extent_m`
+  = 2 × `wave8_radius_m` (2.6 km) of the origin and at most that wide and
+  high, so the grid is never larger than about the wave-8 disc's; at most
+  256 fences of 1,024 points, every point finite and within the extent,
+  and at most 16 wave-8 circumferences of fence in total (~131 km, which
+  rasterises in a few ms). Before this, a shell with ±8 km bounds took
+  3.7 s to build (growing with the square), and fences had no cap (tested:
+  ±8 km bounds, far bounds, a 100k-point fence, 10k fences, a 3,800 km
+  fence set and a NaN radius are all refused in well under 500 ms).
 - **A record that ends before the match is won must say `abandoned:
   true`**, else `unfinished` (checked before any tick; `abandoned` on a won
   match is `bad_record`). `from_match` sets it from the phase, so the
@@ -1248,11 +1318,15 @@ yet: that comes after T5).
   string that reads back to the same f32 (checked on 20M random values and
   on every record of the tests), so polyline and point targets replay bit
   for bit from the JSON.
-- **CLI:** `sim-headless verify <run.json> --level <name or level.json> |
-  --chunks <chunks.json>` (exit 0 verified, 1 rejected, 2 usage or I/O)
-  and `sim-headless match ... --record out.json` (refused with
-  `--fast-forward-to`, which removes zombies outside the log). Node:
-  `tools/verify-run.mjs` with the `pkg-node` WASM build.
+- **CLI:** `sim-headless verify <run.json> (--level <name or level.json> |
+  --chunks <chunks.json> --shell <shell.json or level>) [--expect-seed N]
+  [--expect-deck id,id,... | --expect-deck deck.json] [--expect-multiplier
+  K]` (exit 0 verified, 1 rejected, 2 usage or I/O; an `--expect-*` value
+  that doesn't parse is a usage error, never skipped; `--shell` drops the
+  buildings of a level given as the shell) and `sim-headless match ...
+  --record out.json` (refused with `--fast-forward-to`, which removes
+  zombies outside the log). Node: `tools/verify-run.mjs` with the
+  `pkg-node` WASM build, same flags.
 - **WASM** (`sim-wasm`, marshalling only): `WasmMatch` (`new(level_json,
   setup_json)`, `new_streaming(shell_json, setup_json, chunks_json)`,
   `add_buildings`, `ring_ready`, `apply(action_json)` throwing the
@@ -1260,9 +1334,13 @@ yet: that comes after T5).
   `WasmSim`, `status_json`, `hand_json`, `results_json`, `attempts_json`,
   `structures_json`, `repair_cost`, `pull_down_refund`, `structure_at`,
   `fence_length_m`, `building_at`, geometry, `state_hash`, `prep_hash`,
-  `record()`), and `verify_level(record_json, level_json)` /
-  `verify_chunks(record_json, chunks_json)` returning the summary JSON or
-  throwing the `VerifyError` JSON. The setup JSON takes the seed as a
+  `record()`), and `verify_level(record_json, level_json, expected_json?)`
+  / `verify_chunks(record_json, shell_json, chunks_json, expected_json?)`
+  returning the summary JSON or throwing the `VerifyError` JSON
+  (`bad_expected` for an `expected_json` that doesn't parse;
+  `expected_json` is the `ExpectedRun` JSON, `{"seed"?: "123" | 123,
+  "deck"?: [ids], "population_multiplier"?: number}`, unknown keys
+  refused; omitted, `null` or `""` checks nothing). The setup JSON takes the seed as a
   string or a number; config and cards are the embedded ones.
 - **`Match::building_at(x, y)`** looks at the clicked cell only: `None`
   off the grid, on a cell with no building or for a building with
@@ -1280,7 +1358,17 @@ yet: that comes after T5).
   attempt, an edited final hash or summary, seed, deck, multiplier,
   format, rules version, config, cards, a level building moved 1 cm, the
   level radius, a chunk building moved 1 cm, a missing block and the wrong
-  map kind, each with its error and the right attempt. Streamed: the same
+  map kind, each with its error and the right attempt. T4 review fixes: a
+  forged chunks shell (radius, centre, a 64-point fence ring, bounds) in
+  the record or from the verifier is `map_shell`; oversized shells are
+  refused quickly (above); a seed, deck or multiplier other than the
+  issued one is `unexpected` before any tick; multipliers out of range
+  (0, negative, NaN, infinite, 0.05) are refused by `Match::new` and by a
+  replay; `end.prep_hash` and `end.attempt_start_tick` edited on a record
+  that ends on a result screen (and in prep) diverge; an extra key in any
+  record struct is refused at parse time. The WASM tests cover
+  `verify_chunks` with the shell, a forged shell and `expected_json`; the
+  CLI test covers `--expect-*` and `--chunks --shell`. Streamed: the same
   match on the T6a `map_chunks.json` blocks given up front or staged
   (waves 1–2 reversed, the rest shuffled during wave 1's prep) records
   byte-identical JSON and verifies with the chunks reversed. WASM under
@@ -1308,11 +1396,19 @@ yet: that comes after T5).
   about one core-minute or more per claimed full-size run.
 - **Golden record** `crates/sim-core/tests/fixtures/run_record_golden.json`
   (the scripted match; config `ceabf38252a0c4ba`, cards `3e157f5ac2531906`,
-  map `e9b1fbac85820411`, final hash `063314547f6d4959`). The test fails
-  with "sim rules changed: bump SIM_RULES_VERSION … and regenerate the
-  golden record with `ZT_REGEN_GOLDEN=1 cargo test --release -p sim-core
-  --test t4_records golden`" when it no longer replays, and also when the
-  script no longer records it byte for byte. Any balance change in
+  map `e9b1fbac85820411`, final hash `b6f30157787dde36`). Its hashes are
+  **pinned per rules version** in `GOLDEN_HASHES` (`t4_records.rs`:
+  `(rules, final, config, cards, map)`, one entry per version, never
+  edited). The test fails when the fixture differs from the entry of the
+  current `SIM_RULES_VERSION` (a regeneration without a bump), when there
+  is no entry, when the fixture no longer replays ("sim rules changed:
+  bump SIM_RULES_VERSION …, regenerate … and add the GOLDEN_HASHES entry
+  it prints") and when the script no longer records it byte for byte.
+  `ZT_REGEN_GOLDEN=1 cargo test --release -p sim-core --test t4_records
+  golden` refuses to write hashes that differ from the current version's
+  entry (so the only way through is a bump); with equal hashes (a record
+  format change only) it rewrites the file, and for a version with no
+  entry it writes the file and prints the entry to add. Any balance change in
   `config.default.json` or `cards.json` changes the config or cards hash
   and needs the same bump (that is the point: a run replays only on the
   rules it was played with). No other fixture changed (`0ea142296a5795a9`,
@@ -1325,6 +1421,15 @@ yet: that comes after T5).
   `outbreak_scale` or `fatigue_scale` sim inputs they must become setup or
   `Config` fields (and the rules version is bumped), or a record could
   replay on other difficulty numbers.
+- **Versions after the T4 review fixes:** `SIM_RULES_VERSION` stays 1 and
+  `RECORD_FORMAT` stays 1. No hash changed (the golden record and every
+  fixture are byte-identical; the new multiplier range and shell bounds
+  accept every record the sim could produce with the default config). The
+  record JSON shape is unchanged: the new fields are in the
+  `ReplaySummary` (verifier output), not the record, and
+  `deny_unknown_fields` only refuses keys no writer ever produced. The
+  API changes (`ReplayMap::Chunks { shell, chunks }`, `replay_with`'s
+  `expected`, `verify_chunks`' shell argument) are source-level only.
 
 ## Profile (T7a)
 
