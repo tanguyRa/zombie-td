@@ -27,6 +27,9 @@ cargo test --release --workspace
 step "Running tests (WASM under Node: native = WASM hash)"
 wasm-pack test --node --release crates/sim-wasm
 
+step "Running web unit tests (Vitest: map blocks, cache, loader)"
+(cd web && npm run test:unit)
+
 step "Running browser tests (Playwright: Chromium, Firefox, WebKit)"
 (cd web && npx playwright test)
 
