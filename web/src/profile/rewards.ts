@@ -31,7 +31,12 @@ export function computePayout(t: RewardsTable["payout"], s: MatchSummary): Payou
 /// list of problems ([] = fine). `maxRadiusM` bounds the defended radius
 /// (`ProfileTables.maxDefendedRadiusM`): the coverage cells are enumerated
 /// from it, so an absurd radius would mean millions of cells.
-export function checkSummary(s: MatchSummary, maxRadiusM: number): string[] {
+///
+/// `isCard` tells known card ids (for `mvpCard`); without it any non-empty
+/// string passes. `city` and `district` must be strings (they come from the
+/// place search's admin fields, see place.ts); `cityId` is not checked here:
+/// an id that isn't `osm:relation:<digits>` is ignored, not refused.
+export function checkSummary(s: MatchSummary, maxRadiusM: number, isCard?: (id: string) => boolean): string[] {
   const p: string[] = [];
   if (!s || typeof s !== "object") return ["not a match summary"];
   const int = (v: unknown) => typeof v === "number" && Number.isInteger(v);
@@ -40,12 +45,15 @@ export function checkSummary(s: MatchSummary, maxRadiusM: number): string[] {
   if (!int(s.wavesWon) || s.wavesWon < 0 || s.wavesWon > 8) p.push("wavesWon must be 0..8");
   if (!int(s.furthestWave) || s.furthestWave < 1 || s.furthestWave > 8) p.push("furthestWave must be 1..8");
   if (int(s.wavesWon) && int(s.furthestWave) && s.furthestWave !== Math.min(8, s.wavesWon + 1)) p.push("furthestWave must be wavesWon + 1 (8 when cleared)");
-  if (!Array.isArray(s.savedPerWave) || s.savedPerWave.length > s.wavesWon || s.savedPerWave.some((v) => !(typeof v === "number" && v >= 0))) p.push("savedPerWave: one count >= 0 per wave won");
+  if (!Array.isArray(s.savedPerWave) || s.savedPerWave.length > s.wavesWon || s.savedPerWave.some((v) => !(int(v) && v >= 0))) p.push("savedPerWave: one integer count >= 0 per wave won");
   if (!int(s.retries) || s.retries < 0) p.push("retries must be >= 0");
   if (!(typeof s.defendedRadiusM === "number" && Number.isFinite(s.defendedRadiusM) && s.defendedRadiusM >= 0 && s.defendedRadiusM <= maxRadiusM)) {
     p.push(`defendedRadiusM must be a number in 0..${maxRadiusM}`);
   }
   if (!s.center || !Number.isFinite(s.center.lat) || !Number.isFinite(s.center.lon) || Math.abs(s.center.lat) > 90 || Math.abs(s.center.lon) > 180) p.push("center is not a lat/lon");
+  if (typeof s.city !== "string") p.push("city must be a string");
+  if (typeof s.district !== "string") p.push("district must be a string");
+  if (!(s.mvpCard === null || (typeof s.mvpCard === "string" && s.mvpCard.length > 0 && (isCard ? isCard(s.mvpCard) : true)))) p.push(`mvpCard must be a known card id or null, not ${String(s.mvpCard)}`);
   return p;
 }
 

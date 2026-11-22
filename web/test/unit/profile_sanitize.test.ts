@@ -95,7 +95,8 @@ describe("sanitizePlace", () => {
       ["12 bis, Montreuil", "Montreuil"],
       ["No. 5, Brooklyn", "Brooklyn"],
       ["Toronto ON M5V 2T6", "Toronto ON"],
-      ["Tverskaya ulitsa, улица Тверская 7, Москва", "Tverskaya ulitsa"],
+      ["Tverskaya ulitsa, улица Тверская 7, Москва", "Москва"],
+      ["Tverskaya ulitsa", ""],
       ["İstiklal Caddesi, Beyoğlu", "Beyoğlu"],
       ["Hlavní třída 12, Ostrava", "Ostrava"],
     ];
@@ -136,5 +137,135 @@ describe("placeLabel", () => {
     expect(placeLabel("12 Rue des Rosiers", "Paris")).toBe("Paris");
     expect(placeLabel("Paris", "paris")).toBe("Paris");
     expect(placeLabel("", "")).toBe("an unnamed district");
+  });
+});
+
+describe("sanitizePlace, defence in depth (T7a review 2)", () => {
+  // Each street, alone and before a city: the street never survives in the
+  // district field.
+  const STREETS = [
+    // Cyrillic and transliterated Russian
+    "ул. Тверская", "ул Тверская", "пр. Мира", "Невский пр.", "наб. реки Фонтанки", "пер. Сивцев Вражек", "Ленинградское ш.",
+    "улица Арбат", "проспект Мира", "Leninsky Prospekt", "ulitsa Arbat", "Tverskaya ulitsa",
+    // Turkish
+    "İstiklal Cd.", "Bağdat Cad.", "Gül Sk.", "Atatürk Blv.", "Atatürk Bulvarı", "İstiklal Caddesi", "Gül Sokak",
+    // Hungarian
+    "Andrássy út", "Váci u.", "Váci utca",
+    // Southeast Asia
+    "Jalan Thamrin", "Jln Ampang", "Jl. Sudirman", "Soi Nana", "Thanon Sukhumvit", "Đường Lê Lợi", "Phố Huế",
+    // India, Israel
+    "Netaji Subhash Marg", "Kartavya Path", "Rehov Dizengoff", "Sderot Rothschild",
+    // Japanese
+    "Kōshū-kaidō", "Koshu Kaido", "Mido-suji", "Midosuji",
+    // German "Str." last
+    "Berliner Str.",
+    // Spanish, Catalan, Portuguese, French abbreviations
+    "Pso. de la Castellana", "Pg. de Gràcia", "Rbla. de Catalunya", "Avgda. Diagonal", "Ptge. Permanyer", "Calz. de Tlalpan", "Calzada de Tlalpan",
+    "Jr. de la Unión", "Jirón de la Unión", "Diag. Norte", "Tv. do Carmo", "Lgo. do Chiado", "Pç. do Comércio", "Calçada do Combro", "Ladeira da Glória",
+    "Sq. Louvois", "All. des Brouillards", "Ch. des Vignes", "Fg Saint-Denis",
+    // Venetian
+    "Fondamenta Nove", "Salizada San Lio",
+    // Glued suffixes
+    "Kurfürstendamm", "Mainufer", "Wangfujingdajie", "Wudaoyinghutong",
+  ];
+
+  it("drops the added street forms, alone and before a city", () => {
+    for (const s of STREETS) {
+      expect(sanitizePlace(s), s).toBe("");
+      expect(sanitizePlace(`${s}, Testville`), s).toBe("Testville");
+      expect(placeLabel(s, "Testville"), s).toBe("Testville");
+    }
+  });
+
+  it("keeps real district names (must-keep list)", () => {
+    const cases: [string, string][] = [
+      ["Carnoustie", "Carnoustie"],
+      ["Landstraße", "Landstraße"],
+      ["Kreis Bergstraße", "Kreis Bergstraße"],
+      ["Caferağa Mahallesi", "Caferağa Mahallesi"],
+      ["Praha 1", "Praha"],
+      ["Wien 3", "Wien"],
+      ["Lu County", "Lu County"],
+      ["Lu-kang", "Lu-kang"],
+    ];
+    for (const [input, want] of cases) expect(sanitizePlace(input), input).toBe(want);
+    for (const name of DISTRICT_FIXTURES) expect(sanitizePlace(name), name).toBe(name);
+  });
+
+  it("a numbered district keeps its name only when it is the whole field", () => {
+    expect(sanitizePlace("Unter den Linden 77")).toBe("");
+    expect(sanitizePlace("Strøget 4, København")).toBe("København");
+    expect(sanitizePlace("Bezirk 7")).toBe("");
+    expect(sanitizePlace("Soi 11")).toBe("");
+    expect(sanitizePlace("Street 12")).toBe("");
+    expect(placeLabel("Praha 1", "Praha")).toBe("Praha");
+  });
+
+  it("the city field keeps real towns that start with a street word (must-keep list)", () => {
+    for (const name of [
+      "Neustadt an der Weinstraße",
+      "Piazza Armerina",
+      "Crescent City",
+      "Road Town",
+      "Plaza Huincul",
+      "Passage West",
+      "Cours-la-Ville",
+      "Strada in Chianti",
+      "Carnoustie",
+      "Kreis Bergstraße",
+      "Lu County",
+      "Lu-kang",
+      "Paris",
+      "Москва",
+      "St Albans",
+    ]) {
+      expect(sanitizePlace(name, "city"), name).toBe(name);
+    }
+    expect(sanitizePlace("Praha 1", "city")).toBe("Praha");
+    expect(sanitizePlace("Wien 3", "city")).toBe("Wien");
+    expect(placeLabel("", "Piazza Armerina")).toBe("Piazza Armerina");
+  });
+
+  it("the city field keeps a parenthesised qualifier: Halle (Saale) and Halle (Westf.) stay distinct", () => {
+    expect(sanitizePlace("Halle (Saale)", "city")).toBe("Halle (Saale)");
+    expect(sanitizePlace("Halle (Westf.)", "city")).toBe("Halle (Westf.)");
+    expect(sanitizePlace("Frankfurt (Oder)", "city")).toBe("Frankfurt (Oder)");
+    // A qualifier that is a street or holds a digit goes.
+    expect(sanitizePlace("Halle (Rue de Rivoli)", "city")).toBe("Halle");
+    expect(sanitizePlace("Halle (75004)", "city")).toBe("Halle");
+    // Idempotent: a stored name sanitises to itself.
+    expect(sanitizePlace(sanitizePlace("Halle (Saale)", "city"), "city")).toBe("Halle (Saale)");
+  });
+
+  it("the city field still drops numbers, postcodes, abbreviations and a street next to the city", () => {
+    const cases: [string, string][] = [
+      ["12 Rue de Rivoli, 75004 Paris", "Paris"],
+      ["Rue de Rivoli, Paris", "Paris"],
+      ["Tverskaya ulitsa, Москва", "Москва"],
+      ["Paris 4e Arrondissement", "Paris"],
+      ["London SW1A 1AA", "London"],
+      ["Main St", ""],
+      ["ul. Marszałkowska", ""],
+      ["İstiklal Cd.", ""],
+      ["Teheran-ro", ""],
+      ["12 Rue de Rivoli", ""],
+      ["Bezirk 7, Wien", "Wien"],
+    ];
+    for (const [input, want] of cases) expect(sanitizePlace(input, "city"), input).toBe(want);
+  });
+
+  it("the city field never outputs a digit, on hostile inputs", () => {
+    const parts = ["12", "221B", "Rue", "Street", "Paris", "London", "75004", "SW1A 1AA", "1012 AB", "00-950", ",", " - ", "bis", "(Saale)", "(12)", "Main", "St", "Rd", "Blvd"];
+    let seed = 11;
+    const rnd = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2 ** 31;
+      return seed % n;
+    };
+    for (let i = 0; i < 3000; i++) {
+      const input = Array.from({ length: 1 + rnd(6) }, () => parts[rnd(parts.length)]).join(rnd(2) ? " " : ", ");
+      const out = sanitizePlace(input, "city");
+      expect(/\d/.test(out), `${input} -> ${out}`).toBe(false);
+      expect(/\b(St|Rd|Blvd)$/.test(out), `${input} -> ${out}`).toBe(false);
+    }
   });
 });

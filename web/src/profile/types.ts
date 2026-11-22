@@ -16,6 +16,14 @@ export type Rarity = (typeof RARITIES)[number];
 /// What a finished (cleared or abandoned) match reports to the profile.
 /// T4/T5 build it from the match and its run record. Keep it minimal: the
 /// server will re-derive every number from the run record before paying.
+///
+/// PRIVACY INPUT CONTRACT: `city`, `district` and `cityId` come only from
+/// the place search's administrative fields, through `placeFromGeocoder`
+/// (place.ts): Nominatim `city`/`town`/`village`/`municipality` and
+/// `suburb`/`city_district`/`borough`/`quarter`/`neighbourhood`, or the same
+/// admin levels from another geocoder. Never from `road`, `house_number`,
+/// `postcode`, `display_name` or free text. The sanitiser is only defence
+/// in depth behind this contract.
 export interface MatchSummary {
   /// Unique id of this match (a UUID made when the match starts). The
   /// idempotency key of the payout: a second claim with the same id pays nothing.
@@ -23,12 +31,15 @@ export interface MatchSummary {
   /// Match centre (the searched address). Private: used for the coverage
   /// map only, never put in a stamp, a lore line or anything shared.
   center: LatLon;
-  /// City name from the place search (sanitised before any display).
+  /// City name: an admin field of the place search (see the contract above),
+  /// sanitised again (`sanitizePlace(city, "city")`) before it is stored.
   city: string;
-  /// District / suburb / neighbourhood name from the place search ("" if none).
+  /// District name: an admin field of the place search ("" if none),
+  /// sanitised again before it is stored.
   district: string;
-  /// Stable city id from the place search (e.g. "osm:relation:7444"), when
-  /// known. City achievements key on it, else on the normalised city name.
+  /// Stable city id, when known: only `osm:relation:<1-12 digits>` (the
+  /// city's admin boundary relation) is accepted; any other value is ignored
+  /// and not stored. City achievements key on it, else on the sanitised name.
   cityId?: string;
   tier: Tier;
   /// Waves won (0..8). 8 means the match was cleared.
@@ -157,6 +168,7 @@ export interface DailyEvent {
   matchId: string;
   /// The wave it happened in (1..8).
   wave: number;
+  /// Admin fields of the place search only, as in `MatchSummary`.
   city: string;
   district: string;
   tier: Tier;

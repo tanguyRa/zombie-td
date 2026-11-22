@@ -12,6 +12,7 @@
 import { blockId, blockLatLonBounds, blocksForDisc, colOf, rowOf } from "../map/blocks";
 import { METERS_PER_DEG_LAT, metersPerDegLon, project } from "../map/osm";
 import { tierIndex } from "./data";
+import { isCityId } from "./place";
 import { TIERS, type CoverageCell, type LatLon, type LatLonBox, type Tier } from "./types";
 
 /// Area (m²) of a grid cell, in the same equirectangular metres as the
@@ -98,11 +99,12 @@ export function cellIdsForBox(box: LatLonBox, max = 20000): number[] | null {
 }
 
 /// The achievement key of a city: its stable id when the place search gave
-/// one, else its folded name ("Paris" = "paris" = " PARIS "). Callers pass
-/// the sanitised name (`sanitizePlace`), never a raw geocoder field: the key
-/// is stored in cells and achievement ids.
+/// an accepted one (`osm:relation:<digits>`, see place.ts; any other id is
+/// ignored), else its folded name ("Paris" = "paris" = " PARIS "). Callers
+/// pass the sanitised name (`sanitizePlace(city, "city")`), never a raw
+/// geocoder field: the key is stored in cells and achievement ids.
 export function cityKeyOf(city: string, cityId?: string): string {
-  if (cityId && cityId.trim()) return `id:${cityId.trim()}`;
+  if (isCityId(cityId)) return `id:${cityId}`;
   return "name:" + city.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ");
 }
 

@@ -521,7 +521,7 @@ describe("export and import", () => {
     const { p } = await fresh();
     await expect(p.importProfile({} as never)).rejects.toMatchObject({ code: "bad_import" });
     const dump = await p.exportProfile();
-    await expect(p.importProfile({ ...dump, state: { ...dump.state, schema: SCHEMA_VERSION + 1 } })).rejects.toMatchObject({ code: "schema_too_new" });
+    await expect(p.importProfile({ ...dump, schema: SCHEMA_VERSION + 1, state: { ...dump.state, schema: SCHEMA_VERSION + 1 } })).rejects.toMatchObject({ code: "schema_too_new" });
     expect((await p.listCards()).length).toBe(20);
   });
 
@@ -756,5 +756,160 @@ describe("review fixes", () => {
       },
     } as unknown as IDBFactory;
     await expect(LocalProfileService.open({ indexedDB: broken })).rejects.toMatchObject({ code: "storage" });
+  });
+});
+
+describe("review fixes 2", () => {
+  const world = { south: -90, west: -180, north: 90, east: 180 };
+
+  it("an unaccepted cityId never reaches a stored key; an osm relation does", async () => {
+    const tables = { ...DEFAULT_TABLES, rewards: { ...DEFAULT_TABLES.rewards, coverage: { city_cleared_fraction: 0.75, placeholder_city_area_km2: 3 } } };
+    const seen: (string | undefined)[] = [];
+    const p = await memoryProfile({ clock: new FakeClock(T0), seed: 1n, tables, cityArea: ({ cityId, cityKey }) => (seen.push(cityId, cityKey), null) });
+    const bad = ["12 Rue de Rivoli, 75004 Paris", "osm:way:4372", "osm:node:17807753", " osm:relation:7444", "id:../x"];
+    for (const [i, cityId] of bad.entries()) {
+      const claim = await p.claimMatch(summary({ cityId, center: { lat: PARIS.lat, lon: PARIS.lon + i * 0.05 } }), null);
+      expect(claim.city?.cityKey, cityId).toBe("name:paris");
+    }
+    expect((await p.cityProgress("Paris", "12 Rue de Rivoli")).cityKey).toBe("name:paris");
+    const good = await p.claimMatch(summary({ cityId: "osm:relation:7444", center: { lat: 45.76, lon: 4.83 }, city: "Lyon" }), null);
+    expect(good.city?.cityKey).toBe("id:osm:relation:7444");
+    expect((await p.cityProgress("Lyon", "osm:relation:7444")).cityKey).toBe("id:osm:relation:7444");
+    const dump = JSON.stringify(await p.exportProfile());
+    // No stored string equals an unaccepted id (quoted: " osm:relation:7444" with its space).
+    for (const b of bad) expect(dump.includes(JSON.stringify(b)), b).toBe(false);
+    for (const b of ["Rivoli", "75004", "osm:way", "osm:node", "id:../x"]) expect(dump.includes(b), b).toBe(false);
+    expect(seen.filter((s) => s !== undefined && !/^(name:paris|name:lyon|osm:relation:7444|id:osm:relation:7444)$/.test(s))).toEqual([]);
+    // History drops the unaccepted id, keeps the accepted one.
+    const matches = await p.listMatches();
+    expect(matches.filter((m) => m.summary.cityId !== undefined).map((m) => m.summary.cityId)).toEqual(["osm:relation:7444"]);
+  });
+
+  it("Halle (Saale) and Halle (Westf.) are two cities; Praha 1 stamps as Praha", async () => {
+    const { p } = await fresh();
+    const a = await p.claimMatch(summary({ city: "Halle (Saale)", district: "", center: { lat: 51.48, lon: 11.97 } }), null);
+    const b = await p.claimMatch(summary({ city: "Halle (Westf.)", district: "", center: { lat: 52.06, lon: 8.36 } }), null);
+    expect(a.city!.cityKey).not.toBe(b.city!.cityKey);
+    const c = await p.claimMatch(summary({ city: "Praha", district: "Praha 1", center: { lat: 50.08, lon: 14.42 } }), null);
+    const { cards } = await p.openCrate(c.tickets[0].id);
+    expect(cards[0].stamp).toMatchObject({ district: "Praha", city: "Praha" });
+  });
+
+  it("savedPerWave must be finite integers >= 0", async () => {
+    const { p } = await fresh();
+    for (const v of [Infinity, NaN, 1.5, -1]) {
+      await expect(p.claimMatch(summary({ savedPerWave: [1000, 2000, 3000, 4000, 5000, 6000, 7000, v] }), null), String(v)).rejects.toMatchObject({ code: "bad_summary" });
+    }
+    expect((await p.listTickets()).length).toBe(0);
+  });
+
+  it("city and district must be strings, mvpCard a known card id or null", async () => {
+    const { p } = await fresh();
+    for (const over of [{ city: 12 }, { district: null }, { district: { road: "x" } }, { mvpCard: "not_a_card" }, { mvpCard: 3 }, { mvpCard: "" }]) {
+      await expect(p.claimMatch(summary(over as never), null), JSON.stringify(over)).rejects.toMatchObject({ code: "bad_summary" });
+    }
+    expect((await p.claimMatch(summary({ mvpCard: null }), null)).paid).toBe(true);
+    expect((await p.claimMatch(summary({ mvpCard: "mortar" }), null)).paid).toBe(true);
+    const e = { kind: "wave_victory" as const, matchId: "m", wave: 1, city: "Paris", district: "", tier: "recruit" as const, populationSaved: 0 };
+    await expect(p.recordDailyEvent({ ...e, city: 3 as never })).rejects.toMatchObject({ code: "bad_summary" });
+    await expect(p.recordDailyEvent({ ...e, district: undefined as never })).rejects.toMatchObject({ code: "bad_summary" });
+    expect((await p.recordDailyEvent(e)).granted).toHaveLength(1);
+  });
+
+  /// A profile after claims (cleared and abandoned), crates, the Hometown
+  /// crate, a daily event and a saved deck.
+  async function played(p: LocalProfileService) {
+    const home = summary({ district: "Belleville", city: "Paris", cityId: "osm:relation:7444" });
+    await p.claimMatch(home, { r: 1 });
+    await p.claimMatch(summary({ wavesWon: 3, center: { lat: 45.76, lon: 4.83 }, city: "Lyon", mvpCard: null }), { r: 2 });
+    await p.openCrate();
+    await p.openCrate();
+    await p.claimHometownCrate(home.matchId);
+    await p.recordDailyEvent({ kind: "first_blood", matchId: home.matchId, wave: 1, city: "Paris", district: "", tier: "recruit", populationSaved: 0 });
+    const ids = (await p.listCards()).map((c) => c.instanceId).slice(0, 20);
+    expect((await p.saveDeck({ name: "Mine", instanceIds: ids })).ok).toBe(true);
+  }
+
+  async function sameProfile(q: LocalProfileService, p: LocalProfileService) {
+    expect(await q.listCards()).toEqual(await p.listCards());
+    expect(await q.listDecks()).toEqual(await p.listDecks());
+    expect(await q.listTickets()).toEqual(await p.listTickets());
+    expect(await q.listCrates()).toEqual(await p.listCrates());
+    expect(await q.listMatches()).toEqual(await p.listMatches());
+    expect(await q.achievements()).toEqual(await p.achievements());
+    expect(await q.coverageInBox(world)).toEqual(await p.coverageInBox(world));
+    expect(await q.info()).toEqual(await p.info());
+  }
+
+  for (const where of ["memory", "IndexedDB"] as const) {
+    for (const state of ["fresh", "played"] as const) {
+      it(`a valid export round-trips (${state}, ${where})`, async () => {
+        const mk = (seed: bigint) =>
+          where === "memory"
+            ? memoryProfile({ clock: new FakeClock(T0), seed, profileId: "rt" })
+            : LocalProfileService.open({ indexedDB: new IDBFactory(), clock: new FakeClock(T0), seed, profileId: "rt" });
+        const p = await mk(42n);
+        if (state === "played") await played(p);
+        const dump: ProfileExport = JSON.parse(JSON.stringify(await p.exportProfile()));
+        const q = await mk(7n);
+        await q.importProfile(dump);
+        await sameProfile(q, p);
+        // And again from the imported profile.
+        const again: ProfileExport = JSON.parse(JSON.stringify(await q.exportProfile()));
+        expect({ ...again, exportedAt: "", state: { ...again.state, revision: 0 } }).toEqual({ ...dump, exportedAt: "", state: { ...dump.state, revision: 0 } });
+        p.close();
+        q.close();
+      });
+    }
+  }
+
+  it("import checks every match in full, unique ids and the schema", async () => {
+    const { p } = await fresh();
+    await played(p);
+    const good = JSON.parse(JSON.stringify(await p.exportProfile())) as ProfileExport;
+    const before = JSON.stringify(await p.exportProfile());
+    const copy = () => JSON.parse(JSON.stringify(good)) as ProfileExport;
+    const edit = (f: (d: ProfileExport) => void) => {
+      const d = copy();
+      f(d);
+      return d;
+    };
+    const bad: [string, ProfileExport][] = [
+      ["savedPerWave not an array", edit((d) => ((d.matches[0].summary as unknown as Record<string, unknown>).savedPerWave = "x"))],
+      ["savedPerWave Infinity", edit((d) => (d.matches[0].summary.savedPerWave[0] = Infinity))],
+      ["wavesWon 9", edit((d) => (d.matches[0].summary.wavesWon = 9))],
+      ["bad tier", edit((d) => (d.matches[0].summary.tier = "godmode" as never))],
+      ["radius too big", edit((d) => (d.matches[0].summary.defendedRadiusM = 1e9))],
+      ["no center", edit((d) => (d.matches[0].summary.center = null as never))],
+      ["city not a string", edit((d) => (d.matches[0].summary.city = 1 as never))],
+      ["unknown mvpCard", edit((d) => (d.matches[0].summary.mvpCard = "nuke"))],
+      ["cleared not a boolean", edit((d) => (d.matches[0].cleared = "yes" as never))],
+      ["claimedAt not ISO", edit((d) => (d.matches[0].claimedAt = "yesterday"))],
+      ["claimedAt missing", edit((d) => (d.matches[0].claimedAt = undefined as never))],
+      ["payout null", edit((d) => (d.matches[0].payout = null as never))],
+      ["payout fields", edit((d) => (d.matches[0].payout = { total: "12" } as never))],
+      ["deck instanceIds not strings", edit((d) => (d.state.decks[0].instanceIds = [1, 2] as never))],
+      ["duplicate instance id", edit((d) => d.state.instances.push({ ...d.state.instances[0] }))],
+      ["duplicate ticket id", edit((d) => d.state.tickets.push({ ...d.state.tickets[0] }))],
+      ["duplicate match id", edit((d) => d.matches.push(JSON.parse(JSON.stringify(d.matches[0]))))],
+      ["duplicate deck id", edit((d) => d.state.decks.push({ ...d.state.decks[0] }))],
+      ["schema mismatch", edit((d) => (d.schema = SCHEMA_VERSION + 1))],
+      ["state schema mismatch", edit((d) => (d.state.schema = 0))],
+    ];
+    expect(good.state.tickets.length).toBeGreaterThan(0);
+    for (const [name, b] of bad) {
+      await expect(p.importProfile(b), name).rejects.toMatchObject({ code: "bad_import" });
+    }
+    expect(JSON.stringify(await p.exportProfile())).toBe(before);
+    // The crash path of the review: a summary without savedPerWave can no
+    // longer be imported and then reach claimHometownCrate.
+    const q = await memoryProfile({ clock: new FakeClock(T0), seed: 1n });
+    const noHome = edit((d) => {
+      d.state.hometownCrateClaimed = false;
+      delete (d.matches[0].summary as Partial<MatchSummary>).savedPerWave;
+    });
+    await expect(q.importProfile(noHome)).rejects.toMatchObject({ code: "bad_import" });
+    await q.importProfile(good);
+    expect((await q.listMatches()).length).toBe(2);
   });
 });

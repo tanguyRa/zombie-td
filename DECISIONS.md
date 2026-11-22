@@ -1075,8 +1075,48 @@ later).
   null`, `accountBound: true`, `tradeable: false`, `salvageable: false`,
   granted with the deck "Civil Defence Issue" when the profile is created
   (one commit that requires no existing profile, so it can't happen twice).
-- **Stamp sanitiser** (`sanitizePlace`): strict on purpose, privacy before
-  a pretty name. Postcode patterns are removed (UK, Canada, NL, PL, PT,
+- **Place input contract: the privacy guarantee.** `MatchSummary.city` and
+  `.district` (and `DailyEvent.city` / `.district`) come **only** from the
+  place search's administrative fields, never from `road`,
+  `house_number`, `postcode`, `display_name` or free text. The helper is
+  `placeFromGeocoder(address, cityResult?)` (`web/src/profile/place.ts`):
+  it reads a Nominatim-style `address` object, city = the first of `city`,
+  `town`, `village`, `municipality` that sanitises to a name; district = the
+  first of `suburb`, `city_district`, `borough`, `quarter`, `neighbourhood`
+  that sanitises to a name other than the city ("" if none). Other keys
+  are never read. Another geocoder maps its own admin levels to the same
+  two fields. A blacklist sanitiser can never be complete and also hits
+  real towns ("Piazza Armerina", "Road Town"), so the guarantee is this
+  contract; `sanitizePlace` is defence in depth behind it. Tested on
+  Nominatim-shaped addresses for Paris, Barcelona, Tokyo, Seoul, Istanbul,
+  Moscow, Shanghai, Jakarta, London and New York: no output holds the
+  road, house number or postcode.
+- **`cityId` is an admin relation or nothing**: only
+  `osm:relation:<1–12 digits>` is accepted (`isCityId`), in `claimMatch`,
+  `cityProgress` and `cityKeyOf`. Any other value (a node or way id, an
+  address pasted in by mistake) is ignored, not stored in the match
+  history, and the city is keyed on its sanitised name. `placeFromGeocoder`
+  sets `cityId` only from a city-level result with `osm_type ===
+  "relation"` (and, when given, an `addresstype` of city, town, village or
+  municipality).
+- **Stamp sanitiser** (`sanitizePlace(raw, field)`): defence in depth, not
+  a complete street detector. Two modes. `"district"` (default) is strict:
+  a street-looking segment is dropped, privacy before a pretty name.
+  `"city"` is lenient, because the city field is an admin name and many
+  towns start with a street word ("Strada in Chianti", "Plaza Huincul",
+  "Crescent City", "Neustadt an der Weinstraße"): numbers and postcodes
+  still go, a segment with a street abbreviation or a hyphenated street
+  suffix ("Main St", "ul. Długa", "Teheran-ro") still goes, and a
+  street-looking segment is skipped only when another segment is left
+  ("Rue de Rivoli, Paris" → "Paris"; "Piazza Armerina" stays). The city
+  mode keeps a parenthesised qualifier, so the city key tells "Halle
+  (Saale)" from "Halle (Westf.)". A numbered district that is the whole
+  field, `<one word> <1–2 digits>`, keeps its name ("Praha 1" → "Praha",
+  "Wien 3" → "Wien"); in a longer address the segment still goes ("Unter
+  den Linden 77, Berlin" → "Berlin"). A segment starting or ending with an
+  admin word (`Kreis`, `County`, `Mahallesi`, `Okrug`, ...) or in a short
+  list of admin names with a street suffix ("Landstraße", Vienna's 3rd
+  district) is never a street. Postcode patterns are removed (UK, Canada, NL, PL, PT,
   SE/CZ, US ZIP+4, any 3+ digit run); a segment (split on `, ; / | ( )`
   and ` - `) is dropped whole when it holds a house number or looks like a
   street (street words in a dozen languages next to a name, glued suffixes
@@ -1086,8 +1126,24 @@ later).
   `rambla`, `travessera`), dotted Italian and Spanish abbreviations (`V.le`,
   `P.za`, `C.so`, `Pº`/`P.º`, `Ctra.`), French `Imp.`, `Fbg`, `Rte`,
   Japanese `-dōri`, Korean `-ro`, `-gil`, `-daero` (only hyphenated: "San
-  Gil" stays) and Chinese `Lu`, `Jie` as a word next to another word
-  ("Nanjing Lu"). District suffixes (`-gu`, `-ku`, `-dong`) are not street
+  Gil" stays) and Chinese `Lu`, `Jie` as the last word ("Nanjing Lu";
+  "Lu County" and "Lu-kang" stay). Review 2 added, where they don't hit a
+  real name: Russian `ул`, `пр`, `наб`, `пер`, `ш` (with or without a dot,
+  first or last), `улица`, `проспект`, `ulitsa`, `prospekt`; Turkish
+  `Cd.`, `Cad.`, `Sk.`, `Blv.`, `Bulvarı` (dotless ı is folded), `Caddesi`,
+  `Sokak`; Hungarian `út`, `u.`, `utca`; `Jalan`, `Jln`, `Jl.`, `Soi`,
+  `Thanon`, `Đường`, `Phố`; `Marg`, `Path` (last word only), `Rehov`,
+  `Sderot` (first word only: Sderot is a city); `-kaidō`, `-suji`;
+  `Str.` last; `Pso.`, `Pg.`, `Rbla.`, `Avgda.`, `Ptge.`, `Calz.`,
+  `Calzada`, `Jr.`, `Jirón`, `Diag.`, `Tv.`, `Lgo.`, `Pç.`, `Calçada`,
+  `Ladeira`, `Sq.`, `All.`, `Ch.`, `Fg`; `Fondamenta`, `Salizada`; glued
+  `-damm`, `-ufer`, `-dajie`, `-hutong`, `-suji`. **Skipped on purpose**:
+  glued `-lu` (Honolulu), glued `-kaido` (Hokkaido), the word `Faubourg`
+  (official Paris quartiers "Faubourg-Montmartre", "Faubourg-du-Roule";
+  `Fbg`/`Fg` stay), `mahallesi` (it means neighbourhood: "Caferağa
+  Mahallesi" is a district), and glued Finnish `-tie` without the genitive
+  `n` (`-ntie` is kept: "Mannerheimintie" goes, "Carnoustie" stays).
+  A lone street abbreviation ("Rd") names nothing and is skipped. District suffixes (`-gu`, `-ku`, `-dong`) are not street
   markers ("Gangnam-gu" stays). The tests check a hand-written list of real
   street names with their expected output, and a list of districts that
   must stay ("Roppongi", "Le Marais", "Gràcia", "Montmartre", ...), on
@@ -1097,9 +1153,10 @@ later).
   back to the city), rather than a mangled "Paris Arrondissement".
   A street word alone is a town ("Rue", "Largo"), and "St" counts only in
   last position ("St Albans" stays). Accepted false positives: areas named
-  after a street ("Earls Court") fall back to the city. Limit: a bare
-  street name with no marker and no number ("Strøget") is undetectable;
-  geocoder district/city fields don't carry those. Match history stores the
+  after a street ("Earls Court", "Jalan Besar") fall back to the city in
+  the district field. Limit: a bare street name with no marker and no
+  number ("Strøget"), or a street word in the lenient city field, is not
+  caught; the input contract keeps those out. Match history stores the
   sanitised names too, so no screen can show a street. Lore writes the wave
   as a word ("the eighth wave"), so a lore line has no digit at all; a test
   checks every template is free of street words.
@@ -1189,9 +1246,10 @@ later).
 - **City cleared**: the area of the cells counted for the city at a tier or
   harder, over the city's area, ≥ `coverage.city_cleared_fraction` (0.75),
   one achievement per tier. The city key is the place search's `cityId`
-  when there is one (OSM relation later), else the folded **sanitised**
-  name ("Paris" = " PARIS " = "12 Rue de Rivoli, 75004 Paris"): the key is
-  stored in cells and achievement ids, so it goes through `sanitizePlace`
+  when it is an accepted `osm:relation:<digits>`, else the folded
+  **sanitised** name ("Paris" = " PARIS " = "12 Rue de Rivoli, 75004 Paris";
+  "Halle (Saale)" ≠ "Halle (Westf.)"): the key is stored in cells and
+  achievement ids, so it goes through `sanitizePlace(city, "city")`
   like every other place name, in `claimMatch` and in `cityProgress`
   (which also returns the sanitised name). A city that sanitises to nothing,
   with no id, still adds coverage but tags no city. Homonyms in different countries merge until ids are
@@ -1213,9 +1271,20 @@ later).
   one refused. The export reads the three stores in one transaction
   (`ProfileBackend.snapshot`). An import is validated in full after
   migration and before the commit (`validateBundle`: every state array,
-  the counters, the RNG hex, the daily shape, each match's
-  `summary.matchId`, each cell's id, tiers and bounds); anything malformed
-  is `bad_import` and the current profile is left untouched.
+  the counters, the RNG hex, the daily shape, deck `instanceIds` as
+  strings, each cell's id, tiers and bounds, and each match in full:
+  `checkSummary` with the same radius bound and card list as `claimMatch`,
+  `cleared` a boolean, `claimedAt` an ISO date, `payout` five counts).
+  Instance, deck, ticket, crate, match and cell ids must be unique, and
+  the export's `schema` must equal `state.schema`. Anything malformed is
+  `bad_import` and the current profile is left untouched (so a summary
+  without `savedPerWave` can't be imported and crash
+  `claimHometownCrate`). A valid export round-trips, fresh and after
+  claims and crates, on memory and on IndexedDB (tested).
+- **Summary field types**: `checkSummary` also requires `savedPerWave` to be
+  finite integers ≥ 0 (no `Infinity`), `city` and `district` to be strings
+  and `mvpCard` to be a card id of `cards.json` or `null`;
+  `recordDailyEvent` requires string `city` and `district`.
 - **Data tables**: `rewards.json` at the repo root (next to `cards.json`):
   payout, daily caps, crate odds, foil chance, lore templates, coverage
   threshold and placeholder area. `checkTables` validates them when a

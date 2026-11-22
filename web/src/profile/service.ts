@@ -14,6 +14,7 @@ import { crateLore, isTier, rollCrate } from "./crates";
 import { DEFAULT_TABLES, STARTER_DECK_ID, checkTables, difficultyOf, mirrorValidateDeck, starterCardIds, tierIndex, type DifficultyParams, type ProfileTables } from "./data";
 import { CRATE_STREAM, Pcg32, randomSeed } from "./pcg32";
 import { checkSummary, computePayout, effectiveDay, localDay, systemClock, type Clock } from "./rewards";
+import { validCityId } from "./place";
 import { sanitizePlace } from "./sanitize";
 import {
   MemoryProfileBackend,
@@ -79,8 +80,13 @@ export interface ProfileService {
   // Rewards
   /// The one payout of a match, when wave 8 is cleared or the match is
   /// abandoned. Idempotent per match id: a second claim pays nothing.
+  /// INPUT CONTRACT (privacy): `summary.city` and `summary.district` come only
+  /// from the place search's admin fields (`placeFromGeocoder`), never from
+  /// `road`, `house_number`, `postcode`, `display_name` or free text;
+  /// `summary.cityId` is `osm:relation:<digits>` or it is ignored.
   claimMatch(summary: MatchSummary, runRecord: unknown): Promise<MatchClaim>;
-  /// First blood / wave victory, capped per local day.
+  /// First blood / wave victory, capped per local day. Same input contract
+  /// as `claimMatch` for `event.city` and `event.district`.
   recordDailyEvent(event: DailyEvent): Promise<DailyResult>;
   dailyStatus(): Promise<DailyStatus>;
 
@@ -101,6 +107,8 @@ export interface ProfileService {
   // aggregates only (the combined liberation map, per-city percentages over
   // all players), never one player's cells or match centres.
   coverageInBox(box: LatLonBox): Promise<CoverageCell[]>;
+  /// `city`: the admin city name (`placeFromGeocoder`); `cityId`:
+  /// `osm:relation:<digits>` or ignored (then keyed on the sanitised name).
   cityProgress(city: string, cityId?: string): Promise<CityProgress>;
   achievements(): Promise<Achievement[]>;
 
@@ -169,7 +177,12 @@ export class LocalProfileService implements ProfileService {
     this.validator = opts.validateDeck ?? ((ids) => mirrorValidateDeck(this.tables.cards, ids));
     this.schema = opts.schema ?? SCHEMA_VERSION;
     this.migrations = opts.migrations ?? MIGRATIONS;
+    const cardIds = new Set(this.tables.cards.cards.map((c) => c.id));
+    this.isCard = (id) => cardIds.has(id);
   }
+
+  /// Known card ids (`mvpCard` must be one, or null).
+  private readonly isCard: (id: string) => boolean;
 
   /// Open (or create) the local profile. A new profile gets the starter deck.
   static async open(opts: LocalProfileOptions = {}): Promise<LocalProfileService> {
@@ -412,7 +425,7 @@ export class LocalProfileService implements ProfileService {
       source,
       matchId: p.matchId,
       district: sanitizePlace(p.district),
-      city: sanitizePlace(p.city),
+      city: sanitizePlace(p.city, "city"),
       tier: p.tier,
       wave: p.wave,
       populationSaved: Math.max(0, Math.floor(p.populationSaved)),
@@ -468,7 +481,7 @@ export class LocalProfileService implements ProfileService {
       const cleared = p.clearedTiers.includes(tier);
       if (i < 0) {
         if (!cleared) continue;
-        const a: Achievement = { id, kind: "city_cleared", cityKey: p.cityKey, city: sanitizePlace(p.city), tier, provisional: p.provisional, at: this.nowIso() };
+        const a: Achievement = { id, kind: "city_cleared", cityKey: p.cityKey, city: sanitizePlace(p.city, "city"), tier, provisional: p.provisional, at: this.nowIso() };
         s.achievements.push(a);
         added.push(a);
       } else if (s.achievements[i].provisional && !p.provisional) {
@@ -487,12 +500,13 @@ export class LocalProfileService implements ProfileService {
         const old = await this.backend.getMatch(summary.matchId);
         return { paid: false, payout: old?.payout ?? none, tickets: [], daily: null, unlockedTiers: [], coverageCells: 0, city: null, newAchievements: [] };
       }
-      const problems = checkSummary(summary, this.tables.maxDefendedRadiusM);
+      const problems = checkSummary(summary, this.tables.maxDefendedRadiusM, this.isCard);
       if (problems.length) throw new ProfileError("bad_summary", problems.join("; "));
       const ti = tierIndex(summary.tier);
       if (ti > s.highestClearedTier + 1) throw new ProfileError("tier_locked", `${summary.tier} is locked`);
 
       const cleared = summary.wavesWon >= 8;
+      const cityId = validCityId(summary.cityId);
       const saved = summary.savedPerWave.length ? Math.max(...summary.savedPerWave) : 0;
       const place = { matchId: summary.matchId, district: summary.district, city: summary.city, tier: summary.tier, populationSaved: saved, mvpCard: summary.mvpCard };
       const payout = computePayout(this.tables.rewards.payout, summary);
@@ -517,8 +531,9 @@ export class LocalProfileService implements ProfileService {
         // The city key is built from the sanitised name (it is stored in cells
         // and achievement ids); a name that sanitises to nothing, with no id,
         // tags no city and counts for no city achievement.
-        const cityName = sanitizePlace(summary.city);
-        const cityKey = cityName || summary.cityId?.trim() ? cityKeyOf(cityName, summary.cityId) : null;
+        // An id that isn't `osm:relation:<digits>` is ignored (place.ts).
+        const cityName = sanitizePlace(summary.city, "city");
+        const cityKey = cityName || cityId ? cityKeyOf(cityName, cityId) : null;
         const ids = cellsInDisc(summary.center, summary.defendedRadiusM);
         const existing = new Map((await this.backend.getCells(ids)).map((c) => [c.cell, c]));
         const changed = mergeCoverage(existing, ids, summary.tier, cityKey);
@@ -528,13 +543,15 @@ export class LocalProfileService implements ProfileService {
           // City progress over every cell (including this match's).
           const all = new Map((await this.backend.allCells()).map((c) => [c.cell, c]));
           for (const c of changed) all.set(c.cell, c);
-          city = await this.progress([...all.values()], cityName, summary.cityId);
+          city = await this.progress([...all.values()], cityName, cityId);
           newAchievements = this.applyAchievements(s, city);
         }
       }
 
       // History keeps the sanitised names (a UI listing it can't show a street).
-      const stored: MatchSummary = { ...summary, city: sanitizePlace(summary.city), district: sanitizePlace(summary.district), savedPerWave: [...summary.savedPerWave] };
+      // An unaccepted cityId is not stored either.
+      const stored: MatchSummary = { ...summary, city: sanitizePlace(summary.city, "city"), district: sanitizePlace(summary.district), savedPerWave: [...summary.savedPerWave] };
+      if (cityId === undefined) delete stored.cityId;
       tx.matches.push({ summary: stored, runRecord: runRecord ?? null, claimedAt: this.nowIso(), payout, cleared });
       return { paid: true, payout, tickets, daily, unlockedTiers, coverageCells, city, newAchievements };
     });
@@ -551,6 +568,7 @@ export class LocalProfileService implements ProfileService {
         throw new ProfileError("bad_summary", `populationSaved must be a finite number >= 0, not ${String(e.populationSaved)}`);
       }
       if (!isTier(e.tier)) throw new ProfileError("bad_summary", `unknown tier ${String(e.tier)}`);
+      if (typeof e.city !== "string" || typeof e.district !== "string") throw new ProfileError("bad_summary", "city and district must be strings");
       if (tierIndex(e.tier) > s.highestClearedTier + 1) throw new ProfileError("tier_locked", `${e.tier} is locked`);
       const day = this.rollDay(s);
       const key = e.kind === "first_blood" ? `first_blood:${day}` : `wave_victory:${e.matchId}:${e.wave}`;
@@ -593,7 +611,7 @@ export class LocalProfileService implements ProfileService {
       source: "crate",
       stamp: {
         district: sanitizePlace(t.district),
-        city: sanitizePlace(t.city),
+        city: sanitizePlace(t.city, "city"),
         wave: t.wave,
         tier: t.tier,
         populationSaved: t.populationSaved,
@@ -677,10 +695,10 @@ export class LocalProfileService implements ProfileService {
     });
   }
 
-  /// `city` is sanitised as in `claimMatch` (same key; the name returned is
-  /// the sanitised one).
+  /// `city` is sanitised and `cityId` checked as in `claimMatch` (same key;
+  /// the name returned is the sanitised one).
   cityProgress(city: string, cityId?: string): Promise<CityProgress> {
-    return this.serial(async () => this.progress(await this.backend.allCells(), sanitizePlace(city), cityId));
+    return this.serial(async () => this.progress(await this.backend.allCells(), sanitizePlace(typeof city === "string" ? city : "", "city"), validCityId(cityId)));
   }
 
   achievements(): Promise<Achievement[]> {
@@ -727,6 +745,9 @@ export class LocalProfileService implements ProfileService {
       if (!data || data.format !== "zt-profile-export" || !data.state || !Array.isArray(data.matches) || !Array.isArray(data.coverage)) {
         throw new ProfileError("bad_import", "not a profile export");
       }
+      if (data.schema !== (data.state as { schema?: unknown }).schema) {
+        throw new ProfileError("bad_import", `export schema ${String(data.schema)} doesn't match its state schema ${String((data.state as { schema?: unknown }).schema)}`);
+      }
       let b: Bundle;
       try {
         b = migrateBundle({ state: data.state, matches: data.matches, coverage: data.coverage }, this.schema, this.migrations);
@@ -734,7 +755,7 @@ export class LocalProfileService implements ProfileService {
         if (e instanceof ProfileError) throw e;
         throw new ProfileError("bad_import", `the export could not be migrated: ${String((e as Error)?.message ?? e)}`);
       }
-      validateBundle(b);
+      validateBundle(b, { maxRadiusM: this.tables.maxDefendedRadiusM, isCard: this.isCard });
       const cur = await this.backend.loadState();
       b.state.revision = (cur?.revision ?? 0) + 1;
       await this.backend.commit({ expectedRevision: cur?.revision ?? null, state: b.state, matches: b.matches, cells: b.coverage, replaceAll: true });

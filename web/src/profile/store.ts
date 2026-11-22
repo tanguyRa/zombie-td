@@ -16,6 +16,7 @@
 // the second commit sees a newer revision, aborts and the service retries
 // on fresh data, so a match can't be paid twice from two tabs.
 
+import { checkSummary } from "./rewards";
 import { TIERS, type CoverageCell, type MatchRecord, type ProfileState } from "./types";
 
 export const DB_NAME = "zt-profile";
@@ -312,8 +313,11 @@ export const MIGRATIONS: Record<number, Migration> = {};
 
 /// Throws ProfileError("bad_import") unless `b` has the full shape of a
 /// current-schema bundle. Run on an import after migration and before the
-/// commit, so a malformed export can't replace a working profile.
-export function validateBundle(b: Bundle): void {
+/// commit, so a malformed export can't replace a working profile. Each match
+/// is checked in full (`checkSummary` with `maxRadiusM` and `isCard`, plus
+/// `cleared`, `claimedAt` and `payout`), and ids must be unique (instances,
+/// decks, tickets, crates, matches, cells).
+export function validateBundle(b: Bundle, opts: { maxRadiusM: number; isCard?: (id: string) => boolean }): void {
   const fail = (m: string): never => {
     throw new ProfileError("bad_import", `not a valid profile: ${m}`);
   };
@@ -332,7 +336,7 @@ export function validateBundle(b: Bundle): void {
   if (!isCount(s.revision)) fail("revision is not a number");
   if (!isCount(s.nextSeq)) fail("nextSeq is not a number");
   arrayOf(s.instances, "instances", (x) => isObj(x) && isStr(x.instanceId, true) && isStr(x.cardId, true));
-  arrayOf(s.decks, "decks", (x) => isObj(x) && isStr(x.id, true) && Array.isArray(x.instanceIds));
+  arrayOf(s.decks, "decks", (x) => isObj(x) && isStr(x.id, true) && Array.isArray(x.instanceIds) && x.instanceIds.every((i) => isStr(i, true)));
   arrayOf(s.tickets, "tickets", (x) => isObj(x) && isStr(x.id, true));
   arrayOf(s.crates, "crates", (x) => isObj(x) && isStr(x.id, true));
   arrayOf(s.claimedMatches, "claimedMatches", (x) => isStr(x, true));
@@ -347,7 +351,16 @@ export function validateBundle(b: Bundle): void {
   const rng = s.rng;
   const hex = (v: unknown) => isStr(v) && /^[0-9a-f]{1,16}$/i.test(v);
   if (!isObj(rng) || !hex(rng.state) || !hex(rng.inc)) fail("rng is not a pair of hex u64");
+  const isIso = (v: unknown) => isStr(v) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v) && Number.isFinite(Date.parse(v));
+  const isPayout = (v: unknown) => isObj(v) && ["waveTickets", "clearedTickets", "civilianTickets", "noRetryBonus", "total"].every((k) => isCount(v[k]));
   arrayOf(b.matches, "matches", (x) => isObj(x) && isObj(x.summary) && isStr(x.summary.matchId, true));
+  b.matches.forEach((m, i) => {
+    const problems = checkSummary(m.summary, opts.maxRadiusM, opts.isCard);
+    if (problems.length) fail(`matches[${i}].summary: ${problems.join("; ")}`);
+    if (typeof m.cleared !== "boolean") fail(`matches[${i}].cleared is not a boolean`);
+    if (!isIso(m.claimedAt)) fail(`matches[${i}].claimedAt is not an ISO date`);
+    if (!isPayout(m.payout)) fail(`matches[${i}].payout is malformed`);
+  });
   const fin = (v: unknown) => typeof v === "number" && Number.isFinite(v);
   arrayOf(
     b.coverage,
@@ -363,6 +376,20 @@ export function validateBundle(b: Bundle): void {
       isObj(x.bounds) &&
       ["south", "west", "north", "east"].every((k) => fin((x.bounds as Record<string, unknown>)[k])),
   );
+  const unique = (ids: unknown[], name: string) => {
+    const seen = new Set<unknown>();
+    for (const id of ids) {
+      if (seen.has(id)) fail(`duplicate ${name} ${String(id)}`);
+      seen.add(id);
+    }
+  };
+  const st = s as unknown as ProfileState;
+  unique(st.instances.map((x) => x.instanceId), "instance id");
+  unique(st.decks.map((x) => x.id), "deck id");
+  unique(st.tickets.map((x) => x.id), "ticket id");
+  unique(st.crates.map((x) => x.id), "crate id");
+  unique(b.matches.map((m) => m.summary.matchId), "match id");
+  unique(b.coverage.map((c) => c.cell), "coverage cell");
 }
 
 /// Upgrade a bundle to `target`. Throws `schema_too_new` for a newer bundle
