@@ -119,8 +119,8 @@ pub struct Sim {
     pub bite_cd: Vec<u8>,
     /// Movement multiplier this tick: 0 = not updated, 1 = awake, P = dormant update.
     step_mul: Vec<u8>,
-    sep_x: Vec<f32>,
-    sep_y: Vec<f32>,
+    pub sep_x: Vec<f32>,
+    pub sep_y: Vec<f32>,
     spawn_x: Vec<f32>,
     spawn_y: Vec<f32>,
 
@@ -129,9 +129,16 @@ pub struct Sim {
     pub hash_h: usize,
     bucket_m: f32,
     bucket_start: Vec<u32>,
+    /// End of the civilian run inside each bucket (civilians are stored first).
+    bucket_civ_end: Vec<u32>,
     bucket_fill: Vec<u32>,
     agent_ids: Vec<u32>,
     agent_bucket: Vec<u32>,
+    /// Positions and states copied in bucket order at hash time, so
+    /// neighbour scans read contiguous memory.
+    hx: Vec<f32>,
+    hy: Vec<f32>,
+    hs: Vec<u8>,
 
     // Flow fields.
     pub chase: Vec<i32>,
@@ -199,9 +206,13 @@ impl Sim {
             hash_h,
             bucket_m,
             bucket_start: vec![0; hash_w * hash_h + 1],
+            bucket_civ_end: vec![0; hash_w * hash_h],
             bucket_fill: vec![0; hash_w * hash_h],
             agent_ids: vec![0; n],
             agent_bucket: vec![NONE; n],
+            hx: vec![0.0; n],
+            hy: vec![0.0; n],
+            hs: vec![0; n],
             chase: vec![INF; cells],
             threat: vec![INF; cells],
             flee: vec![INF; cells],
@@ -657,9 +668,13 @@ impl Sim {
         by * self.hash_w + bx
     }
 
+    /// Counting sort of agents into buckets. Inside a bucket, civilians come
+    /// first, so queries for civilians (bites) or for zombies (towers) only
+    /// scan their own run.
     fn rebuild_hash(&mut self) {
         let nb = self.hash_w * self.hash_h;
         self.bucket_start.fill(0);
+        self.bucket_civ_end[..nb].fill(0);
         for i in 0..self.n {
             if self.state[i] == DEAD {
                 self.agent_bucket[i] = NONE;
@@ -668,17 +683,43 @@ impl Sim {
             let b = self.bucket_of(self.x[i], self.y[i]);
             self.agent_bucket[i] = b as u32;
             self.bucket_start[b + 1] += 1;
+            if self.state[i] == CIVILIAN {
+                self.bucket_civ_end[b] += 1; // civilian count for now
+            }
         }
         for b in 0..nb {
             self.bucket_start[b + 1] += self.bucket_start[b];
         }
-        self.bucket_fill.copy_from_slice(&self.bucket_start[..nb]);
+        for b in 0..nb {
+            let civ = self.bucket_civ_end[b];
+            self.bucket_civ_end[b] = self.bucket_start[b] + civ;
+            self.bucket_fill[b] = self.bucket_start[b];
+        }
+        // Civilians first...
         for i in 0..self.n {
             let b = self.agent_bucket[i];
-            if b != NONE {
-                let slot = &mut self.bucket_fill[b as usize];
-                self.agent_ids[*slot as usize] = i as u32;
-                *slot += 1;
+            if b != NONE && self.state[i] == CIVILIAN {
+                let slot = self.bucket_fill[b as usize] as usize;
+                self.bucket_fill[b as usize] += 1;
+                self.agent_ids[slot] = i as u32;
+                self.hx[slot] = self.x[i];
+                self.hy[slot] = self.y[i];
+                self.hs[slot] = CIVILIAN;
+            }
+        }
+        // ...then everyone else, after the civilian run.
+        for b in 0..nb {
+            self.bucket_fill[b] = self.bucket_civ_end[b];
+        }
+        for i in 0..self.n {
+            let b = self.agent_bucket[i];
+            if b != NONE && self.state[i] != CIVILIAN {
+                let slot = self.bucket_fill[b as usize] as usize;
+                self.bucket_fill[b as usize] += 1;
+                self.agent_ids[slot] = i as u32;
+                self.hx[slot] = self.x[i];
+                self.hy[slot] = self.y[i];
+                self.hs[slot] = self.state[i];
             }
         }
     }
@@ -695,12 +736,18 @@ impl Sim {
         for by in by0..=by1 {
             for bx in bx0..=bx1 {
                 let b = by * self.hash_w + bx;
-                for k in self.bucket_start[b]..self.bucket_start[b + 1] {
-                    let j = self.agent_ids[k as usize] as usize;
+                let range = if state == CIVILIAN {
+                    self.bucket_start[b]..self.bucket_civ_end[b]
+                } else {
+                    self.bucket_civ_end[b]..self.bucket_start[b + 1]
+                };
+                for k in range {
+                    let k = k as usize;
+                    let (dx, dy) = (self.hx[k] - x, self.hy[k] - y);
+                    let j = self.agent_ids[k] as usize;
                     if j == skip || self.state[j] != state {
                         continue;
                     }
-                    let (dx, dy) = (self.x[j] - x, self.y[j] - y);
                     let d2 = dx * dx + dy * dy;
                     if d2 <= r2 && best.map_or(true, |(bj, bd)| d2 < bd || (d2 == bd && j < bj)) {
                         best = Some((j, d2));
@@ -924,8 +971,8 @@ impl Sim {
             'outer: for by in by0..=by1 {
                 for bx in bx0..=bx1 {
                     let b = by * self.hash_w + bx;
-                    for k in self.bucket_start[b]..self.bucket_start[b + 1] {
-                        let j = self.agent_ids[k as usize] as usize;
+                    for k in self.bucket_start[b] as usize..self.bucket_start[b + 1] as usize {
+                        let j = self.agent_ids[k] as usize;
                         if j == i {
                             continue;
                         }
@@ -933,10 +980,11 @@ impl Sim {
                         if scanned > max_scan {
                             break 'outer;
                         }
-                        if self.state[j] == INFECTED {
-                            continue; // infected are pushed but don't push
+                        // Hash-time state: infected are pushed but don't push.
+                        if self.hs[k] == INFECTED {
+                            continue;
                         }
-                        let (dx, dy) = (x - self.x[j], y - self.y[j]);
+                        let (dx, dy) = (x - self.hx[k], y - self.hy[k]);
                         let d2 = dx * dx + dy * dy;
                         if d2 >= r2 {
                             continue;

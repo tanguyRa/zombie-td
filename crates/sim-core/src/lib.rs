@@ -2,6 +2,7 @@
 //! runner (native) and the browser (WASM).
 
 pub mod config;
+pub mod fixture;
 pub mod field;
 pub mod grid;
 pub mod level;
