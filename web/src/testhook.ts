@@ -13,6 +13,8 @@
 // query after 50 ms instead of 1 s (T6b: a clock control, same blocks). Queries, records and hashes reject with "aborted" when there
 // is no match (after "← Map"); actions resolve with an `aborted` error.
 import type { Map as MlMap } from "maplibre-gl";
+import type { Place } from "./explore";
+import type { ProfileHook } from "./ui/profileui";
 import type {
   Action,
   ActionError,
@@ -102,6 +104,9 @@ export interface TestHookDeps {
   mapBundle(): Promise<string>;
   enterPlace(lat: number, lon: number, name: string): void;
   district(): { visible: boolean; state: string; text: string };
+  profile(): ProfileHook;
+  picked(): Place | null;
+  backToMap(): void;
 }
 
 export interface TestHook {
@@ -178,6 +183,12 @@ export interface TestHook {
   /** Same as dropping a pin there and pressing Start here. */
   enterPlace(lat: number, lon: number, name?: string): void;
   newMatch(seed: number | string): void;
+  /** "← Map" (claims the match on screen if it made progress). */
+  backToMap(): void;
+  /** The local profile (T7b): state snapshots, the screens, the claims. */
+  readonly profile: ProfileHook;
+  /** The pin on the map screen, with the admin names the profile will store. */
+  readonly picked: Place | null;
   debug: { map: MlMap; overlay: unknown };
 }
 
@@ -349,6 +360,11 @@ export function installTestHook(d: TestHookDeps): (m: FromWorker) => boolean {
     enterPreset: (i) => d.enterPreset(i),
     enterPlace: (lat, lon, name = "Dropped pin") => d.enterPlace(lat, lon, name),
     newMatch: (seed) => d.newMatch(seed),
+    backToMap: () => d.backToMap(),
+    profile: d.profile(),
+    get picked() {
+      return d.picked();
+    },
     debug: { map: d.map, overlay: d.overlay },
   };
   (window as unknown as { __zt: TestHook }).__zt = hook;

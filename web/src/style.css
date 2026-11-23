@@ -90,7 +90,7 @@ dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---------- screens ---------- */
-body[data-screen="explore"] > :not(#explore):not(#toast):not(#map) { display: none !important; }
+body[data-screen="explore"] > :not(#explore):not(#toast):not(#map):not(.any-screen) { display: none !important; }
 body[data-screen="game"] > #explore { display: none; }
 #explore { position: absolute; inset: 0; pointer-events: none; }
 #explore > * { pointer-events: auto; }

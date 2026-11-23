@@ -5,7 +5,9 @@
 // The same map stays on screen during the game, under the deck.gl layers.
 import maplibregl, { GeoJSONSource, LngLatLike } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { placeFromGeocoder } from "./profile/place";
 import { PLAY_RADIUS_M } from "./stream";
+import { adminOf, type PlaceAdmin } from "./ui/profilematch";
 
 const STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const NOMINATIM = "https://nominatim.openstreetmap.org";
@@ -17,7 +19,13 @@ export interface Place {
   name: string;
   /// Committed level pack instead of a live download (the built-in levels).
   presetUrl?: string;
+  /// City and district for the profile (match history, stamps, lore):
+  /// only the geocoder's admin fields, through `placeFromGeocoder`, or a
+  /// built-in level's fixed names. Never a street: `name` (the display
+  /// label) is never stored in the profile.
+  admin?: PlaceAdmin;
 }
+
 
 export interface ExploreOptions {
   presets: Place[];
@@ -45,7 +53,11 @@ function shortName(display: string): string {
 function loadLast(): Place | null {
   try {
     const v = localStorage.getItem(LAST_KEY);
-    return v ? (JSON.parse(v) as Place) : null;
+    if (!v) return null;
+    const p = JSON.parse(v) as Place;
+    // Stored admin names go through the contract again (sanitised).
+    if (p.admin) p.admin = placeFromGeocoder({ city: String(p.admin.city ?? ""), suburb: String(p.admin.district ?? "") });
+    return p;
   } catch {
     return null;
   }
@@ -53,7 +65,7 @@ function loadLast(): Place | null {
 
 function saveLast(p: Place) {
   try {
-    localStorage.setItem(LAST_KEY, JSON.stringify({ lat: p.lat, lon: p.lon, name: p.name }));
+    localStorage.setItem(LAST_KEY, JSON.stringify({ lat: p.lat, lon: p.lon, name: p.name, admin: p.admin ? { city: p.admin.city, district: p.admin.district } : undefined }));
   } catch {
     /* storage unavailable: nothing to remember */
   }
@@ -135,14 +147,18 @@ export function createExplore(opts: ExploreOptions) {
     render();
   }
 
+  // A dropped pin: one reverse geocode at zoom 14 (suburb, an admin level),
+  // so the answer names no street; its admin fields give the city and
+  // district (placeFromGeocoder), its display name the label.
   async function reverse(lat: number, lon: number) {
     const seq = ++reverseSeq;
     try {
-      const r = await fetch(`${NOMINATIM}/reverse?format=jsonv2&zoom=17&lat=${lat.toFixed(6)}&lon=${lon.toFixed(6)}`);
+      const r = await fetch(`${NOMINATIM}/reverse?format=jsonv2&zoom=14&addressdetails=1&lat=${lat.toFixed(6)}&lon=${lon.toFixed(6)}`);
       if (!r.ok) return;
-      const j = (await r.json()) as { display_name?: string };
-      if (seq === reverseSeq && pick && pick.lat === lat && j.display_name) {
-        pick.name = shortName(j.display_name);
+      const j = (await r.json()) as { display_name?: string; address?: Record<string, string> };
+      if (seq === reverseSeq && pick && pick.lat === lat) {
+        pick.admin = placeFromGeocoder(j.address ?? {});
+        if (j.display_name) pick.name = shortName(j.display_name);
         render();
       }
     } catch {
@@ -161,9 +177,10 @@ export function createExplore(opts: ExploreOptions) {
     list.innerHTML = "<li class='muted'>Searching…</li>";
     list.hidden = false;
     try {
-      const r = await fetch(`${NOMINATIM}/search?format=jsonv2&limit=6&q=${encodeURIComponent(q)}`);
+      // addressdetails=1: the admin fields for the profile (city, district).
+      const r = await fetch(`${NOMINATIM}/search?format=jsonv2&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`);
       if (!r.ok) throw new Error(`search failed (${r.status})`);
-      const items = (await r.json()) as { lat: string; lon: string; display_name: string }[];
+      const items = (await r.json()) as { lat: string; lon: string; display_name: string; address?: Record<string, string>; osm_type?: string; osm_id?: number; addresstype?: string }[];
       list.innerHTML = "";
       if (!items.length) {
         list.innerHTML = "<li class='muted'>No results</li>";
@@ -182,7 +199,7 @@ export function createExplore(opts: ExploreOptions) {
         b.addEventListener("click", () => {
           list.hidden = true;
           input.value = shortName(it.display_name);
-          setPick({ lat: Number(it.lat), lon: Number(it.lon), name: shortName(it.display_name) }, true);
+          setPick({ lat: Number(it.lat), lon: Number(it.lon), name: shortName(it.display_name), admin: adminOf(it) }, true);
         });
         li.appendChild(b);
         list.appendChild(li);
@@ -229,6 +246,10 @@ export function createExplore(opts: ExploreOptions) {
       active = on;
       if (map.isStyleLoaded()) setLabels(on);
       render();
+    },
+    /// The pin on the map screen (a copy), or null.
+    picked(): Place | null {
+      return pick ? { ...pick, admin: pick.admin ? { ...pick.admin } : undefined } : null;
     },
   };
 }

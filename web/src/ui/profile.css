@@ -1,0 +1,57 @@
+/* Profile UI (T7b): the map screen's match setup, the profile screens and the payout panel. */
+#profile-bar { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); padding-top: 8px; margin-top: 2px; }
+#profile-bar .p-row { display: flex; gap: 8px; flex-wrap: wrap; }
+#profile-bar .p-row label { flex: 1; min-width: 0; }
+#profile-bar select { flex: 1; min-width: 0; }
+.p-buttons { display: flex; flex-wrap: wrap; gap: 4px; }
+.p-buttons button { padding: 4px 8px; font-size: 12px; }
+.p-note { font-size: 11px; color: var(--text-2); }
+.p-warn { font-size: 12px; color: #ffe08a; background: #3a2f10; border: 1px solid #5a4610; border-radius: 6px; padding: 6px 8px; }
+.p-warn[hidden] { display: none; }
+
+#profile-screen[hidden] { display: none; }
+.ps-card { width: min(980px, calc(100vw - 32px)); max-height: calc(100vh - 64px); display: flex; flex-direction: column; gap: 12px; padding: 16px 18px; }
+.ps-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.ps-tabs .ps-close { margin-left: auto; }
+#ps-body { overflow: auto; min-height: 200px; }
+#ps-body h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-2); margin: 10px 0 6px; }
+.ps-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.db-coll, .db-deck { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.db-card, .db-entry, .coll-card { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 1px solid var(--line); border-left-width: 4px; border-radius: 6px; background: #22252a; font-size: 13px; flex-wrap: wrap; }
+.db-card .cc-name, .db-entry .cc-name, .coll-card .cc-name { font-weight: 600; }
+.db-card .cc-rarity, .coll-card .cc-rarity, .db-owned { color: var(--text-2); font-size: 12px; }
+.db-card button, .db-entry button { margin-left: auto; }
+.rarity-common { border-left-color: #8a8f98; }
+.rarity-uncommon { border-left-color: #3fa66b; }
+.rarity-rare { border-left-color: #3d7fd6; }
+.rarity-legendary { border-left-color: #d6a23d; }
+.db-list { display: flex; flex-direction: column; gap: 4px; }
+#db-errors { margin: 4px 0; padding-left: 18px; font-size: 13px; }
+#db-errors.bad { color: var(--warn, #ffb3b3); }
+#db-errors.ok { color: #a9f0c4; }
+#db-count.over, #db-status.over { color: var(--warn, #ffb3b3); }
+#db-name { background: #1b1d21; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; font: inherit; flex: 1; }
+.coll-list { display: flex; flex-direction: column; gap: 4px; }
+.coll-card .stamp { flex-basis: 100%; font-size: 12px; color: var(--text-2); }
+.coll-card .foil { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: linear-gradient(90deg, #6b4fd6, #3fa6c4); color: #fff; }
+.coll-card .bound { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: #2a2d33; color: var(--text-2); }
+.lore { font-style: italic; margin: 6px 0; }
+.crate-item, .hist-item, .city-item { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 4px; }
+.hist-item button { align-self: flex-start; margin-top: 4px; }
+.hist-outcome { font-size: 12px; color: #ffd2a0; }
+.hist-outcome.won { color: #a9d4ff; }
+.provisional { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: #50361d; color: #ffd2a0; margin-left: 6px; }
+#pr-tiers li.locked { color: var(--text-2); }
+
+/* The payout panel shows on the map screen and in a match. */
+#payout { position: absolute; left: 50%; top: 64px; transform: translateX(-50%); z-index: 13; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; width: min(460px, calc(100vw - 32px)); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4); }
+/* In a match (after New match): above the hand, clear of the district banner. */
+body[data-screen="game"] #payout { top: auto; bottom: 170px; }
+#payout[hidden], #r-payout[hidden] { display: none !important; }
+#payout h3, #r-payout h3 { margin: 0 0 6px; font-size: 15px; }
+#r-payout { border-top: 1px solid var(--line); margin: 0 0 14px; padding-top: 10px; }
+.po-total { font-size: 18px; font-weight: 700; margin: 4px 0; }
+.po-breakdown { font-size: 12px; color: var(--text-2); margin: 4px 0; }
+.po-bonus { color: #a9f0c4; }
+.po-unlock { color: #a9d4ff; font-weight: 600; }
+#payout .row, #r-payout .row { margin-top: 8px; }

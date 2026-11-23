@@ -989,8 +989,8 @@ Every choice the spec left open, and every simplification, in one place.
 
 - **The worker owns a `WasmMatch`** built with `Match::new` on the whole
   level pack for the built-in levels, or `Match::new_streaming` on a shell
-  and blocks for a picked place (T6b, "Streaming map") and the starter deck (`setup` without `deck`; the deck
-  builder is T7b). The seed is sent as a decimal string, end to end: the
+  and blocks for a picked place (T6b, "Streaming map"), with the setup from the profile (T7b: `setup {seed, deck, population_multiplier}`; T5 sent no deck, i.e. the starter deck; the deck
+  builder is T7b, "Profile UI"). The seed is sent as a decimal string, end to end: the
   input is a text field parsed with `BigInt` (`web/src/seed.ts`, 0 to
   2^64 - 1, never through `Number`), so seeds above 2^53 are exact (a test
   checks the record's `setup.seed` for 2^53 + 1).
@@ -1811,8 +1811,8 @@ yet: that comes after T5).
 ## Profile (T7a)
 
 The local meta layer lives in `web/src/profile/` (library only: the deck
-builder, collection, crate and coverage screens and the match wiring come
-later).
+builder, collection, crate and coverage screens and the match wiring are
+T7b, "Profile UI (T7b)" below).
 
 - **`ProfileService` is the boundary to the future server.** Every method
   is async and takes and returns plain JSON (no Date, Map, bigint or class),
@@ -2105,3 +2105,213 @@ later).
   payout, daily caps, crate odds, foil chance, lore templates, coverage
   threshold and placeholder area. `checkTables` validates them when a
   service is created (odds sum to 1, every tier present, lore not empty).
+
+## Profile UI (T7b)
+
+The profile library (T7a) wired into the page: `web/src/ui/profileui.ts`
+(the map screen's match setup, the screens, coverage, the payout panel,
+the test hook's `profile`), `web/src/ui/profilematch.ts` (match id, daily
+events, the summary and the one claim per match),
+`web/src/ui/deckvalidator.ts` and `web/src/ui/profile.css`. `main.ts` only
+calls `matchSetup()`, `startMatch()`, the tracker's `abandon()` /
+`onStatus()` / `onPhase()` and `onResult()`.
+
+- **Opening.** `LocalProfileService.open` at page load, with sim-core's deck
+  rules injected (`validateDeck`). When IndexedDB is unavailable the library
+  falls back to memory and the map screen says the profile is temporary;
+  when the open fails (`schema_too_new`, `storage`) the screen says why and
+  offers **Use a temporary profile** (`memoryProfile()`), never silently. A
+  match can't start without a profile.
+- **The core's deck rules through WASM.** `sim-wasm` exports
+  `validate_deck(card_ids_json) -> errors_json` (marshalling only:
+  `CardDb::validate_deck` on the embedded cards, parsed once; `bad_deck`
+  for anything but an array of strings). The page loads the web WASM build
+  once on the main thread too (the worker has its own instance) and wraps
+  it as the profile's validator; if it fails to load, the TS mirror (same
+  rules and messages) is used with a console warning. The cases of
+  `t3_cards.rs` are a shared fixture,
+  `crates/sim-wasm/tests/fixtures/deck_cases.json` (decks and expected
+  errors, written from the mirror with `UPDATE_FIXTURES=1`): the WASM test
+  (`wasm_validate_deck_matches_the_cases`) checks the core gives exactly
+  those errors, and `deck_wasm.test.ts` checks the mirror and the web WASM
+  build give them too, plus 2,000 random decks on which WASM and the
+  mirror agree. The "three legendaries" case needs a custom card table and
+  stays in the mirror test only.
+- **Match setup** (map screen, under the built-in levels): the deck (every
+  saved deck; the starter deck by default), the difficulty (a select with
+  **only the unlocked tiers**) and **This is my hometown** (a checkbox,
+  read when the match starts). The active deck and tier are browser
+  preferences in `localStorage` (`ztd.activeDeck`, `ztd.tier`), not
+  profile data. A stored tier that is not unlocked (another profile
+  imported) falls back to Recruit.
+- **Every match is set up by the profile.** `newMatch` (a level, Enter or
+  New match, Retry after a load error) asks `matchSetup()`: the active
+  deck's card ids (`deckCardIds`, which refuses an illegal deck: the
+  loading card then says 'The deck "…" is not legal: …. Fix it in the deck
+  builder.' and no match is built), the tier (refused if locked) and the
+  multiplier, then sends `init {setup: {seed, deck, population_multiplier}}`.
+  The setup now waits for IndexedDB, so `newMatch` first sends `stop` to
+  the old match (after asking for its record, see the claims): the old
+  match must not keep posting its state while the new one is set up. A
+  setup overtaken by another new match or by ← Map is dropped (`matchGen`).
+- **The multiplier** is `Math.fround(match.population_multiplier ×
+  difficulty[tier].population_multiplier)` (an f32, as the server will
+  compute it for `ExpectedRun.population_multiplier`), checked against the
+  verifier's range [0.25, 4] × the base before the match is built: 0.3,
+  0.375, 0.45 and 0.6 for the four tiers with the default config. Recruit
+  gives the f32 of 0.3, the config's own, so the T5 match and its hashes
+  are unchanged (the full-match test still verifies).
+- **`outbreak_scale` and `fatigue_scale` are not wired.** They are not sim
+  inputs: making them so changes what a record replays, so they must
+  become setup or `Config` fields with a `SIM_RULES_VERSION` bump (Run
+  records (T4), "The config hash covers what the sim reads"). The match
+  setup shows the tier's population factor and "Outbreak and fatigue
+  scaling: coming soon"; the Progress screen lists their values as coming
+  soon.
+- **Place names.** The profile's `city`, `district` (and `cityId`) come
+  only from `placeFromGeocoder` (`adminOf` in profilematch.ts):
+  - the place search now asks Nominatim with `addressdetails=1` and keeps
+    `placeFromGeocoder(result.address, result)` of the chosen result: the
+    admin fields only, and a `cityId` only when the result itself is a
+    city relation (the player searched the city; an address result gives
+    none, fail-closed as in T7a);
+  - a dropped pin's reverse geocode is now at **zoom 14** (suburb, an admin
+    level) with `addressdetails=1`, so the answer names no street at all;
+    its admin fields give the city and district, its display name the
+    pin's label (which used to be street level, at zoom 17). If the reverse
+    fails, the match has an empty city and district (it pays and is
+    stored, but tags no city);
+  - the built-in levels have fixed names: Le Marais / Paris, and "" / Le
+    Vésinet, with no `cityId`: a searched "Paris" (keyed on its relation)
+    and the Marais level (keyed on the name) are two city keys until a city
+    lookup gives the level an id;
+  - the display label (`Place.name`, from `display_name`) never reaches the
+    profile. The last place remembered in `localStorage` keeps its admin
+    names, which go through `placeFromGeocoder` again when read back.
+  Tests: Nominatim-shaped results with a road, a house number and a
+  postcode give only the admin names (unit); the E2E routes the search and
+  the reverse geocode to fixture answers and checks the pin's admin names
+  and the request parameters.
+- **Match id and daily events** (`MatchTracker`). A UUID is made when the
+  match is sent to the worker (`startMatch`); retries and restarts stay in
+  the same match. The first status with `zombies_killed > 0` reports
+  `first_blood` (once per match; the profile counts it once a day); each
+  wave won (`wave_won`, or wave 8's `match_won`) reports `wave_victory`
+  with that wave's end civilians (once per wave per match; the profile
+  keys it per match and wave too, so a retried wave never counts twice).
+- **One claim per match.** Wave 8 won claims at once ("cleared"). Leaving a
+  match claims it ("abandoned") when it made progress: a wave started, won
+  or lost, or a retry or restart (`hasProgress`; a wave-1 prep where cards
+  were only placed is no claim and leaves no history). Leaving is ← Map
+  (and New location), a new match (another seed, or New match), and
+  entering another level while one is on screen. The tracker takes the
+  snapshot and posts the `record` request synchronously, before the
+  worker's `stop` or `init`, so the record is the abandoned match's (the
+  worker answers a record at once, in message order). The claim is marked
+  sent before the profile call, and the profile is idempotent on the match
+  id, so a match is paid once whatever the UI does (a second claim pays
+  nothing and returns the first payout). Closing the tab is not a claim
+  (IndexedDB can't be written reliably on unload): that match is lost, as
+  an issued but never submitted server run counts as abandoned.
+- **The summary** (`buildSummary`) comes from what the worker reported:
+  waves won are the distinct waves with a won result (a retry drops the
+  retried attempt's result, a restart drops them all), `savedPerWave` their
+  end civilians, `retries` the wave retries plus match restarts,
+  `defendedRadiusM` the ring radius of the last wave won (capped by the
+  profile's bound), the centre the level's (or the shell's). The **MVP
+  card** is the armament whose garrisons still on the map have the most
+  kills (the towers' kill counts mapped to their garrison's card; ties by
+  card id). The core keeps no per-card kill count, so tactical cards and
+  pulled-down garrisons don't count, and a match without a garrison kill
+  has none. It is cosmetic (it goes on stamps); a server derives it from
+  the replay.
+- **Rewards are not verified locally.** The claim stores the record but
+  does not replay it first: the profile is the player's own data on their
+  machine (IndexedDB can be edited anyway), and a replay costs what
+  playing cost (about 5 s for a Marais match, minutes at 1.3 km, on the
+  main thread or a second worker while the player is in the next match).
+  The server re-runs every record before it pays (Run records, "What the
+  server must check"). The E2E tests verify the stored records headless
+  instead.
+- **The payout** is shown where the claim happened: in the match panel
+  after wave 8 (tickets with the breakdown by furthest wave, clear,
+  civilians and the no-retry bonus, the match victory daily tickets,
+  unlocked tiers, new achievements), or in a panel over the map screen for
+  an abandoned match (also shown in a match after New match). "Already
+  claimed: this match pays nothing more" when the profile says `paid:
+  false`.
+- **Hometown crate.** When the match was started with "This is my
+  hometown" checked and it is cleared, the payout offers **Open the
+  Hometown crate** (`claimHometownCrate(matchId)`, once per profile; the
+  button is hidden once it was claimed). The checkbox is the player's
+  word: nothing compares the place with an address.
+- **Screens** (one modal on the map screen, with tabs): **Deck builder**
+  (the collection grouped by card with owned and in-deck counts and Add,
+  which prefers the newest stamped copy; the deck grouped by card with
+  Remove; the live `checkDeck` problems in words with card names; Save,
+  not for the starter deck, which can only be copied with "New deck from
+  this one"; Save as new deck; Use for matches, only for a saved, unchanged
+  and legal deck; Delete); **Collection** (every instance: name, rarity,
+  foil, account-bound or its stamp: place, wave, tier, civilians saved,
+  MVP, date); **Crates** (tickets, Open a crate with its lore and the three
+  new cards, the crates opened); **Match history** (place, tier, cleared or
+  abandoned in wave n, waves won, retries, saved, tickets, MVP, and
+  Download run record from the stored record); **Progress** (tiers, the
+  cities of the cleared matches with their defended share per tier,
+  *provisional* while the area is the placeholder, achievements).
+- **No map bundle in the history.** A streamed match's map (the shell and
+  up to ~110 blocks) is several MB; the history stores only the run
+  record, so the map bundle is still downloaded from the match panel at
+  the end of the match (Streaming map (T6b)). The history says so.
+- **Coverage on the map screen**: **Show my coverage** draws the
+  `coverageInBox` cells of the visible map as a MapLibre fill layer
+  coloured by the cell's highest tier (Recruit green, Veteran blue, Elite
+  purple, Nightmare red), refreshed on every map move and after each
+  claim, hidden during a match.
+- **Test hook** `window.__zt.profile` (`ProfileHook`, testhook.ts):
+  `state()` (cards, tickets, decks, active deck, tier, unlocked tiers,
+  history count, hometown claimed), `settle()`, `claims()`, `match` (id,
+  tier, deck, multiplier, place names), `coverageDrawn`, `payoutText`, the
+  screens (`openScreen`, `closeScreen`), `setTier` / `setDeck` /
+  `setHometown`, `claimAgain(matchId)`, `getMatch`, export / import and
+  `refresh`; plus `__zt.picked` (the map screen's pin with its admin names)
+  and `__zt.backToMap()`. The one test-only power is
+  **`fastForwardClear()`**: it claims the match on screen as cleared with a
+  synthetic 8-wave summary (and the real record) through the same claim
+  path and payout panel. It writes the profile only, never the sim, and
+  the real 8-wave clear stays in the suite (match.spec.ts checks its
+  claim, the Veteran unlock, coverage and the history's record).
+- **`crateLore` replacements (T7a review).** `{place}`, `{wave}` and
+  `{tier}` are replaced with functions: a replacement string expanded `$&`,
+  `` $` ``, `$'` and `$$` in a place label ("Saint-$&-Ville" read
+  "Saint-{place}-Ville"). A unit test checks each pattern comes through as
+  is.
+- **Tests.** Unit: `deck_wasm.test.ts` (above), `profile_match.test.ts`
+  (the summary, the MVP card, progress, the geocoder's admin names, and a
+  tracker on a memory profile: first blood and wave victories once, one
+  clear paid once, a pristine match never claimed, an abandoned match paid
+  once and a second claim paying nothing), the `crateLore` test. E2E
+  (`profile.spec.ts`, all three browsers; M1 Pro, the whole suite on three
+  workers while other agents' builds shared the machine, load 4–10):
+  1. a new profile: the starter deck (20 account-bound cards), only Recruit
+     offered; an illegal deck (19 cards) refused by the deck builder and,
+     imported, at match start (1–2 s);
+  2. wave 1 won by the bot, then ← Map: first blood and wave victory
+     tickets, the payout once, `claimAgain` pays nothing, a pristine match
+     left is no claim, and the history's record verifies with the native
+     `sim-headless verify` (4 s Chromium and WebKit, 8–15 s Firefox);
+  3. a fast-forwarded clear with "This is my hometown": Veteran unlocked,
+     the Hometown crate (5 cards), coverage drawn, a crate opened (stamps
+     with the district and city, no street in stamps, lore or the screen),
+     a deck built with a crate card in the builder used in a Veteran match
+     (the record's `setup.deck` and multiplier 0.375), Elite unlocked by a
+     Veteran clear, the city provisional on Progress (2–6 s);
+  4. the place search and a dropped pin answered by fixture Nominatim
+     results: admin names only, `addressdetails=1`, `zoom=14` (1–2 s).
+  `match.spec.ts` (the real 8-wave clear) also checks the record's deck and
+  multiplier, the one claim with no no-retry bonus, Veteran unlocked,
+  coverage, and that the history's record equals the panel's (30 s
+  Chromium and WebKit, 1.1–1.4 min Firefox, as before). Whole suite: 75
+  tests in 13.6–16.6 min, green twice. One run had a WebKit failure in
+  T5's "phase buttons" test (the Pause click did not register, in a 17 s
+  run of a 4 s test under load); it passed 6 of 6 when rerun alone.

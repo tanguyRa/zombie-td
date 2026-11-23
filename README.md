@@ -146,6 +146,16 @@ tests too.
   mulligan after a play, a tactical card in prep), keep marks, a tactical
   card clicked mid-wave, the fog, and pause/speed leaving the state hash
   unchanged.
+- `profile.spec.ts`: the local profile on the Marais: a new profile's
+  starter deck, an illegal deck refused by the deck builder and at match
+  start, wave 1 won by the bot then abandoned (paid once, a second claim
+  pays nothing, the history's record verifies headless), a
+  fast-forwarded clear (test hook) with the Veteran and Elite unlocks, the
+  Hometown crate, coverage on the map, a crate's stamped cards (no
+  street), a deck built with a crate card used in a Veteran match (the
+  record's `setup.deck` and multiplier), and place names from fixture
+  Nominatim answers. `match.spec.ts` also checks the real clear's claim,
+  Veteran unlock, coverage and history.
 - `determinism.spec.ts`: runs the native/WASM fixture in each browser and
   compares its hash to `crates/sim-core/tests/fixtures/native_hash.json`.
 
@@ -185,8 +195,8 @@ so you can read the results without running anything.
    drawn darker (its buildings and streets stay visible, nothing about the
    people there) and everything past it darker still. The **Seed** box
    starts a new match with another seed. **← Map** goes back.
-4. **Prep.** Your deck is the starter deck "Civil Defence Issue" (20 cards).
-   Each prep you draw 5 cards (up to 2 kept from the last wave) and get
+4. **Prep.** Your deck is the one picked under **Match setup** (at first
+   the starter deck "Civil Defence Issue", 20 cards). Each prep you draw 5 cards (up to 2 kept from the last wave) and get
    supply (shown in the HUD with the deck and discard counts). The hand is
    at the bottom: name, supply cost, kind, rarity. Click a card, then:
    - **armaments** (Rifles, Mortar…): click buildings; the ones you can arm
@@ -219,6 +229,38 @@ so you can read the results without running anything.
    replays and checks. On a picked place **Download map** saves the map the
    run used (the shell and its blocks) next to it: `sim-headless verify
    run.json --chunks map.json --shell map.json`.
+7. **Profile.** Your profile is kept in this browser (IndexedDB; a warning
+   says so when the browser only allows a temporary one). On the map
+   screen, **Match setup** picks the deck, the difficulty (only the tiers
+   you have unlocked: Veteran after clearing a match on Recruit, and so on;
+   a harder tier has more people, its outbreak and fatigue scaling are
+   coming later) and **This is my hometown**. A match pays **resupply
+   tickets once**: when you clear wave 8 (in the match panel) or when you
+   leave it (← Map, New match, another seed or level) after any progress,
+   by the furthest wave and the civilians saved, plus a no-retry bonus for
+   a clear without retries. Daily rewards add tickets for the day's first
+   zombie killed, wave victories (5 a day) and match victories (5 a day).
+   Clearing your hometown offers the one-off **Hometown crate**. The
+   screens:
+   - **Deck builder**: your collection on the left, the deck on the right
+     (20 cards; at most 3 copies of a common, 2 of an uncommon, 1 of a rare
+     or a legendary, 2 legendaries). The core's rules are checked as you
+     edit; an illegal deck can't be saved or used. **Use for matches**
+     makes it the active deck. The starter deck can't be changed, only
+     copied.
+   - **Collection**: every card with its rarity, foil, and its provenance
+     stamp (district and city, wave, tier, civilians saved, MVP card,
+     date); starter cards are account-bound.
+   - **Crates**: one ticket opens a crate of three cards, with its lore
+     (where and how it was recovered).
+   - **Match history**: every claimed match, with **Download run record**.
+   - **Progress**: the tiers, the cities you defended (marked
+     *provisional* while the city's real area is unknown) and the
+     achievements.
+   **Show my coverage** draws the cells you defended in cleared matches,
+   coloured by the highest tier (Recruit green, Veteran blue, Elite purple,
+   Nightmare red). Stamps and the history name a district and a city only,
+   from the place search's administrative fields, never a street.
 
 Pan by dragging the map (except while drawing a fence), zoom with the wheel
 or the +/− buttons, **Frame level** to re-centre. The debug panel shows the

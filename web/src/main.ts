@@ -10,6 +10,8 @@ import cardsJson from "../../cards.json?raw";
 import { Place, createExplore } from "./explore";
 import { MapSession } from "./mapsession";
 import { parseSeed } from "./seed";
+import { ProfileUi } from "./ui/profileui";
+import type { MatchPlace } from "./ui/profilematch";
 import {
   Action,
   ActionError,
@@ -40,10 +42,11 @@ import {
 } from "./protocol";
 import "./style.css";
 
-// Built-in levels (committed level packs, no download needed).
+// Built-in levels (committed level packs, no download needed). `admin`: the
+// fixed district and city the profile stores for them (no geocoder).
 const PRESETS: Place[] = [
-  { name: "Paris — Le Marais", lat: 48.858, lon: 2.358, presetUrl: parisUrl },
-  { name: "Le Vésinet (suburb)", lat: 48.8935, lon: 2.133, presetUrl: suburbUrl },
+  { name: "Paris — Le Marais", lat: 48.858, lon: 2.358, presetUrl: parisUrl, admin: { district: "Le Marais", city: "Paris" } },
+  { name: "Le Vésinet (suburb)", lat: 48.8935, lon: 2.133, presetUrl: suburbUrl, admin: { district: "", city: "Le Vésinet" } },
 ];
 
 // Card texts and limits for the hand and the targeting hints (the rules
@@ -271,6 +274,28 @@ const map = explore.map;
 const overlay = new MapboxOverlay({ interleaved: false, layers: [] });
 map.addControl(overlay);
 
+// The local profile (T7b, ui/profileui.ts): match setup (deck, tier,
+// hometown), the profile screens, and the claims (ui/profilematch.ts).
+const profileUi = new ProfileUi({
+  map,
+  toast: (msg) => toast(msg),
+  snapshot: () => (status && level ? { status, results, towers, structures, rings: level.rings } : null),
+  record: fetchRecord,
+  resultShowsMatchWon: () => !$("result").hidden && $("result").dataset.kind === "match_won",
+});
+/** Bumped by every new match and by "← Map": a match setup still waiting
+ *  for the profile is dropped. */
+let matchGen = 0;
+
+/** Where the match on screen is, for the profile: the level's centre and
+ *  the place's admin names (never its display label). */
+function matchPlace(): MatchPlace {
+  const a = currentPlace?.admin;
+  const p: MatchPlace = { center: { lat: geo?.lat0 ?? currentPlace?.lat ?? 0, lon: geo?.lon0 ?? currentPlace?.lon ?? 0 }, city: a?.city ?? "", district: a?.district ?? "" };
+  if (a?.cityId) p.cityId = a.cityId;
+  return p;
+}
+
 let geo: { lat0: number; lon0: number; kx: number; ky: number } | null = null;
 let geoProps: Record<string, unknown> = {};
 
@@ -357,8 +382,11 @@ if (TEST_MODE) {
       newMatch: (seed) => {
         // The seed input plus Enter, without the confirmation.
         ($("seed") as HTMLInputElement).value = String(seed);
-        newMatch();
+        void newMatch();
       },
+      profile: () => profileUi.hook(),
+      picked: () => explore.picked(),
+      backToMap,
     });
   });
 } else if (import.meta.env.DEV) {
@@ -1166,6 +1194,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       // structure ids may be reused, the hand is new.
       const reset = !!prev && (prev.retries !== status.retries || prev.restarts !== status.restarts);
       if (prev?.phase !== status.phase || reset) onPhaseChange(reset);
+      profileUi.tracker.onStatus(status); // first blood
       updateControls();
       updateHud();
       break;
@@ -1244,11 +1273,12 @@ function requestNewMatch() {
   const s = status;
   const progress = !!s && (s.wave > 1 || s.retries > 0 || s.restarts > 0 || structures.length > 0 || s.phase !== "prep");
   if ((progress || shownResult !== null) && !confirm(`Start a new match with seed ${seed}? The current match will be lost.`)) return;
-  newMatch();
+  void newMatch();
 }
 
-/** A new match on the current level (the seed input's seed, starter deck). */
-function newMatch() {
+/** A new match on the current level (the seed input's seed; the profile's
+ *  active deck and difficulty tier). */
+async function newMatch() {
   // Nothing to play on yet (a streamed map before its first blocks are in).
   if (!currentLevelJson && !session?.ready) return;
   const seed = parseSeed(($("seed") as HTMLInputElement).value);
@@ -1256,6 +1286,13 @@ function newMatch() {
     toast("The seed must be a whole number from 0 to 18446744073709551615");
     return;
   }
+  // The match on screen is left: claimed now if it made progress (its
+  // record is asked for before the worker gets the new init).
+  profileUi.tracker.abandon();
+  // Stop the old match now: the setup waits for the profile, and the old
+  // match must not keep posting its state meanwhile.
+  send({ type: "stop" });
+  const gen = ++matchGen;
   matchSeed = seed;
   ($("seed") as HTMLInputElement).value = seed;
   prepStatus("Preparing the match…");
@@ -1271,12 +1308,19 @@ function newMatch() {
   keepPending = null;
   clearSelection();
   updateControls();
-  // The starter deck ("Civil Defence Issue") until the deck builder (T7b).
   session?.gate.cancel();
   const s = session;
+  // The active deck (refused if illegal) and the tier's population multiplier.
+  const setup = await profileUi.matchSetup();
+  if (gen !== matchGen || s !== session || !inGame()) return; // left or replaced meanwhile
+  if (!setup.ok) {
+    prepError(setup.message);
+    return;
+  }
   // A streamed map: the chunks loaded so far, then each later one as it arrives.
   const map: MatchMap = s ? s.matchMap((chunk) => session === s && send({ type: "chunk", chunk })) : { level: currentLevelJson };
-  send({ type: "init", map, setup: { seed }, test: TEST_MODE });
+  send({ type: "init", map, setup: { seed, ...setup.setup }, test: TEST_MODE });
+  profileUi.startMatch(setup, matchPlace(), seed, !!s);
 }
 
 // ---------------------------------------------------------------- screens
@@ -1297,6 +1341,8 @@ function prepError(msg: string) {
 const placeKey = (p: Place) => p.presetUrl ?? `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;
 
 async function enterGame(place: Place) {
+  profileUi.tracker.abandon(); // a match still on screen is left
+  matchGen++;
   document.body.dataset.screen = "game";
   explore.setActive(false);
   overlay.setProps({ layers: [] });
@@ -1329,7 +1375,7 @@ async function enterGame(place: Place) {
     setGeo(meta.center_lat, meta.center_lon);
     $("place").title = `${place.name} · ${meta.buildings.length} buildings · radius ${meta.radius_m} m`;
     currentLevelJson = json;
-    newMatch();
+    void newMatch();
   } catch (e) {
     if (abort.signal.aborted) return;
     prepError(e instanceof Error ? e.message : String(e));
@@ -1350,7 +1396,7 @@ async function enterStreamed(place: Place, abort: AbortController) {
     });
     if (session !== s) return;
     $("place").title = `${place.name} · streamed map, radius ${s.shell.radius_m} m · first blocks in ${(s.firstLoadMs / 1000).toFixed(1)} s`;
-    newMatch();
+    void newMatch();
   } catch (e) {
     if (abort.signal.aborted || (s && session !== s)) return;
     s?.abort();
@@ -1360,6 +1406,10 @@ async function enterStreamed(place: Place, abort: AbortController) {
 }
 
 function backToMap() {
+  // Leaving claims the match if it made progress: its record is asked
+  // for before the worker's stop.
+  profileUi.tracker.abandon();
+  matchGen++;
   prepAbort?.abort();
   session?.abort();
   session = null;
@@ -1466,6 +1516,10 @@ function onPhaseChange(reset = false) {
     $("result").hidden = true;
     shownResult = null;
   }
+  // The profile: a won wave is a wave victory, wave 8 won claims the match
+  // (its payout goes into the match panel).
+  profileUi.onResult(shownResult);
+  if (status) profileUi.tracker.onPhase(status, results);
 }
 
 function showResult(kind: string) {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { crateLore, rebuildLore, rollCrate } from "../../src/profile/crates";
 import { DEFAULT_TABLES } from "../../src/profile/data";
 import { CRATE_STREAM, Pcg32 } from "../../src/profile/pcg32";
-import { looksLikeAddress } from "../../src/profile/sanitize";
+import { looksLikeAddress, placeLabel } from "../../src/profile/sanitize";
 import { ProfileError } from "../../src/profile/store";
 import { RARITIES, TIERS } from "../../src/profile/types";
 import { STREET_FIXTURES } from "./profile_helpers";
@@ -173,5 +173,21 @@ describe("rebuildLore", () => {
     expect(rebuildLore(rewards, "payout", "Found at 12 Rue de Rivoli.", "", "Paris")).toBeNull();
     expect(rebuildLore(rewards, "toString", "x", "", "Paris")).toBeNull();
     expect(rebuildLore(rewards, "nope", "x", "", "Paris")).toBeNull();
+  });
+});
+
+describe("crateLore replacements (T7a review)", () => {
+  it("never expands $&, $`, $' or $$ in the place, wave or tier", () => {
+    const rewards = structuredClone(DEFAULT_TABLES.rewards);
+    for (const k of Object.keys(rewards.crates.lore) as (keyof typeof rewards.crates.lore)[]) rewards.crates.lore[k] = ["Before {place} middle {wave} and {tier} after."];
+    const kept: string[] = [];
+    for (const name of ["Saint-$&-Ville", "Bourg$`Haut", "Bourg $` Haut", "Mont$'Bas", "Mont $' Bas", "Val$$Doré", "Val $$ Doré", "Les $1 Prés"]) {
+      const label = placeLabel(name, "");
+      if (label.includes("$")) kept.push(label);
+      const lore = crateLore(new Pcg32(5n, CRATE_STREAM), rewards, "payout", name, "", 3, "elite");
+      expect(lore).toBe(`Before ${label} middle third and Elite after.`);
+    }
+    // The sanitiser keeps at least these, so the test sees every pattern.
+    for (const p of ["$&", "$`", "$'", "$$"]) expect(kept.some((l) => l.includes(p)), `${p} in ${kept.join(" | ")}`).toBe(true);
   });
 });
