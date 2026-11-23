@@ -1223,15 +1223,16 @@ yet: that comes after T5).
   when it was batched with a neighbour, so a block's content depended on
   the batching. The Overpass query for a batch is a union of
   `way["building"](bbox)` boxes (each padded by 1e-6°); ways owned by other
-  blocks are dropped. Only ways, like `levelgen.ts` (no multipolygon
+  blocks are dropped. Only ways, like the retired `levelgen.ts` (no multipolygon
   relations). The test fake answers with the same vertex-or-segment rule.
 - **An Overpass runtime error is a failure, never an empty block.** On a
   timeout or out-of-memory Overpass answers HTTP 200 with
   `remark: "runtime error: …"` and partial or empty `elements`. A `remark`
   containing "error", an unparsable body or a body whose `elements` is not
   an array counts as a failed endpoint (`overpassQuery` tries the next one,
-  then the loader's retry), so it is never cached. `levelgen.ts` shares the
-  check.
+  then the loader's retry), so it is never cached. The retired
+  `levelgen.ts` had the same check; `tools/levelgen/levelgen.py` (static
+  levels, run by hand) does not.
 - **The cache stores raw lat/lon** (`[lat, lon, ...]`, not closed), the
   derived kind and floors, the fetch date and a content hash (FNV-1a 64 of
   `JSON.stringify([id, [[bid, kind, floors, ring], ...]])`). The schema
@@ -1426,28 +1427,34 @@ yet: that comes after T5).
   only matters to the next visit. Leaving the match (← Map, New location)
   aborts the loader: no request and no chunk after it. A second visit to the
   same area is served from IndexedDB with zero requests.
-- **Each Overpass request has a 45 s limit, each batch 150 s.**
-  `OVERPASS_REQUEST_TIMEOUT_MS` (`map/osm.ts`, 45 s, above the queries' own
-  `[timeout:40]`): past it the endpoint counts as failed ("Overpass did not
-  answer within 45 s") and the next one, then the loader's backoff, takes
-  over. `batchBudgetMs` (`DEFAULT_BATCH_BUDGET_MS` in `map/loader.ts`,
-  150 s): the wall-clock time one batch may take, attempts and backoff
-  included; past it the request in flight is cut and the batch has failed
-  for good ("Overpass gave no answer within 150 s (last error). Try again in
-  a minute."), so the first load fails or the banner shows the error and
-  Retry loading. Without the budget, servers that hold every request would
-  take 5 attempts × 2 endpoints × the limit plus the backoff to count as
-  failed: ~7.5 min at 45 s, ~20 min at the earlier 120 s. 45 s leaves room
-  for a slow but working answer (one batch took 48 s and a single block 31 s
-  in the manual check below), and 150 s is one full attempt on both
-  endpoints plus most of a second. Found in that check: the fallback
-  instance held one request for 267 s; with no limit a request that never
-  answers would never fail, so neither the retry nor Retry loading would
-  ever come.
+- **Each Overpass request has a 90 s limit; a batch starts nothing new
+  after 150 s, so it fails for good within 240 s.**
+  `OVERPASS_REQUEST_TIMEOUT_MS` (`map/osm.ts`, 90 s, above the queries' own
+  `[timeout:80]`): past it the endpoint counts as failed ("Overpass did not
+  answer within 90 s") and the next one, then the loader's backoff, takes
+  over. 90 s is well above the slow but working answers of the manual check
+  below (one batch took 48 s, a single block 31 s), so those load on the
+  first attempt. `batchBudgetMs` (`DEFAULT_BATCH_BUDGET_MS` in
+  `map/loader.ts`, 150 s): once it has run out no new attempt, endpoint or
+  backoff starts (a backoff under way is cut short), but the request in
+  flight is never cut by the budget, only by its own limit, and its answer
+  is used if it comes. Otherwise the batch has failed for good ("Overpass
+  could not load these blocks within 150 s (last error: …). Try again in a
+  minute."), so the first load fails or the banner shows the error and
+  Retry loading. Bound: budget + one request limit, 240 s (a request
+  started just before 150 s runs to 240 s); servers that never answer fail
+  at 180 s (both endpoints once), servers that answer 504 at once after the
+  5 attempts and 15 s of backoff. Without the budget, servers that hold
+  every request would take 5 attempts × 2 endpoints × 90 s plus the backoff,
+  ~15 min, to count as failed. Cutting the request in flight at the budget
+  (the first T6b fix, with a 45 s limit) failed a server that answers
+  correctly in 48 s for good. Found in that check: the fallback instance
+  held one request for 267 s; with no limit a request that never answers
+  would never fail, so neither the retry nor Retry loading would ever come.
 - **Test-only backoff and limits.** With `?test=1` a failed Overpass query
   is retried after 50 ms (doubling, 5 attempts) instead of 1 s, so the
   failure check sees the error in under a second, and the request limit
-  and batch budget are an hour each instead of 45 s and 150 s: the stream
+  and batch budget are an hour each instead of 90 s and 150 s: the stream
   E2E holds its "slow" request through waves 1–2, which is minutes in
   Firefox (with the real limits that hold itself turned into the failure).
   Clock controls: the blocks are the same. The real limits are unit-tested
@@ -1512,7 +1519,7 @@ yet: that comes after T5).
   answered one batch 502 at once and the fallback instance held it for
   267 s (the other batch took 48 s; a single block by curl took 31 s). The
   background then fetched 12 more blocks, and later queries timed out
-  (hence the request limit above, 120 s then, 45 s now). A second visit from the cache reached
+  (hence the request limit above, 120 s then, 90 s now). A second visit from the cache reached
   prep in 0.6 s with no request. **Sim cost** (wall ms per tick over the
   wave, and the worst sim p95 seen): wave 1 993 ticks, 2.8 ms, p95 3.8 ms,
   1.3k agents; wave 2 6,768 ticks, 3.3 ms, p95 4.8 ms, 5.2k agents; wave 3

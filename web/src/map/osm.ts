@@ -143,22 +143,27 @@ export function overpassBodyError(body: unknown): string | null {
 }
 
 /// How long one endpoint may take to answer (the queries ask Overpass for at
-/// most 40 s, `[timeout:40]`). A public instance can hold a request for
+/// most 80 s, `[timeout:80]`). A public instance can hold a request for
 /// minutes; without a limit it never fails, so neither the retry nor the
-/// player's Retry loading would ever come. The loader also bounds a whole
-/// batch (`DEFAULT_BATCH_BUDGET_MS` in `loader.ts`).
-export const OVERPASS_REQUEST_TIMEOUT_MS = 45_000;
+/// player's Retry loading would ever come. 90 s is well above the slow but
+/// working answers measured (48 s for a batch, DECISIONS.md "Streaming map
+/// (T6b)"). The loader also bounds a whole batch (`DEFAULT_BATCH_BUDGET_MS`
+/// in `loader.ts`).
+export const OVERPASS_REQUEST_TIMEOUT_MS = 90_000;
 
 /// POST one Overpass QL query, trying each endpoint in turn. An HTTP error,
 /// an unparsable body, a body without an `elements` array, one with an
 /// error `remark` (timeout, out of memory) or no answer within `timeoutMs`
-/// is a failure of that endpoint. Throws with a player-readable message
+/// is a failure of that endpoint. Once `stop` has aborted no further
+/// endpoint is tried (the request in flight is left to finish); `signal`
+/// cuts the request in flight. Throws with a player-readable message
 /// when all fail.
-export async function overpassQuery(query: string, opts: { fetch?: FetchFn; signal?: AbortSignal; urls?: string[]; timeoutMs?: number } = {}): Promise<OsmWay[]> {
+export async function overpassQuery(query: string, opts: { fetch?: FetchFn; signal?: AbortSignal; stop?: AbortSignal; urls?: string[]; timeoutMs?: number } = {}): Promise<OsmWay[]> {
   const f: FetchFn = opts.fetch ?? ((i, init) => fetch(i, init));
   const limit = opts.timeoutMs ?? OVERPASS_REQUEST_TIMEOUT_MS;
   let lastErr = "";
   for (const url of opts.urls ?? OVERPASS_URLS) {
+    if (opts.stop?.aborted && lastErr !== "") break;
     // This request's own signal: the caller's abort, or the time limit.
     const ctl = new AbortController();
     const onAbort = () => ctl.abort();

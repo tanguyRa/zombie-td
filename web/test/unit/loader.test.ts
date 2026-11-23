@@ -430,13 +430,60 @@ describe("MapLoader: time to a permanent failure", () => {
       init?.signal?.addEventListener("abort", () => rej(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
     });
 
-  it("bounds the defaults: 45 s per endpoint, 150 s per batch", () => {
-    expect(OVERPASS_REQUEST_TIMEOUT_MS).toBe(45_000);
+  /// A fetch that answers like `answer` after `ms` (fake timers), unless its signal aborts first.
+  const after = (calls: string[], ms: number, answer: FetchFn): FetchFn => (url, init) =>
+    new Promise<Response>((res, rej) => {
+      calls.push(url);
+      const t = setTimeout(() => res(answer(url, init)), ms);
+      init?.signal?.addEventListener("abort", () => (clearTimeout(t), rej(Object.assign(new Error("aborted"), { name: "AbortError" }))), { once: true });
+    });
+  const busy: FetchFn = async () => new Response("busy", { status: 504 });
+  /// Worst case for a stuck batch: the budget, then one request already in flight.
+  const BOUND_MS = DEFAULT_BATCH_BUDGET_MS + OVERPASS_REQUEST_TIMEOUT_MS;
+
+  /// Starts a loader with the default limits on one wave and records when it settles.
+  function timed(fetch: FetchFn, extra: Partial<ConstructorParameters<typeof MapLoader>[0]> = {}) {
+    const l = new MapLoader({ center: CENTER, ringRadii: [150], cache: new MemoryBlockCache(), fetch, batchSize: 50, ...extra });
+    const t0 = Date.now();
+    const out = { at: -1, err: null as Error | null, l };
+    void l.start().then(
+      () => (out.at = Date.now() - t0),
+      (e: Error) => ((out.at = Date.now() - t0), (out.err = e)),
+    );
+    return out;
+  }
+
+  it("bounds the defaults: 90 s per endpoint, 150 s per batch, 240 s to fail for good", () => {
+    expect(OVERPASS_REQUEST_TIMEOUT_MS).toBe(90_000);
     expect(DEFAULT_BATCH_BUDGET_MS).toBe(150_000);
+    expect(BOUND_MS).toBe(240_000);
     expect(OVERPASS_URLS.length).toBe(2);
   });
 
-  it("a background batch on servers that never answer fails for good within the batch budget", async () => {
+  it("a server that answers in 48 s loads, on the first attempt", async () => {
+    vi.useFakeTimers();
+    const fake = fakeOverpass(ways);
+    const calls: string[] = [];
+    const r = timed(after(calls, 48_000, fake.fetch));
+    await vi.advanceTimersByTimeAsync(48_000);
+    expect(r.at).toBe(48_000);
+    expect(r.err).toBeNull();
+    expect(calls.length).toBe(1);
+    expect(r.l.stats.queries).toBe(1);
+  });
+
+  it("an answer that comes in after the budget ran out is still used", async () => {
+    vi.useFakeTimers();
+    const fake = fakeOverpass(ways);
+    const calls: string[] = [];
+    const r = timed(after(calls, 80_000, fake.fetch), { batchBudgetMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(80_000);
+    expect(r.at).toBe(80_000);
+    expect(r.err).toBeNull();
+    expect(calls.length).toBe(1);
+  });
+
+  it("a background batch on servers that never answer fails for good within budget + one request limit", async () => {
     vi.useFakeTimers();
     const fake = fakeOverpass(ways);
     const calls: string[] = [];
@@ -456,17 +503,66 @@ describe("MapLoader: time to a permanent failure", () => {
       failedAt = Date.now() - t0;
       err = e;
     });
-    await vi.advanceTimersByTimeAsync(DEFAULT_BATCH_BUDGET_MS - 1);
+    // 90 s on the first endpoint, then the second (started at 90 s, within
+    // the budget) to its own 90 s limit; no backoff or attempt after 150 s.
+    await vi.advanceTimersByTimeAsync(2 * OVERPASS_REQUEST_TIMEOUT_MS - 1);
     expect(failedAt).toBe(-1);
-    // Each endpoint is given up after 45 s, then the backoff: 2 endpoints (90 s), 1 s, then the second attempt.
-    expect(calls.length).toBe(4);
+    expect(calls.length).toBe(2);
     await vi.advanceTimersByTimeAsync(1);
-    expect(failedAt).toBe(DEFAULT_BATCH_BUDGET_MS);
-    expect(err!.message).toMatch(/ring 3 can't be loaded: \d+ blocks? failed \(Overpass gave no answer within 150 s \(Overpass did not answer within 45 s\)\. Try again in a minute\.\)/);
-    await vi.advanceTimersByTimeAsync(0);
+    expect(failedAt).toBe(2 * OVERPASS_REQUEST_TIMEOUT_MS);
+    expect(failedAt).toBeLessThanOrEqual(BOUND_MS);
+    expect(err!.message).toMatch(
+      /ring 3 can't be loaded: \d+ blocks? failed \(Overpass could not load these blocks within 150 s \(last error: Overpass did not answer within 90 s\)\. Try again in a minute\.\)/,
+    );
+    await vi.advanceTimersByTimeAsync(BOUND_MS);
     await l.done();
-    expect(calls.length).toBe(4); // nothing after the budget
+    expect(calls.length).toBe(2); // nothing after the budget
     l.abort();
+  });
+
+  it("the worst case: a request started just before the budget runs out ends the batch at budget + one request limit", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    // One endpoint: 504 at 59 s, backoff 1 s, 504 at 147.999 s, backoff 2 s:
+    // the third attempt starts at 149.999 s, within the budget, and hangs to
+    // its 90 s limit.
+    const delays = [59_000, 87_999];
+    let n = 0;
+    const fetch: FetchFn = (url, init) => (n < delays.length ? after(calls, delays[n++], busy)(url, init) : hanging(calls)(url, init));
+    const r = timed(fetch, { urls: ["https://overpass.test/api"] });
+    await vi.advanceTimersByTimeAsync(DEFAULT_BATCH_BUDGET_MS - 2);
+    expect(calls.length).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls.length).toBe(3); // the third request started at 149.999 s
+    await vi.advanceTimersByTimeAsync(OVERPASS_REQUEST_TIMEOUT_MS - 1);
+    expect(r.at).toBe(-1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(r.at).toBe(DEFAULT_BATCH_BUDGET_MS - 1 + OVERPASS_REQUEST_TIMEOUT_MS);
+    expect(r.at).toBeLessThanOrEqual(BOUND_MS);
+    expect(r.err!.message).toBe("Overpass could not load these blocks within 150 s (last error: Overpass did not answer within 90 s). Try again in a minute.");
+    expect(calls.length).toBe(3);
+  });
+
+  it("servers that answer 504 at once fail for good after the attempts and backoff", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const r = timed(async (url) => (calls.push(url), new Response("busy", { status: 504 })));
+    await vi.advanceTimersByTimeAsync(15_000); // backoff 1 + 2 + 4 + 8 s
+    expect(r.at).toBe(15_000);
+    expect(r.err!.message).toBe("Overpass is busy (504). Try again in a minute.");
+    expect(calls.length).toBe(10); // 5 attempts × 2 endpoints
+  });
+
+  it("servers that answer 504 slowly fail for good within budget + one request limit", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const r = timed(after(calls, 60_000, busy));
+    await vi.advanceTimersByTimeAsync(BOUND_MS);
+    // Attempt 1: both endpoints (0-120 s); backoff 1 s; attempt 2 starts at
+    // 121 s, its first endpoint answers at 181 s, past the budget: no more.
+    expect(r.at).toBe(181_000);
+    expect(r.err!.message).toBe("Overpass could not load these blocks within 150 s (last error: Overpass is busy (504)). Try again in a minute.");
+    expect(calls.length).toBe(3);
   });
 
   it("takes its own request limit (test mode lengthens both)", async () => {
@@ -481,17 +577,15 @@ describe("MapLoader: time to a permanent failure", () => {
     expect(((await started) as Error).message).toBe("Overpass did not answer within 10 s. Try again in a minute.");
   });
 
-  it("the first load fails within the budget too", async () => {
+  it("the first load fails within budget + one request limit too", async () => {
     vi.useFakeTimers();
     const calls: string[] = [];
-    const l = new MapLoader({ center: CENTER, ringRadii: [150], cache: new MemoryBlockCache(), fetch: hanging(calls), batchSize: 50, batchBudgetMs: 60_000 });
-    const t0 = Date.now();
-    let at = -1;
-    const started = l.start().catch((e: Error) => ((at = Date.now() - t0), e));
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(at).toBe(60_000);
-    expect(((await started) as Error).message).toBe("Overpass gave no answer within 60 s. Try again in a minute.");
-    expect(calls.length).toBe(2); // the second endpoint was cut at 60 s, within the first attempt
+    const r = timed(hanging(calls), { batchBudgetMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(60_000 + OVERPASS_REQUEST_TIMEOUT_MS);
+    // The first endpoint runs to its 90 s limit; the budget (60 s) is over by then, so the second is never tried.
+    expect(r.at).toBe(OVERPASS_REQUEST_TIMEOUT_MS);
+    expect(r.err!.message).toBe("Overpass could not load these blocks within 60 s (last error: Overpass did not answer within 90 s). Try again in a minute.");
+    expect(calls.length).toBe(1);
   });
 });
 

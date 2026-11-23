@@ -43,10 +43,13 @@ export function matchRingRadii(ringRadiusM: number[], wave8RadiusM: number, leve
   });
 }
 
-/// Default `batchBudgetMs`: 150 s. With a 45 s limit per endpoint
-/// (`OVERPASS_REQUEST_TIMEOUT_MS`), two endpoints, 5 attempts and the
-/// backoff, a batch on servers that never answer would otherwise take
-/// ~7.5 min to fail for good (and ~20 min with the earlier 120 s limit).
+/// Default `batchBudgetMs`: 150 s. Once it has run out no new attempt,
+/// endpoint or backoff starts, but the request in flight is left to its own
+/// limit (`OVERPASS_REQUEST_TIMEOUT_MS`, 90 s), so a slow answer that does
+/// come is used. A batch therefore fails for good within budget + one
+/// request limit (240 s); on servers that never answer it fails at 180 s
+/// (both endpoints once). Without a budget, 5 attempts × 2 endpoints × 90 s
+/// plus the backoff would take ~15 min.
 export const DEFAULT_BATCH_BUDGET_MS = 150_000;
 
 /// Default `coverageSlackM`: one cell diagonal (`cell_size_m × √2`, 2.83 m).
@@ -80,9 +83,10 @@ export interface MapLoaderOptions {
   /// Delay before the first retry, doubled after each failure (default 1000 ms).
   backoffMs?: number;
   /// Wall-clock time a batch may take, attempts and backoff included
-  /// (default `DEFAULT_BATCH_BUDGET_MS`): past it the request in flight is
-  /// cut and the batch has failed for good (`error`, `whenRingReady`
-  /// rejects), whatever attempts are left.
+  /// (default `DEFAULT_BATCH_BUDGET_MS`): past it no attempt, endpoint or
+  /// backoff starts and, unless the request in flight answers, the batch has
+  /// failed for good (`error`, `whenRingReady` rejects), whatever attempts
+  /// are left. At most budget + one request limit in all.
   batchBudgetMs?: number;
   /// Per-endpoint request limit (default `OVERPASS_REQUEST_TIMEOUT_MS`).
   requestTimeoutMs?: number;
@@ -459,40 +463,42 @@ export class MapLoader {
   private async fetchBatch(batch: BlockId[]): Promise<void> {
     const { maxAttempts, backoffMs, batchBudgetMs, sleep } = this.opts;
     const signal = this.abortCtl.signal;
-    // The batch's own signal: the loader's abort, or the batch budget.
-    const ctl = new AbortController();
-    const onAbort = () => ctl.abort();
+    // Aborts when the batch budget runs out: no attempt, endpoint or backoff
+    // starts after it, but the request in flight runs to its own limit.
+    const budget = new AbortController();
+    // The backoff's signal: the loader's abort, or the batch budget.
+    const wait = new AbortController();
+    const onAbort = () => wait.abort();
     signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) ctl.abort();
-    let overBudget = false;
+    if (signal.aborted) wait.abort();
     const timer = Number.isFinite(batchBudgetMs)
       ? setTimeout(() => {
-          overBudget = true;
-          ctl.abort();
+          budget.abort();
+          wait.abort();
         }, batchBudgetMs)
       : undefined;
     const budgetError = (last: unknown) => {
-      const why = last === undefined ? "" : ` (${String((last as Error)?.message ?? last).replace(/\. Try again in a minute\.$/, "")})`;
-      return new Error(`Overpass gave no answer within ${Math.round(batchBudgetMs / 1000)} s${why}. Try again in a minute.`, { cause: last });
+      const why = last === undefined ? "" : ` (last error: ${String((last as Error)?.message ?? last).replace(/\. Try again in a minute\.$/, "")})`;
+      return new Error(`Overpass could not load these blocks within ${Math.round(batchBudgetMs / 1000)} s${why}. Try again in a minute.`, { cause: last });
     };
     let lastErr: unknown;
     try {
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         if (attempt > 0) {
           try {
-            await abortableSleep(sleep, backoffMs * 2 ** (attempt - 1), ctl.signal);
+            await abortableSleep(sleep, backoffMs * 2 ** (attempt - 1), wait.signal);
           } catch (e) {
             if (signal.aborted) throw abortError();
-            if (overBudget) throw budgetError(lastErr);
+            if (budget.signal.aborted) throw budgetError(lastErr);
             throw e;
           }
         }
         if (signal.aborted) throw abortError();
-        if (overBudget) throw budgetError(lastErr);
+        if (budget.signal.aborted) throw budgetError(lastErr);
         this.stats.queries++;
         try {
-          const got = await fetchBlocks(batch, { fetch: this.opts.fetch, urls: this.opts.urls, signal: ctl.signal, timeoutMs: this.opts.requestTimeoutMs });
-          // An answer that came in as the budget ran out is still used.
+          const got = await fetchBlocks(batch, { fetch: this.opts.fetch, urls: this.opts.urls, signal, stop: budget.signal, timeoutMs: this.opts.requestTimeoutMs });
+          // An answer that comes in after the budget ran out is still used.
           if (signal.aborted) throw abortError();
           const now = this.opts.now();
           for (const id of batch) {
@@ -510,11 +516,10 @@ export class MapLoader {
           return;
         } catch (e) {
           if (signal.aborted) throw abortError();
-          if (overBudget) throw budgetError(lastErr);
           lastErr = e;
         }
       }
-      throw lastErr;
+      throw budget.signal.aborted ? budgetError(lastErr) : lastErr;
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
