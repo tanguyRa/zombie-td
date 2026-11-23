@@ -38,18 +38,21 @@ fn level_arg(s: &str) -> sim_core::LevelPack {
 }
 
 /// A `BuildingChunk[]`, or a map bundle `{ ..shell, "chunks": [...] }`.
+/// A JSON object is read as a bundle and anything else as a list, so the
+/// error is the one of the form the file is in.
 fn chunks_arg(path: &str) -> Vec<BuildingChunk> {
     #[derive(serde::Deserialize)]
-    #[serde(untagged)]
-    enum ChunksFile {
-        List(Vec<BuildingChunk>),
-        Bundle { chunks: Vec<BuildingChunk> },
+    struct Bundle {
+        chunks: Vec<BuildingChunk>,
     }
     let text = read(path);
-    match serde_json::from_str::<ChunksFile>(&text) {
-        Ok(ChunksFile::List(c)) | Ok(ChunksFile::Bundle { chunks: c }) => c,
-        // The untagged error says nothing useful: report the list's.
-        Err(_) => serde_json::from_str::<Vec<BuildingChunk>>(&text).unwrap_or_else(|e| fail(format!("{path}: not a chunk list or a map bundle ({e})"))),
+    let bad = |what: &str, e: serde_json::Error| -> ! { fail(format!("{path}: not a chunk list or a map bundle ({what}: {e})")) };
+    // Only the form is taken from this parse; the chunks are read from the text.
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| bad("invalid JSON", e));
+    if v.is_object() {
+        serde_json::from_str::<Bundle>(&text).unwrap_or_else(|e| bad("map bundle", e)).chunks
+    } else {
+        serde_json::from_str::<Vec<BuildingChunk>>(&text).unwrap_or_else(|e| bad("chunk list", e))
     }
 }
 

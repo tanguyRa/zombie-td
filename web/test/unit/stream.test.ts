@@ -7,7 +7,7 @@ import { MemoryBlockCache } from "../../src/map/cache";
 import type { BuildingChunk } from "../../src/map/chunks";
 import { MapLoader } from "../../src/map/loader";
 import { ChunkQueue, DistrictGate, PLAY_RADIUS_M, buildShell, errorText, mapBundle, shellProblem, shellRingRadii, tooEmpty, type GateView } from "../../src/stream";
-import { fakeOverpass, loadConfig, loadLevel, waysFromLevel, type FakeCall } from "./fixtures";
+import { fakeOverpass, parseBboxes, loadConfig, loadLevel, waysFromLevel, type FakeCall } from "./fixtures";
 
 const cfg = loadConfig();
 const level = loadLevel("paris-marais");
@@ -43,7 +43,7 @@ describe("shell", () => {
   });
 
   it("calls a place with fewer than 40 buildings in its first blocks too empty", () => {
-    expect(tooEmpty([chunk(1, 20), chunk(2, 19)])).toMatch(/^Only 39 buildings within about 350 m/);
+    expect(tooEmpty([chunk(1, 20), chunk(2, 19)])).toMatch(/^Only 39 buildings around the pin\. Pick a more built-up spot\.$/);
     expect(tooEmpty([chunk(1, 20), chunk(2, 20)])).toBeNull();
     expect(tooEmpty([])).toMatch(/^Only 0 buildings/);
   });
@@ -188,6 +188,46 @@ describe("DistrictGate", () => {
     loader.abort();
   });
 
+  it("keeps the failure (and Retry loading) while other rings' chunks arrive", async () => {
+    const fake = fakeOverpass(ways);
+    let failWave3 = true;
+    const wave3 = new Set<number>();
+    const outer = new Set<number>();
+    const ids = (init?: RequestInit) => queryBlocks({ url: "", query: "", bboxes: parseBboxesOf(init) });
+    // Queries with a wave-3 block fail while `failWave3`; the others are held.
+    let releaseLater!: () => void;
+    const later = new Promise<void>((r) => (releaseLater = r));
+    const fetch: typeof fake.fetch = async (url, init) => {
+      const q = ids(init);
+      if (failWave3 && q.some((id) => wave3.has(id))) return new Response("busy", { status: 504 });
+      else if (q.every((id) => outer.has(id))) await later;
+      return fake.fetch(url, init);
+    };
+    const loader = new MapLoader({ center, ringRadii, cache: new MemoryBlockCache(), fetch, urls: ["https://overpass.test/api"], sleep: async () => {}, maxAttempts: 2 });
+    loader.waveBlocks[2].forEach((id) => wave3.add(id));
+    loader.waveBlocks.slice(3).flat().forEach((id) => outer.add(id));
+    await loader.start();
+    const { log, view } = recorder();
+    const gate = new DistrictGate(loader, view);
+    const p = gate.wait(3);
+    await expect.poll(() => log.some((l) => l.startsWith("failed 3 "))).toBe(true);
+    const atFailure = log.length;
+    const before = loader.chunks().length;
+    // Later rings' batches come in after the failure.
+    releaseLater();
+    await expect.poll(() => loader.chunks().length).toBeGreaterThan(before);
+    await loader.done();
+    expect(log.slice(atFailure)).toEqual([]);
+    expect(log[log.length - 1]).toMatch(/^failed 3 map ring 3 can't be loaded/);
+    expect(gate.waiting).toBe(3);
+    failWave3 = false;
+    gate.retry();
+    expect(await p).toBe(true);
+    expect(loader.ringReady(3)).toBe(true);
+    expect(log[log.length - 1]).toBe("hide");
+    loader.abort();
+  });
+
   it("ends with false when cancelled or when the loader is aborted", async () => {
     const fake = fakeOverpass(ways);
     const loader = make(fake);
@@ -206,6 +246,11 @@ describe("DistrictGate", () => {
     await expect(startP).rejects.toThrow(/aborted/);
   });
 });
+
+/** The bboxes of a query's request body. */
+function parseBboxesOf(init?: RequestInit): FakeCall["bboxes"] {
+  return parseBboxes((init?.body as URLSearchParams).get("data") ?? "");
+}
 
 /** Block ids of a fake call (each box's centre). */
 function queryBlocks(c: FakeCall): number[] {

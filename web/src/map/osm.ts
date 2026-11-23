@@ -143,10 +143,11 @@ export function overpassBodyError(body: unknown): string | null {
 }
 
 /// How long one endpoint may take to answer (the queries ask Overpass for at
-/// most 90 s). A public instance can hold a request for minutes; without a
-/// limit it never fails, so neither the retry nor the player's Retry
-/// loading would ever come.
-export const OVERPASS_REQUEST_TIMEOUT_MS = 120_000;
+/// most 40 s, `[timeout:40]`). A public instance can hold a request for
+/// minutes; without a limit it never fails, so neither the retry nor the
+/// player's Retry loading would ever come. The loader also bounds a whole
+/// batch (`DEFAULT_BATCH_BUDGET_MS` in `loader.ts`).
+export const OVERPASS_REQUEST_TIMEOUT_MS = 45_000;
 
 /// POST one Overpass QL query, trying each endpoint in turn. An HTTP error,
 /// an unparsable body, a body without an `elements` array, one with an

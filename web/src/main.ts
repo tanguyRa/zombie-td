@@ -83,6 +83,10 @@ const TEST_MODE = new URLSearchParams(location.search).get("test") === "1";
 /** Test mode retries a failed Overpass query after 50 ms instead of 1 s
  *  (doubling each time): a clock control, the blocks are the same. */
 const TEST_BACKOFF_MS = 50;
+/** Test mode gives an Overpass request and a batch an hour instead of 45 s
+ *  and 150 s: the stream E2E holds a "slow" request through whole waves
+ *  (minutes in Firefox). The limits themselves are unit-tested. */
+const TEST_TIME_LIMIT_MS = 60 * 60_000;
 
 let level: StaticLevel | null = null;
 let currentPlace: Place | null = null;
@@ -1341,7 +1345,7 @@ async function enterGame(place: Place) {
 async function enterStreamed(place: Place, abort: AbortController) {
   let s: MapSession | null = null;
   try {
-    s = await MapSession.open(place.name, place.lat, place.lon, TEST_MODE ? { backoffMs: TEST_BACKOFF_MS } : {});
+    s = await MapSession.open(place.name, place.lat, place.lon, TEST_MODE ? { backoffMs: TEST_BACKOFF_MS, requestTimeoutMs: TEST_TIME_LIMIT_MS, batchBudgetMs: TEST_TIME_LIMIT_MS } : {});
     if (abort.signal.aborted) return s.abort();
     session = s;
     setGeo(s.shell.center_lat, s.shell.center_lon);

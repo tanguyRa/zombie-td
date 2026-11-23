@@ -62,8 +62,8 @@ export function buildingCount(chunks: BuildingChunk[]): number {
 export function tooEmpty(first: BuildingChunk[]): string | null {
   const n = buildingCount(first);
   if (n >= PLAYABLE_MIN_BUILDINGS) return null;
-  const r = Math.round(config.match.ring_radius_m[1] + config.match.block_margin_m);
-  return `Only ${n} building${n === 1 ? "" : "s"} within about ${r} m. Pick a more built-up spot.`;
+  // The count is over whole blocks (about 250 m on a side), so no distance is claimed.
+  return `Only ${n} building${n === 1 ? "" : "s"} around the pin. Pick a more built-up spot.`;
 }
 
 // ------------------------------------------------------------ worker queue
@@ -153,7 +153,11 @@ type GateLoader = Pick<MapLoader, "ringReady" | "ringProgress" | "whenRingReady"
 /// permanent failure. One wait at a time; a new wait or `cancel()` ends the
 /// previous one with `false`.
 export class DistrictGate {
-  private current: { wave: number; done: (ok: boolean) => void } | null = null;
+  /// `failed`: the error and Retry loading are showing. Chunks of other
+  /// rings keep arriving then (the loader goes on with its other batches);
+  /// they must not turn the banner back to progress, which would hide Retry
+  /// loading while nothing listens for the ring any more.
+  private current: { wave: number; failed: boolean; done: (ok: boolean) => void } | null = null;
 
   constructor(
     private loader: GateLoader,
@@ -171,7 +175,7 @@ export class DistrictGate {
     if (this.loader.ringReady(wave)) return Promise.resolve(true);
     return new Promise<boolean>((resolve) => {
       const show = () => {
-        if (this.current?.wave !== wave) return;
+        if (this.current?.wave !== wave || this.current.failed) return;
         const p = this.loader.ringProgress(wave);
         this.view.progress(wave, p.loaded, p.needed);
       };
@@ -179,6 +183,7 @@ export class DistrictGate {
       const off = this.loader.on("chunk", show);
       this.current = {
         wave,
+        failed: false,
         done: (ok) => {
           off();
           this.view.hide();
@@ -208,6 +213,7 @@ export class DistrictGate {
           cur.done(false);
           return;
         }
+        cur.failed = true;
         this.view.failed(wave, (e as Error)?.message ?? String(e));
       },
     );
@@ -216,7 +222,8 @@ export class DistrictGate {
   /// Retry loading the failed blocks and keep waiting.
   retry() {
     const cur = this.current;
-    if (!cur) return;
+    if (!cur || !cur.failed) return;
+    cur.failed = false;
     void this.loader.retryFailed();
     const pr = this.loader.ringProgress(cur.wave);
     this.view.progress(cur.wave, pr.loaded, pr.needed);

@@ -43,6 +43,12 @@ export function matchRingRadii(ringRadiusM: number[], wave8RadiusM: number, leve
   });
 }
 
+/// Default `batchBudgetMs`: 150 s. With a 45 s limit per endpoint
+/// (`OVERPASS_REQUEST_TIMEOUT_MS`), two endpoints, 5 attempts and the
+/// backoff, a batch on servers that never answer would otherwise take
+/// ~7.5 min to fail for good (and ~20 min with the earlier 120 s limit).
+export const DEFAULT_BATCH_BUDGET_MS = 150_000;
+
 /// Default `coverageSlackM`: one cell diagonal (`cell_size_m × √2`, 2.83 m).
 export const DEFAULT_COVERAGE_SLACK_M = CELL_SIZE_M * Math.SQRT2;
 
@@ -73,6 +79,13 @@ export interface MapLoaderOptions {
   maxAttempts?: number;
   /// Delay before the first retry, doubled after each failure (default 1000 ms).
   backoffMs?: number;
+  /// Wall-clock time a batch may take, attempts and backoff included
+  /// (default `DEFAULT_BATCH_BUDGET_MS`): past it the request in flight is
+  /// cut and the batch has failed for good (`error`, `whenRingReady`
+  /// rejects), whatever attempts are left.
+  batchBudgetMs?: number;
+  /// Per-endpoint request limit (default `OVERPASS_REQUEST_TIMEOUT_MS`).
+  requestTimeoutMs?: number;
   /// Cached blocks older than this are fetched again (default: no expiry).
   maxAgeMs?: number;
   /// Backoff sleep. `abort()` cuts it short whether or not it honours `signal`.
@@ -143,7 +156,7 @@ export class MapLoader {
   readonly waveBlocks: BlockId[][];
   readonly stats: MapLoaderStats = { queries: 0, cacheHits: 0, fetched: 0 };
 
-  private opts: Required<Omit<MapLoaderOptions, "fetch" | "urls" | "center" | "ringRadii" | "marginM" | "coverageSlackM">> & Pick<MapLoaderOptions, "fetch" | "urls">;
+  private opts: Required<Omit<MapLoaderOptions, "fetch" | "urls" | "requestTimeoutMs" | "center" | "ringRadii" | "marginM" | "coverageSlackM">> & Pick<MapLoaderOptions, "fetch" | "urls" | "requestTimeoutMs">;
   private loaded = new Map<BlockId, BuildingChunk>();
   private hashes = new Map<BlockId, string>();
   /// Blocks claimed by a running `load` (cache read or network).
@@ -176,11 +189,13 @@ export class MapLoader {
       cache: o.cache ?? new MemoryBlockCache(),
       fetch: o.fetch,
       urls: o.urls,
+      requestTimeoutMs: o.requestTimeoutMs,
       initialWaves: o.initialWaves ?? 2,
       concurrency: o.concurrency ?? 2,
       batchSize: o.batchSize ?? 6,
       maxAttempts: o.maxAttempts ?? 5,
       backoffMs: o.backoffMs ?? 1000,
+      batchBudgetMs: o.batchBudgetMs ?? DEFAULT_BATCH_BUDGET_MS,
       maxAgeMs: o.maxAgeMs ?? Infinity,
       sleep: o.sleep ?? defaultSleep,
       now: o.now ?? (() => new Date()),
@@ -442,35 +457,67 @@ export class MapLoader {
   }
 
   private async fetchBatch(batch: BlockId[]): Promise<void> {
-    const { maxAttempts, backoffMs, sleep } = this.opts;
+    const { maxAttempts, backoffMs, batchBudgetMs, sleep } = this.opts;
     const signal = this.abortCtl.signal;
+    // The batch's own signal: the loader's abort, or the batch budget.
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) ctl.abort();
+    let overBudget = false;
+    const timer = Number.isFinite(batchBudgetMs)
+      ? setTimeout(() => {
+          overBudget = true;
+          ctl.abort();
+        }, batchBudgetMs)
+      : undefined;
+    const budgetError = (last: unknown) => {
+      const why = last === undefined ? "" : ` (${String((last as Error)?.message ?? last).replace(/\. Try again in a minute\.$/, "")})`;
+      return new Error(`Overpass gave no answer within ${Math.round(batchBudgetMs / 1000)} s${why}. Try again in a minute.`, { cause: last });
+    };
     let lastErr: unknown;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) await abortableSleep(sleep, backoffMs * 2 ** (attempt - 1), signal);
-      if (signal.aborted) throw abortError();
-      this.stats.queries++;
-      try {
-        const got = await fetchBlocks(batch, { fetch: this.opts.fetch, urls: this.opts.urls, signal });
-        if (signal.aborted) throw abortError();
-        const now = this.opts.now();
-        for (const id of batch) {
-          const block = makeCachedBlock(id, got.get(id) ?? [], now);
+    try {
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) {
           try {
-            await this.opts.cache.put(block);
-          } catch {
-            // The cache is best effort (quota, private mode): keep playing.
+            await abortableSleep(sleep, backoffMs * 2 ** (attempt - 1), ctl.signal);
+          } catch (e) {
+            if (signal.aborted) throw abortError();
+            if (overBudget) throw budgetError(lastErr);
+            throw e;
           }
-          if (signal.aborted) throw abortError();
-          this.stats.fetched++;
-          this.pending.delete(id);
-          this.add(block);
         }
-        return;
-      } catch (e) {
-        lastErr = e;
         if (signal.aborted) throw abortError();
+        if (overBudget) throw budgetError(lastErr);
+        this.stats.queries++;
+        try {
+          const got = await fetchBlocks(batch, { fetch: this.opts.fetch, urls: this.opts.urls, signal: ctl.signal, timeoutMs: this.opts.requestTimeoutMs });
+          // An answer that came in as the budget ran out is still used.
+          if (signal.aborted) throw abortError();
+          const now = this.opts.now();
+          for (const id of batch) {
+            const block = makeCachedBlock(id, got.get(id) ?? [], now);
+            try {
+              await this.opts.cache.put(block);
+            } catch {
+              // The cache is best effort (quota, private mode): keep playing.
+            }
+            if (signal.aborted) throw abortError();
+            this.stats.fetched++;
+            this.pending.delete(id);
+            this.add(block);
+          }
+          return;
+        } catch (e) {
+          if (signal.aborted) throw abortError();
+          if (overBudget) throw budgetError(lastErr);
+          lastErr = e;
+        }
       }
+      throw lastErr;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
     }
-    throw lastErr;
   }
 }

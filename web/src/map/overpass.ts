@@ -31,6 +31,8 @@ export interface OverpassOptions {
   fetch?: FetchFn;
   signal?: AbortSignal;
   urls?: string[];
+  /// Per-endpoint limit (default `OVERPASS_REQUEST_TIMEOUT_MS`).
+  timeoutMs?: number;
 }
 
 /// The Overpass QL query for the buildings of these blocks (a union of boxes).
@@ -39,7 +41,7 @@ export function blocksQuery(ids: BlockId[]): string {
     const b = blockLatLonBounds(id);
     return `way["building"](${b.south - BBOX_PAD_DEG},${b.west - BBOX_PAD_DEG},${b.north + BBOX_PAD_DEG},${b.east + BBOX_PAD_DEG});`;
   });
-  return `[out:json][timeout:90];(${parts.join("")});out tags geom;`;
+  return `[out:json][timeout:40];(${parts.join("")});out tags geom;`;
 }
 
 /// A way as a cached building plus the block that owns it, or null when it

@@ -128,11 +128,22 @@ fn streamed_run_verifies_with_a_shell_file() {
     std::fs::write(&bundle_path, bundle.to_string()).unwrap();
     let out = Command::new(bin).arg("verify").arg(&run).arg("--chunks").arg(&bundle_path).arg("--shell").arg(&bundle_path).arg("--quiet").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
-    let not_chunks = dir.join("not-chunks.json");
-    std::fs::write(&not_chunks, "{\"name\": \"x\"}").unwrap();
-    let out = Command::new(bin).arg("verify").arg(&run).arg("--chunks").arg(&not_chunks).arg("--shell").arg(&shell_path).output().unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not a chunk list or a map bundle"));
+    // A wrong --chunks file: the error is the one of the form it is in
+    // (an object is a bundle, anything else a list).
+    for (name, body, why) in [
+        ("no-chunks.json", "{\"name\": \"x\"}", "(map bundle: missing field `chunks`"),
+        ("bad-bundle.json", "{\"name\": \"x\", \"chunks\": [{\"block_id\": 1}]}", "(map bundle: missing field `bounds`"),
+        ("bad-list.json", "[{\"block_id\": 1}]", "(chunk list: missing field `bounds`"),
+        ("number.json", "3", "(chunk list: invalid type: integer `3`"),
+        ("garbage.json", "{not json", "(invalid JSON: key must be a string"),
+    ] {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        let out = Command::new(bin).arg("verify").arg(&run).arg("--chunks").arg(&p).arg("--shell").arg(&shell_path).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{name}: {err}");
+        assert!(err.contains("not a chunk list or a map bundle") && err.contains(why), "{name}: {err}");
+    }
     let mut forged = rec.clone();
     forged.map.shell.radius_m = Some(160.0);
     let bad = dir.join("forged.json");
@@ -169,4 +180,22 @@ fn verify_run_mjs_rejects_bad_arguments() {
         assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
         assert!(err.contains(why) && err.contains("usage:"), "{args:?}: {err}");
     }
+    // A --chunks file that is neither a chunk list nor a map bundle (read
+    // before the WASM package is loaded, so no build is needed either).
+    let dir = std::env::temp_dir().join(format!("zt-verify-run-mjs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, body, why) in [
+        ("no-chunks.json", "{\"name\": \"x\"}", "(map bundle: no `chunks` array)"),
+        ("number.json", "3", "(neither an array nor an object)"),
+        ("garbage.json", "{not json", "(invalid JSON: "),
+    ] {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        let p = p.to_str().unwrap();
+        let out = Command::new("node").arg(tool).args(["run.json", "--chunks", p, "--shell", "s.json"]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{name}: {err}");
+        assert!(err.contains(&format!("{p}: not a chunk list or a map bundle {why}")), "{name}: {err}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

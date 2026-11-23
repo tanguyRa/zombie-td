@@ -1363,7 +1363,9 @@ yet: that comes after T5).
   600 m) are replaced by the fixed ring radii: every picked place is a
   1.3 km wave-8 match, the scale T1 chose, however dense. The "too empty to
   play" check stays, on the waves 1–2 blocks: fewer than 40 buildings there
-  (about 350 m around the pin) refuses the place. The map screen's dashed
+  refuses the place ("Only n buildings around the pin"). The blocks reach
+  past the wave-2 disc (350 m) by up to a block (~250 m), so the message
+  names no distance. The map screen's dashed
   circle is now the 1.3 km play area. `tools/levelgen/levelgen.py` stays,
   for the committed levels only (they are whole-level packs, sized by its
   600–1,200 rule); it is not ported to blocks, since nothing else uses it.
@@ -1411,7 +1413,11 @@ yet: that comes after T5).
   disabled, and sends the action as soon as `whenRingReady` resolves. When a
   block the ring needs failed all its attempts, `whenRingReady` rejects:
   the banner turns into the error with a **Retry loading** button
-  (`loader.retryFailed()`, then it waits again). Any phase change (a retry
+  (`loader.retryFailed()`, then it waits again). While the error shows, the
+  loader goes on with the other rings' batches; their `chunk` events leave
+  the banner alone (the gate's `failed` flag, cleared by Retry loading), or
+  they would turn it back to "Loading…" and hide Retry loading with
+  nothing waiting for the ring any more. Any phase change (a retry
   or restart from the result panel), a new match or leaving cancels the
   wait. The core still has the last word (`NextWave` refuses
   `ring_not_loaded`), so a page bug can't start a wave on partial data.
@@ -1420,16 +1426,33 @@ yet: that comes after T5).
   only matters to the next visit. Leaving the match (← Map, New location)
   aborts the loader: no request and no chunk after it. A second visit to the
   same area is served from IndexedDB with zero requests.
-- **Each Overpass request has a 120 s limit** (`OVERPASS_REQUEST_TIMEOUT_MS`
-  in `map/osm.ts`, above the queries' own `[timeout:90]`): past it the
-  endpoint counts as failed ("Overpass did not answer within 120 s") and the
-  next one, then the loader's backoff, takes over. Found in the manual check
-  below: the fallback instance held one request for 267 s; with no limit a
-  request that never answers would never fail, so neither the retry nor
-  Retry loading would ever come.
-- **Test-only backoff.** With `?test=1` a failed Overpass query is retried
-  after 50 ms (doubling, 5 attempts) instead of 1 s, so the failure test
-  sees the error in under a second. A clock control: the blocks are the same.
+- **Each Overpass request has a 45 s limit, each batch 150 s.**
+  `OVERPASS_REQUEST_TIMEOUT_MS` (`map/osm.ts`, 45 s, above the queries' own
+  `[timeout:40]`): past it the endpoint counts as failed ("Overpass did not
+  answer within 45 s") and the next one, then the loader's backoff, takes
+  over. `batchBudgetMs` (`DEFAULT_BATCH_BUDGET_MS` in `map/loader.ts`,
+  150 s): the wall-clock time one batch may take, attempts and backoff
+  included; past it the request in flight is cut and the batch has failed
+  for good ("Overpass gave no answer within 150 s (last error). Try again in
+  a minute."), so the first load fails or the banner shows the error and
+  Retry loading. Without the budget, servers that hold every request would
+  take 5 attempts × 2 endpoints × the limit plus the backoff to count as
+  failed: ~7.5 min at 45 s, ~20 min at the earlier 120 s. 45 s leaves room
+  for a slow but working answer (one batch took 48 s and a single block 31 s
+  in the manual check below), and 150 s is one full attempt on both
+  endpoints plus most of a second. Found in that check: the fallback
+  instance held one request for 267 s; with no limit a request that never
+  answers would never fail, so neither the retry nor Retry loading would
+  ever come.
+- **Test-only backoff and limits.** With `?test=1` a failed Overpass query
+  is retried after 50 ms (doubling, 5 attempts) instead of 1 s, so the
+  failure check sees the error in under a second, and the request limit
+  and batch budget are an hour each instead of 45 s and 150 s: the stream
+  E2E holds its "slow" request through waves 1–2, which is minutes in
+  Firefox (with the real limits that hold itself turned into the failure).
+  Clock controls: the blocks are the same. The real limits are unit-tested
+  with fake timers and fetches that never answer (`loader.test.ts`, "time
+  to a permanent failure").
 - **Map bundle for headless verification.** The match panel of a streamed
   match has **Download map** next to Download run record: one JSON file,
   the shell (a `LevelPack` without buildings, so it is a valid `--shell`)
@@ -1446,36 +1469,40 @@ yet: that comes after T5).
   outside waves in block id order, held while a wave runs, repeats dropped,
   refusals reported), the gate on a real `MapLoader` with the fake
   Overpass (progress while a block is held, the error and Retry loading,
-  cancel and abort), the bundle. E2E (`e2e/stream.spec.ts`, all three
+  the error kept while other rings' chunks arrive, cancel and abort), the
+  bundle; `loader.test.ts` bounds the time to a permanent failure. E2E (`e2e/stream.spec.ts`, all three
   browsers) routes Overpass to per-block fixture answers built from the
   committed Marais level (the T6a fixtures' bbox parsing and
   vertex-or-segment rule), through `routeExternal` in `e2e/offline.ts`, so
-  the network-leak teardown counts them as handled. Two tests:
-  1. A picked place on the fixture: the first load asks for exactly the
-     10 waves 1–2 blocks (2 queries) while every background query is held,
-     so prep can't have waited for one; background blocks released during a
-     paused wave 1 wait in the worker (`queued` > 0) and are added at its
-     end; wave 2 opens without the banner; a held wave-3 block makes Next
-     wave show "Loading the next district… n / m blocks" with Start and Next
-     wave disabled, and wave 3's prep opens 0.4–0.9 s after the block is
-     let through; all 109 blocks are then held by the match; Retry wave and
-     Restart make zero requests; the record (chunks mode, 109 blocks) and
-     the map bundle verify with the native `sim-headless verify --chunks
-     map.json --shell map.json`, every attempt hash and the final hash equal
-     to the browser's (identical in the three browsers: snapshot
-     `8bfb826a2d0cdf55`); ← Map aborts the loader; after a reload the same
-     place gets to prep with zero requests (109 IndexedDB hits).
-  2. Every query with a wave-3 block answers 504: after the five attempts
-     (test backoff) Next wave shows the error and Retry loading; with the
-     server fixed, Retry loading opens wave 3.
-  Run times in the whole suite (M1 Pro, three workers): test 1 takes
-  2.5 min in Chromium, 2.2 min in WebKit and 8.5 min in Firefox (its WASM
-  is ~3x slower; the native replay of the record on the 1.3 km grid is
-  part of it); test 2 takes 43 s, 40 s and 3.5 min. The whole suite
-  (54 tests) takes about 13.5 min, Firefox's stream file being the
-  longest (12 min). The budgets (12 min a wave, 45 and 25 min a test) are
-  wide because a wave's cost on the 1.3 km grid is minutes in Firefox
-  under contention.
+  the network-leak teardown counts them as handled. One test, on seed 1
+  (the default; the bot wins waves 1 and 2 on the first try there, seeds
+  2–8 lose one of them, and the test asserts no lost attempt):
+  the first load asks for exactly the 10 waves 1–2 blocks (2 queries)
+  while every background query is held, so prep can't have waited for one;
+  background blocks released during a paused wave 1 wait in the worker
+  (`queued` > 0) and are added at its end; wave 2 opens without the banner;
+  a held wave-3 batch makes Next wave show "Loading the next district… n /
+  m blocks" with Start and Next wave disabled; that batch is then switched
+  to 504 and let through: after its five attempts (test backoff) the banner
+  shows the error and Retry loading; a held ring-8 batch let through after
+  that leaves the error and Retry loading up (the gate's `failed` flag);
+  with the server fixed, Retry loading opens wave 3's prep, all 109 blocks
+  then held by the match; Retry wave (from prep 3) and Restart make zero
+  requests; the record (chunks mode, 109 blocks, 4 attempts: waves 1–2 and
+  wave 3's prep twice) and the map bundle verify with the native
+  `sim-headless verify --chunks map.json --shell map.json`, every attempt
+  hash and the final hash equal to the browser's (identical in the three
+  browsers: snapshot `8bfb826a2d0cdf55`); ← Map aborts the loader; after a
+  reload the same place gets to prep with zero requests (109 IndexedDB
+  hits). Wave 3 is not played: its prep hash is already checked by the
+  verifier.
+  Run times (M1 Pro, the stream file alone on three workers, with other
+  work on the machine): 1.4 min in Chromium and WebKit, 4.5–4.8 min in
+  Firefox. Before this fix (two tests, waves 1–3 played): 3.8 + 0.7 min in
+  Chromium, 3.9 + 0.7 min in WebKit, over 7.6 + 4.3 min in Firefox. In
+  the whole suite (60 tests, 7.4 min) it takes 1.8, 1.3 and 5.0 min. The
+  budgets (12 min a wave, 30 min the test) are wide because a wave's cost
+  on the 1.3 km grid is minutes in Firefox under contention.
 - **Manual check, a dense picked place** (central Paris, 48.8604 N 2.3470 E,
   live Overpass, Chromium in the desktop preview, M1 Pro, test speed "as
   fast as possible"). The 1.3 km shell has 110 blocks (6, 6, 10, 11, 15,
@@ -1485,7 +1512,7 @@ yet: that comes after T5).
   answered one batch 502 at once and the fallback instance held it for
   267 s (the other batch took 48 s; a single block by curl took 31 s). The
   background then fetched 12 more blocks, and later queries timed out
-  (hence the 120 s limit above). A second visit from the cache reached
+  (hence the request limit above, 120 s then, 45 s now). A second visit from the cache reached
   prep in 0.6 s with no request. **Sim cost** (wall ms per tick over the
   wave, and the worst sim p95 seen): wave 1 993 ticks, 2.8 ms, p95 3.8 ms,
   1.3k agents; wave 2 6,768 ticks, 3.3 ms, p95 4.8 ms, 5.2k agents; wave 3

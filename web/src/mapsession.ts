@@ -46,6 +46,10 @@ const banner = {
 export interface MapSessionOptions {
   /** Backoff before the first retry of a failed query (test mode shortens it). */
   backoffMs?: number;
+  /** Per-endpoint request limit and per-batch budget (test mode lengthens
+   *  them: the E2E holds a "slow" request through whole waves). */
+  requestTimeoutMs?: number;
+  batchBudgetMs?: number;
 }
 
 export class MapSession {
@@ -72,6 +76,8 @@ export class MapSession {
       ringRadii: shellRingRadii(shell),
       cache,
       ...(opts.backoffMs !== undefined ? { backoffMs: opts.backoffMs } : {}),
+      ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
+      ...(opts.batchBudgetMs !== undefined ? { batchBudgetMs: opts.batchBudgetMs } : {}),
     });
     this.gate = new DistrictGate(this.loader, banner);
     // Background blocks go to the worker once a match was built on this map

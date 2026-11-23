@@ -61,24 +61,37 @@ if (mult !== undefined) {
 }
 const expectedJson = Object.keys(expected).length ? JSON.stringify(expected) : undefined;
 
+// A `BuildingChunk[]`, or a map bundle (the browser's "Download map": the
+// shell plus a `chunks` array, so the same file is also the --shell). Read
+// before the WASM package is loaded: a wrong file is a bad argument (exit 2).
+function chunksJson(path) {
+  const bad = (why) => {
+    console.error(`verify-run: ${path}: not a chunk list or a map bundle (${why})`);
+    process.exit(2);
+  };
+  let v;
+  try {
+    v = JSON.parse(readFileSync(path, "utf8"));
+  } catch (e) {
+    bad(e instanceof SyntaxError ? `invalid JSON: ${e.message}` : String(e?.message ?? e));
+  }
+  if (Array.isArray(v)) return JSON.stringify(v);
+  if (v === null || typeof v !== "object") bad("neither an array nor an object");
+  if (!Array.isArray(v.chunks)) bad("map bundle: no `chunks` array");
+  return JSON.stringify(v.chunks);
+}
+const chunksText = chunks ? chunksJson(chunks) : undefined;
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const { verify_level, verify_chunks } = require(join(root, "crates/sim-wasm/pkg-node/sim_wasm.js"));
-
-// A `BuildingChunk[]`, or a map bundle (the browser's "Download map": the
-// shell plus a `chunks` array, so the same file is also the --shell).
-function chunksJson(path) {
-  const text = readFileSync(path, "utf8");
-  const v = JSON.parse(text);
-  return Array.isArray(v) ? text : JSON.stringify(v.chunks);
-}
 
 const record = readFileSync(run, "utf8");
 const t0 = performance.now();
 try {
   const summary = level
     ? verify_level(record, readFileSync(level, "utf8"), expectedJson)
-    : verify_chunks(record, readFileSync(shell, "utf8"), chunksJson(chunks), expectedJson);
+    : verify_chunks(record, readFileSync(shell, "utf8"), chunksText, expectedJson);
   const s = JSON.parse(summary);
   console.log(JSON.stringify(s, null, 2));
   console.log(`verified: ${s.phase} at wave ${s.wave}, ${s.waves_won} waves won, ${s.attempts} attempts, ${s.end_tick} ticks, ${((performance.now() - t0) / 1000).toFixed(2)}s (WASM)${s.setup_checked ? "" : " (seed, deck and multiplier not checked against an issued run: --expect-*)"}`);

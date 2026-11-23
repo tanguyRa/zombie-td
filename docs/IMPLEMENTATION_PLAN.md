@@ -242,6 +242,9 @@ enum is serde-serialisable (it becomes the input log in T4).
   covers exactly the blocks used.
 - Port the grow-the-radius logic in `web/src/levelgen.ts` and the Python
   tool to the block model, or retire it with a note in DECISIONS.md.
+  (Done in T6b: `levelgen.ts` is retired, deleted, in favour of the fixed
+  ring radii; the Python tool stays for the committed levels only. See
+  DECISIONS.md, "Streaming map (T6b)".)
 - Tests: unit tests for block ids and projection (Node), headless test that
   the same blocks added in a different order give the same hash and state,
   E2E with fixture Overpass responses per block (routed): first load

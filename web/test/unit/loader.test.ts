@@ -1,10 +1,10 @@
 import { IDBFactory } from "fake-indexeddb";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { blockAt, blockBoundsLocal, blockDistanceM, blocksForDisc, type BlockId } from "../../src/map/blocks";
 import { IdbBlockCache, MemoryBlockCache, SCHEMA_VERSION, type CachedBlock } from "../../src/map/cache";
-import { project } from "../../src/map/osm";
+import { OVERPASS_REQUEST_TIMEOUT_MS, OVERPASS_URLS, project, type FetchFn } from "../../src/map/osm";
 import { CLIP_MARGIN_M, snapshotHash, type BuildingChunk } from "../../src/map/chunks";
-import { DEFAULT_COVERAGE_SLACK_M, MapLoader, matchRingRadii } from "../../src/map/loader";
+import { DEFAULT_BATCH_BUDGET_MS, DEFAULT_COVERAGE_SLACK_M, MapLoader, matchRingRadii } from "../../src/map/loader";
 import { fakeOverpass, loadConfig, loadLevel, parseBboxes, timeoutBody, waysFromLevel, type FakeCall } from "./fixtures";
 
 const cfg = loadConfig();
@@ -415,6 +415,83 @@ describe("MapLoader: abort and permanent failures", () => {
     expect(((await ready1) as Error).message).toMatch(/ring 1 can't be loaded/);
     await l.start(); // the fake answers again
     await expect(l.whenRingReady(1)).resolves.toBeUndefined();
+  });
+});
+
+describe("MapLoader: time to a permanent failure", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /// A fetch that never answers (like a stuck server): it only ends when its signal aborts.
+  const hanging = (calls: string[]): FetchFn => (url, init) =>
+    new Promise<Response>((_, rej) => {
+      calls.push(url);
+      init?.signal?.addEventListener("abort", () => rej(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+    });
+
+  it("bounds the defaults: 45 s per endpoint, 150 s per batch", () => {
+    expect(OVERPASS_REQUEST_TIMEOUT_MS).toBe(45_000);
+    expect(DEFAULT_BATCH_BUDGET_MS).toBe(150_000);
+    expect(OVERPASS_URLS.length).toBe(2);
+  });
+
+  it("a background batch on servers that never answer fails for good within the batch budget", async () => {
+    vi.useFakeTimers();
+    const fake = fakeOverpass(ways);
+    const calls: string[] = [];
+    let wave3 = new Set<BlockId>();
+    const asks = (init?: RequestInit) => blocksOf({ url: "", query: "", bboxes: parseBboxes((init?.body as URLSearchParams).get("data") ?? "") });
+    const fetch: FetchFn = (url, init) => (asks(init).some((id) => wave3.has(id)) ? hanging(calls)(url, init) : fake.fetch(url, init));
+    // Default endpoints, attempts, backoff, sleep and budget.
+    const l = new MapLoader({ center: CENTER, ringRadii: [150, 300, 450], cache: new MemoryBlockCache(), fetch, batchSize: 50 });
+    wave3 = new Set(l.waveBlocks[2]);
+    const started = l.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await started;
+    const t0 = Date.now();
+    let failedAt = -1;
+    let err: Error | null = null;
+    l.whenRingReady(3).catch((e: Error) => {
+      failedAt = Date.now() - t0;
+      err = e;
+    });
+    await vi.advanceTimersByTimeAsync(DEFAULT_BATCH_BUDGET_MS - 1);
+    expect(failedAt).toBe(-1);
+    // Each endpoint is given up after 45 s, then the backoff: 2 endpoints (90 s), 1 s, then the second attempt.
+    expect(calls.length).toBe(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(failedAt).toBe(DEFAULT_BATCH_BUDGET_MS);
+    expect(err!.message).toMatch(/ring 3 can't be loaded: \d+ blocks? failed \(Overpass gave no answer within 150 s \(Overpass did not answer within 45 s\)\. Try again in a minute\.\)/);
+    await vi.advanceTimersByTimeAsync(0);
+    await l.done();
+    expect(calls.length).toBe(4); // nothing after the budget
+    l.abort();
+  });
+
+  it("takes its own request limit (test mode lengthens both)", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const l = new MapLoader({ center: CENTER, ringRadii: [150], cache: new MemoryBlockCache(), fetch: hanging(calls), batchSize: 50, maxAttempts: 1, requestTimeoutMs: 10_000, batchBudgetMs: 60 * 60_000 });
+    const t0 = Date.now();
+    let at = -1;
+    const started = l.start().catch((e: Error) => ((at = Date.now() - t0), e));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(at).toBe(20_000); // 10 s on each endpoint
+    expect(((await started) as Error).message).toBe("Overpass did not answer within 10 s. Try again in a minute.");
+  });
+
+  it("the first load fails within the budget too", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const l = new MapLoader({ center: CENTER, ringRadii: [150], cache: new MemoryBlockCache(), fetch: hanging(calls), batchSize: 50, batchBudgetMs: 60_000 });
+    const t0 = Date.now();
+    let at = -1;
+    const started = l.start().catch((e: Error) => ((at = Date.now() - t0), e));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(at).toBe(60_000);
+    expect(((await started) as Error).message).toBe("Overpass gave no answer within 60 s. Try again in a minute.");
+    expect(calls.length).toBe(2); // the second endpoint was cut at 60 s, within the first attempt
   });
 });
 
