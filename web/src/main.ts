@@ -11,6 +11,7 @@ import { Place, createExplore } from "./explore";
 import { MapSession, blockCache } from "./mapsession";
 import type { ReplaySource } from "./replay";
 import { ReplayUi } from "./ui/replayui";
+import { setText } from "./ui/dom";
 import { parseSeed } from "./seed";
 import { placeLabel } from "./profile/sanitize";
 import { ProfileUi } from "./ui/profileui";
@@ -76,14 +77,6 @@ const COLORS: [number, number, number, number][] = [
 ];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-/** Sets a label only when it changes. Writing `textContent` replaces the
- *  element's text node even with the same text, and WebKit drops a click
- *  whose mousedown landed on a text node replaced before the mouseup: the
- *  controls redrawn on every status (Pause, ~20 a second in a wave) would
- *  ignore a press that straddles one. */
-function setText(el: HTMLElement, text: string) {
-  if (el.textContent !== text) el.textContent = text;
-}
 
 // ---------------------------------------------------------------- state
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });

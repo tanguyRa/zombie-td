@@ -10,6 +10,7 @@
 
 import type { ReplayCheck, ReplayProgressMsg, VerifyErrorJson } from "../protocol";
 import { NeedsMap, classifyFile, resolveReplay, type RecordView, type ReplayFile, type ReplaySource, type ResolveDeps } from "../replay";
+import { setText } from "./dom";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -340,11 +341,11 @@ export class ReplayUi {
     if (!this.src) return;
     const p = this.progress;
     const rec = this.src.record;
-    $("rv-pause").textContent = p?.paused ? "Play" : "Pause";
+    setText($("rv-pause"), p?.paused ? "Play" : "Pause");
     for (const s of [1, 4, 0]) $(`rv-speed-${s}`).classList.toggle("on", p?.speed === s);
     const end = Math.max(1, rec.end.tick);
     ($("rv-bar") as HTMLElement).style.width = `${Math.min(100, (100 * (p?.tick ?? 0)) / end)}%`;
-    $("rv-pos").textContent = p ? `${fmtTime(p.tick)} / ${fmtTime(rec.end.tick)} game time · tick ${p.tick.toLocaleString("en-US")} / ${rec.end.tick.toLocaleString("en-US")} · action ${p.nextAction} / ${p.actions}${p.jumping ? ` · jumping to wave ${p.jumping}…` : ""}` : "Starting…";
+    setText($("rv-pos"), p ? `${fmtTime(p.tick)} / ${fmtTime(rec.end.tick)} game time · tick ${p.tick.toLocaleString("en-US")} / ${rec.end.tick.toLocaleString("en-US")} · action ${p.nextAction} / ${p.actions}${p.jumping ? ` · jumping to wave ${p.jumping}…` : ""}` : "Starting…");
     const { rows, final } = this.rows();
     const list = $("rv-checks");
     list.replaceChildren();

@@ -1058,8 +1058,14 @@ Every choice the spec left open, and every simplification, in one place.
   text node even with the same text, and WebKit fires no `click` when the
   node under the mousedown is gone by the mouseup: in a wave (a status
   about every 50 ms) Pause missed presses in Safari, and the e2e
-  "phase buttons" test failed 1 to 2 runs in 10. The test now checks
-  that the Pause label's text node survives the wave's statuses.
+  "phase buttons" test failed 1 to 2 runs in 10. The replay panel had the
+  same bug: `render()` rewrote `#rv-pause` (and the position line) on
+  every progress message, ~20 a second at 1×. `setText` lives in
+  `web/src/ui/dom.ts`, shared by `main.ts` and `replayui.ts`. The e2e
+  tests check that the text nodes of Pause, Mulligan, Start, the inspect
+  panel's Repair and Pull down survive a running wave's statuses, and
+  that the replay's Pause survives its progress messages at 1×. (The
+  targeting panel's Place is not redrawn per status, so it has no check.)
 - **Test-only speeds:** with `?test=1` (the page sends `test: true` in
   `init`; the worker refuses them otherwise) the speed may also be 16
   ticks per 50 ms or 0, "as fast as possible": the worker steps for 40 ms

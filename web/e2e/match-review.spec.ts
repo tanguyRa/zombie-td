@@ -39,6 +39,19 @@ async function placeFence(page: Page, i: number) {
   return (await hook(page, (h) => h.structures)).filter((s) => s.kind.type === "fence").pop()!;
 }
 
+/** The labels of buttons `ids` keep their text node while the wave runs
+ *  several ticks (a status each): they are only written when they change.
+ *  WebKit fires no click when the node under the mousedown is replaced
+ *  before the mouseup. */
+async function labelsSurviveStatuses(page: Page, ids: string[]) {
+  type W = { labelNodes: (Node | null)[] };
+  await page.evaluate((ids) => ((window as unknown as W).labelNodes = ids.map((id) => document.getElementById(id)!.firstChild)), ids);
+  const t0 = await hook(page, (h) => h.tick);
+  await expect.poll(() => hook(page, (h) => h.tick)).toBeGreaterThan(t0 + 5);
+  const replaced = await page.evaluate((ids) => ids.filter((id, i) => { const n = (window as unknown as W).labelNodes[i]; return !n || n !== document.getElementById(id)!.firstChild; }), ids);
+  expect(replaced, "labels whose text node was replaced (or missing)").toEqual([]);
+}
+
 test("a retry drops the selection: no stray card plays on the next click", async ({ page }) => {
   // Seed 3's first hand holds Paratrooper and Grenades.
   await openLevel(page, MARAIS, 3);
@@ -78,13 +91,10 @@ test("phase buttons: a double click sends one action; Retry is off in prep; prep
   await page.waitForTimeout(500);
   expect(await hook(page, (h) => h.uiActions.count)).toBe(n0 + 1);
   expect(await hook(page, (h) => h.toast)).toBe("");
-  // The statuses of the running wave leave the Pause label's text node in
-  // place: WebKit drops a click whose mousedown text node is replaced
+  // The statuses of the running wave leave the phase buttons' text nodes
+  // in place: WebKit drops a click whose mousedown text node is replaced
   // before the mouseup, so a rewrite on every status lost presses.
-  await page.evaluate(() => ((window as unknown as { pauseText: Node | null }).pauseText = document.getElementById("pause")!.firstChild));
-  const t0 = await hook(page, (h) => h.tick);
-  await expect.poll(() => hook(page, (h) => h.tick)).toBeGreaterThan(t0 + 5);
-  expect(await page.evaluate(() => (window as unknown as { pauseText: Node | null }).pauseText === document.getElementById("pause")!.firstChild)).toBe(true);
+  await labelsSurviveStatuses(page, ["pause", "mulligan", "start"]);
   // Pause the wave with the button, then double-click Retry: one retry,
   // and the new prep is not paused.
   await page.locator("#pause").click();
@@ -131,6 +141,10 @@ test("the inspect panel follows the structure's costs and closes on restart", as
   expect(refund).toBe(1);
   await expect(page.locator("#i-pull")).toHaveText(`Pull down (+${refund} supply)`);
   await expect(page.locator("#i-pull")).toBeDisabled();
+  // The running wave's statuses redraw the panel without replacing the
+  // buttons' text nodes (see the phase buttons test).
+  await hook(page, (h) => h.pause(false));
+  await labelsSurviveStatuses(page, ["i-repair", "i-pull"]);
   // Restart: the panel closes (structure ids start again from 0).
   expect(await uiAction(page, () => page.locator("#restart").click())).toBeNull();
   await expect.poll(() => hook(page, (h) => h.phase)).toBe("prep");

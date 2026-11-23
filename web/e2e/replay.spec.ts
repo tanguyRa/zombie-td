@@ -95,6 +95,26 @@ test("a built-in level run replays offline: jump, step, max speed, every check g
   expect(await profileState(page)).toEqual(before);
 });
 
+test("playing at 1×, the progress messages leave the Pause label's text node in place", async ({ page }) => {
+  // WebKit fires no click when the text node under the mousedown is
+  // replaced before the mouseup: a label rewritten on every progress
+  // message (~20 a second at 1×) lost Pause presses in Safari.
+  await openApp(page);
+  await pick(page, [{ name: "run.json", text: readFileSync(GOLDEN_PATH, "utf8") }]);
+  await expect.poll(async () => (await replay(page)).checks.length, { timeout: LOAD_WAIT_MS }).toBeGreaterThan(0);
+  await page.locator("#rv-speed-1").click();
+  if ((await replay(page)).paused) await page.locator("#rv-pause").click();
+  await expect.poll(async () => { const r = await replay(page); return r.speed === 1 && !r.paused; }).toBe(true);
+  await page.evaluate(() => ((window as unknown as { rvPause: Node | null }).rvPause = document.getElementById("rv-pause")!.firstChild));
+  const t0 = (await replay(page)).tick;
+  await expect.poll(async () => (await replay(page)).tick).toBeGreaterThan(t0 + 10);
+  expect(await page.evaluate(() => { const n = (window as unknown as { rvPause: Node | null }).rvPause; return !!n && n === document.getElementById("rv-pause")!.firstChild; })).toBe(true);
+  // And the press lands: the replay pauses.
+  await page.locator("#rv-pause").click();
+  await expect.poll(async () => (await replay(page)).paused).toBe(true);
+  await expect(page.locator("#rv-pause")).toHaveText("Play");
+});
+
 /** Play at Max until the replay is past `tick`. */
 async function maxPast(page: Page, tick: number) {
   await page.locator("#rv-speed-0").click();
