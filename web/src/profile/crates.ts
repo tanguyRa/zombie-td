@@ -66,7 +66,10 @@ export function crateLore(rng: Rng, rewards: RewardsTable, source: CrateSource, 
   if (!Array.isArray(templates) || templates.length === 0) throw new ProfileError("bad_ticket", `no lore for crate source ${String(source)}`);
   const t = templates[rng.below(templates.length)];
   const w = WAVE_WORDS[Math.min(8, Math.max(1, wave)) - 1];
-  return t.replace(/\{place\}/g, placeLabel(district, city)).replace(/\{wave\}/g, w).replace(/\{tier\}/g, TIER_NAMES[tier]);
+  // Function replacements: a replacement string would expand `$&`, `` $` ``,
+  // `$'` and `$$` in the place label (T7a review).
+  const place = placeLabel(district, city);
+  return t.replace(/\{place\}/g, () => place).replace(/\{wave\}/g, () => w).replace(/\{tier\}/g, () => TIER_NAMES[tier]);
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

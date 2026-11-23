@@ -161,3 +161,18 @@ fn wasm_match_binding_follows_the_golden_log() {
     assert_eq!(st["wave"], 1);
     assert!(m.count() > 0);
 }
+
+/// `validate_deck` (sim-core's rules, marshalled) gives the errors of the
+/// shared fixture, which the web unit test (`deck_wasm.test.ts`) checks
+/// against the TS mirror: the core and the mirror agree on the t3 cases.
+#[wasm_bindgen_test]
+fn wasm_validate_deck_matches_the_cases() {
+    let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("fixtures/deck_cases.json")).unwrap();
+    assert!(cases.len() >= 12);
+    for c in &cases {
+        let got: serde_json::Value = serde_json::from_str(&sim_wasm::validate_deck(&c["deck"].to_string()).unwrap()).unwrap();
+        assert_eq!(got, c["errors"], "case {}", c["name"]);
+    }
+    let e = sim_wasm::validate_deck("{}").unwrap_err().as_string().unwrap();
+    assert!(e.contains("\"error\":\"bad_deck\""), "{e}");
+}

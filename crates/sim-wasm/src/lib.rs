@@ -612,3 +612,22 @@ fn verify_on(record: &RunRecord, map: ReplayMap, expected_json: Option<String>) 
     let s = sim_core::record::replay_with(record, map, expected.as_ref(), cfg, sim_core::CardDb::default_cards(), &limits, &mut |_| true).map_err(|e| js_err(&e))?;
     Ok(serde_json::to_string(&s).unwrap())
 }
+
+// ================================================================== decks
+
+thread_local! {
+    /// The embedded cards, parsed once (the deck builder checks on every click).
+    static CARDS: sim_core::CardDb = sim_core::CardDb::default_cards();
+}
+
+/// sim-core's deck rules (`CardDb::validate_deck` on the embedded cards).
+/// `card_ids_json` is a JSON array of card ids; returns the JSON array of
+/// every `DeckError` (`[]` = legal; tagged `error`, snake_case, as the
+/// profile's `DeckError` type), or throws `bad_deck` when the input is not
+/// an array of strings. Marshalling only: the rules are the core's.
+#[wasm_bindgen]
+pub fn validate_deck(card_ids_json: &str) -> Result<String, JsValue> {
+    let ids: Vec<String> = serde_json::from_str(card_ids_json).map_err(|e| js_msg("bad_deck", e))?;
+    let errors = CARDS.with(|db| db.validate_deck(&ids)).err().unwrap_or_default();
+    Ok(serde_json::to_string(&errors).unwrap())
+}

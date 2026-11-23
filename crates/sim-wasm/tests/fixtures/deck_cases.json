@@ -1,0 +1,402 @@
+[
+ {
+  "name": "starter",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "grenades",
+   "machine_gun_nest",
+   "machine_gun_nest",
+   "mortar",
+   "mortar",
+   "heavy_stockade",
+   "heavy_stockade",
+   "paratrooper"
+  ],
+  "errors": []
+ },
+ {
+  "name": "19 cards",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "grenades",
+   "machine_gun_nest",
+   "machine_gun_nest",
+   "mortar",
+   "mortar",
+   "heavy_stockade",
+   "heavy_stockade"
+  ],
+  "errors": [
+   {
+    "error": "wrong_size",
+    "size": 19,
+    "expected": 20
+   }
+  ]
+ },
+ {
+  "name": "21 cards",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "grenades",
+   "machine_gun_nest",
+   "machine_gun_nest",
+   "mortar",
+   "mortar",
+   "heavy_stockade",
+   "heavy_stockade",
+   "paratrooper",
+   "sniper_nest"
+  ],
+  "errors": [
+   {
+    "error": "wrong_size",
+    "size": 21,
+    "expected": 20
+   }
+  ]
+ },
+ {
+  "name": "unknown card",
+  "deck": [
+   "laser_cannon",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "grenades",
+   "machine_gun_nest",
+   "machine_gun_nest",
+   "mortar",
+   "mortar",
+   "heavy_stockade",
+   "heavy_stockade",
+   "paratrooper"
+  ],
+  "errors": [
+   {
+    "error": "unknown_card",
+    "card": "laser_cannon"
+   }
+  ]
+ },
+ {
+  "name": "2 uncommons",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "barbed_wire",
+   "barbed_wire",
+   "grenades",
+   "grenades",
+   "grenades",
+   "mortar",
+   "mortar"
+  ],
+  "errors": []
+ },
+ {
+  "name": "4 commons",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "barbed_wire",
+   "barbed_wire",
+   "grenades",
+   "grenades",
+   "grenades",
+   "machine_gun_nest"
+  ],
+  "errors": [
+   {
+    "error": "too_many_copies",
+    "card": "rifles",
+    "rarity": "common",
+    "copies": 4,
+    "max": 3
+   }
+  ]
+ },
+ {
+  "name": "3 uncommons",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "barbed_wire",
+   "barbed_wire",
+   "grenades",
+   "grenades",
+   "mortar",
+   "mortar",
+   "mortar"
+  ],
+  "errors": [
+   {
+    "error": "too_many_copies",
+    "card": "mortar",
+    "rarity": "uncommon",
+    "copies": 3,
+    "max": 2
+   }
+  ]
+ },
+ {
+  "name": "1 rare each",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "barbed_wire",
+   "barbed_wire",
+   "grenades",
+   "grenades",
+   "grenades",
+   "sniper_nest",
+   "napalm"
+  ],
+  "errors": []
+ },
+ {
+  "name": "2 rares",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "barbed_wire",
+   "barbed_wire",
+   "grenades",
+   "grenades",
+   "grenades",
+   "sniper_nest",
+   "sniper_nest"
+  ],
+  "errors": [
+   {
+    "error": "too_many_copies",
+    "card": "sniper_nest",
+    "rarity": "rare",
+    "copies": 2,
+    "max": 1
+   }
+  ]
+ },
+ {
+  "name": "2 legendaries",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "barbed_wire",
+   "barbed_wire",
+   "grenades",
+   "grenades",
+   "grenades",
+   "airstrike",
+   "armored_convoy"
+  ],
+  "errors": []
+ },
+ {
+  "name": "2 copies of a legendary",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "barbed_wire",
+   "barbed_wire",
+   "grenades",
+   "grenades",
+   "grenades",
+   "airstrike",
+   "airstrike"
+  ],
+  "errors": [
+   {
+    "error": "too_many_copies",
+    "card": "airstrike",
+    "rarity": "legendary",
+    "copies": 2,
+    "max": 1
+   }
+  ]
+ },
+ {
+  "name": "every problem",
+  "deck": [
+   "rifles",
+   "rifles",
+   "rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "hunting_rifles",
+   "militia",
+   "militia",
+   "militia",
+   "light_fence",
+   "light_fence",
+   "light_fence",
+   "barbed_wire",
+   "barbed_wire",
+   "barbed_wire",
+   "grenades",
+   "airstrike",
+   "airstrike",
+   "sniper_nest",
+   "sniper_nest",
+   "rifles"
+  ],
+  "errors": [
+   {
+    "error": "wrong_size",
+    "size": 21,
+    "expected": 20
+   },
+   {
+    "error": "too_many_copies",
+    "card": "rifles",
+    "rarity": "common",
+    "copies": 4,
+    "max": 3
+   },
+   {
+    "error": "too_many_copies",
+    "card": "airstrike",
+    "rarity": "legendary",
+    "copies": 2,
+    "max": 1
+   },
+   {
+    "error": "too_many_copies",
+    "card": "sniper_nest",
+    "rarity": "rare",
+    "copies": 2,
+    "max": 1
+   }
+  ]
+ },
+ {
+  "name": "empty",
+  "deck": [],
+  "errors": [
+   {
+    "error": "wrong_size",
+    "size": 0,
+    "expected": 20
+   }
+  ]
+ }
+]

@@ -146,7 +146,7 @@ export type MatchMap = { level: string } | { shell: string; chunks: BuildingChun
 
 export type ToWorker =
   /** Build a match. `test` unlocks the test-only speeds and `pause_at`. */
-  | { type: "init"; map: MatchMap; setup: { seed: string; deck?: string[] }; test?: boolean }
+  | { type: "init"; map: MatchMap; setup: { seed: string; deck?: string[]; population_multiplier?: number }; test?: boolean }
   /** A streamed block for `add_buildings`: added at once unless a wave
    *  runs, else queued until it ends. Answered by `map`. */
   | { type: "chunk"; chunk: BuildingChunk }

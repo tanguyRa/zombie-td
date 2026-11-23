@@ -103,4 +103,35 @@ test("full 8-wave match through the UI verifies headless", async ({ page }, info
     `${info.project.name}: match won at tick ${end.status.tick}, ${end.attempts.length} attempts, ${end.status.retries} retries, ` +
       `${record.actions.length} actions; played in ${(playMs / 1000).toFixed(0)} s, verified natively in ${(verifyMs / 1000).toFixed(1)} s, final hash ${hash}`,
   );
+
+  // The profile (T7b): the starter deck on Recruit, and the clear claimed
+  // once, with its payout in the match panel (no no-retry bonus: wave 1 was
+  // retried), Veteran unlocked, coverage on the map and the match in the history.
+  expect(record.setup.deck).toEqual(await hook(page, (h) => h.profile.match!.deck));
+  // The record writes the f32 in its shortest form ("0.3").
+  expect(Math.fround(record.setup.population_multiplier)).toBe(Math.fround(0.3));
+  const claims = await hook(page, async (h) => (await h.profile.settle(), h.profile.claims()));
+  expect(claims).toHaveLength(1);
+  expect(claims[0]).toMatchObject({ reason: "cleared", paid: true, noRetryBonus: 0, unlocked: ["veteran"], cleared: true });
+  await expect(page.locator("#r-payout")).toBeVisible();
+  await expect(page.locator("#r-payout .po-total")).toHaveText(`+${claims[0].total} resupply tickets`);
+  await expect(page.locator("#r-payout .po-nobonus")).toHaveText("no-retry bonus: none (retried)");
+  await expect(page.locator("#r-payout .po-unlock")).toHaveText("Unlocked: Veteran");
+  await page.locator("#r-map").click(); // New location: already claimed, nothing more
+  const prof = await hook(page, async (h) => (await h.profile.settle(), { claims: h.profile.claims().length, state: await h.profile.state() }));
+  expect(prof.claims).toBe(1);
+  expect(prof.state.unlocked).toEqual(["recruit", "veteran"]);
+  expect(prof.state.history).toBe(1);
+  await expect(page.locator("#p-tier option")).toHaveText(["Recruit", "Veteran"]);
+  await page.locator("#p-coverage").check();
+  await expect.poll(() => hook(page, (h) => h.profile.coverageDrawn), { timeout: 15_000 }).toBeGreaterThan(0);
+  await page.locator("#p-open-history").click();
+  const item = page.locator(`#history .hist-item[data-match="${claims[0].matchId}"]`);
+  await expect(item).toContainText("Le Marais, Paris · Recruit");
+  await expect(item).toContainText("Cleared");
+  const [histDownload] = await Promise.all([page.waitForEvent("download"), item.locator(".hist-dl").click()]);
+  const histPath = info.outputPath("history-run.json");
+  await histDownload.saveAs(histPath);
+  // The stored record is the record the panel saved (so it verifies the same).
+  expect(JSON.parse(readFileSync(histPath, "utf8"))).toEqual(record);
 });
