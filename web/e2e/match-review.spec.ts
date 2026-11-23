@@ -78,6 +78,13 @@ test("phase buttons: a double click sends one action; Retry is off in prep; prep
   await page.waitForTimeout(500);
   expect(await hook(page, (h) => h.uiActions.count)).toBe(n0 + 1);
   expect(await hook(page, (h) => h.toast)).toBe("");
+  // The statuses of the running wave leave the Pause label's text node in
+  // place: WebKit drops a click whose mousedown text node is replaced
+  // before the mouseup, so a rewrite on every status lost presses.
+  await page.evaluate(() => ((window as unknown as { pauseText: Node | null }).pauseText = document.getElementById("pause")!.firstChild));
+  const t0 = await hook(page, (h) => h.tick);
+  await expect.poll(() => hook(page, (h) => h.tick)).toBeGreaterThan(t0 + 5);
+  expect(await page.evaluate(() => (window as unknown as { pauseText: Node | null }).pauseText === document.getElementById("pause")!.firstChild)).toBe(true);
   // Pause the wave with the button, then double-click Retry: one retry,
   // and the new prep is not paused.
   await page.locator("#pause").click();

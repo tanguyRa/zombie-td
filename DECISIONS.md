@@ -1052,6 +1052,14 @@ Every choice the spec left open, and every simplification, in one place.
   `pause_at` or a prep clearing the pause. `pause {paused}` stays for the
   test hook. A test clicks Pause twice, and presses Space twice, in one
   task and checks the wave is left unpaused and its ticks advance.
+- **Labels redrawn on every status are only written when they change
+  (pause fix).** `updateControls`, `updateHud`, `updateInspect` and the
+  targeting panel go through `setText`. Writing `textContent` replaces the
+  text node even with the same text, and WebKit fires no `click` when the
+  node under the mousedown is gone by the mouseup: in a wave (a status
+  about every 50 ms) Pause missed presses in Safari, and the e2e
+  "phase buttons" test failed 1 to 2 runs in 10. The test now checks
+  that the Pause label's text node survives the wave's statuses.
 - **Test-only speeds:** with `?test=1` (the page sends `test: true` in
   `init`; the worker refuses them otherwise) the speed may also be 16
   ticks per 50 ms or 0, "as fast as possible": the worker steps for 40 ms

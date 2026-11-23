@@ -76,6 +76,14 @@ const COLORS: [number, number, number, number][] = [
 ];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+/** Sets a label only when it changes. Writing `textContent` replaces the
+ *  element's text node even with the same text, and WebKit drops a click
+ *  whose mousedown landed on a text node replaced before the mouseup: the
+ *  controls redrawn on every status (Pause, ~20 a second in a wave) would
+ *  ignore a press that straddles one. */
+function setText(el: HTMLElement, text: string) {
+  if (el.textContent !== text) el.textContent = text;
+}
 
 // ---------------------------------------------------------------- state
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -622,13 +630,13 @@ function updateTargeting() {
   if (!sel) return;
   const c = sel.card;
   const def = CARDS.get(c.card);
-  $("sel-name").textContent = `${c.name} · ${c.cost} supply`;
+  setText($("sel-name"), `${c.name} · ${c.cost} supply`);
   const place = $("sel-place") as HTMLButtonElement;
   place.hidden = c.target !== "buildings";
   if (c.target === "buildings") {
     const max = def?.effect.buildings ?? 1;
     setHint(`Click up to ${max} highlighted building${max > 1 ? "s" : ""} (${sel.picked.length}/${max})`);
-    place.textContent = `Place (${sel.picked.length}/${max})`;
+    setText(place, `Place (${sel.picked.length}/${max})`);
     place.disabled = sel.picked.length === 0 || sel.busy;
   } else if (c.target === "polyline") {
     const limit = def?.effect.length_m;
@@ -660,15 +668,15 @@ function updateInspect() {
   const prep = phase() === "prep";
   const { repairCost, refund } = inspected;
   $("inspect").dataset.structure = String(s.id);
-  $("i-name").textContent = `${name} (wave ${s.wave})`;
+  setText($("i-name"), `${name} (wave ${s.wave})`);
   const what = s.kind.type === "fence" ? `${s.kind.length_m.toFixed(0)} m of fence` : `${s.kind.buildings.length} building${s.kind.buildings.length > 1 ? "s" : ""}`;
-  $("i-info").textContent = prep ? what : `${what} · repair and pull-down in prep only`;
+  setText($("i-info"), prep ? what : `${what} · repair and pull-down in prep only`);
   const rep = $("i-repair") as HTMLButtonElement;
   rep.hidden = s.kind.type !== "fence";
-  rep.textContent = repairCost >= 0 ? `Repair (${repairCost} supply)` : "Repair (intact)";
+  setText(rep, repairCost >= 0 ? `Repair (${repairCost} supply)` : "Repair (intact)");
   rep.disabled = !prep || repairCost < 0;
   const pull = $("i-pull") as HTMLButtonElement;
-  pull.textContent = `Pull down (+${Math.max(0, refund)} supply)`;
+  setText(pull, `Pull down (+${Math.max(0, refund)} supply)`);
   pull.disabled = !prep || refund < 0;
 }
 
@@ -1552,9 +1560,9 @@ function updateControls() {
   const startBtn = $("start") as HTMLButtonElement;
   const district = session?.gate.waiting != null;
   startBtn.disabled = phaseBusy || district || (p !== "prep" && p !== "wave_won");
-  startBtn.textContent = p === "wave_won" ? "Next wave" : "Start wave";
+  setText(startBtn, p === "wave_won" ? "Next wave" : "Start wave");
   ($("pause") as HTMLButtonElement).disabled = p !== "running";
-  $("pause").textContent = perf?.paused ? "Resume" : "Pause";
+  setText($("pause"), perf?.paused ? "Resume" : "Pause");
   for (const s of [1, 2, 4]) $(`speed-${s}`).classList.toggle("on", perf?.speed === s);
   // Retry in prep would only count a retry: the prep is already the start.
   ($("retry") as HTMLButtonElement).disabled = phaseBusy || !p || p === "prep" || p === "match_won";
@@ -1562,24 +1570,26 @@ function updateControls() {
   for (const id of ["r-next", "r-retry", "r-restart"]) ($(id) as HTMLButtonElement).disabled = phaseBusy;
   ($("r-next") as HTMLButtonElement).disabled = phaseBusy || district;
   const mull = $("mulligan") as HTMLButtonElement;
-  mull.textContent = `Mulligan (${status?.mulligan_cost ?? 1} supply)`;
+  setText(mull, `Mulligan (${status?.mulligan_cost ?? 1} supply)`);
   mull.disabled = phaseBusy || !status?.mulligan_available;
-  $("phase").textContent = !p ? "Loading" : perf?.paused && p === "running" ? "Paused" : PHASE_LABEL[p];
+  setText($("phase"), !p ? "Loading" : perf?.paused && p === "running" ? "Paused" : PHASE_LABEL[p]);
   $("phase").dataset.phase = p ?? "";
-  $("t-title").textContent = p === "running" ? "Wave" : p === "prep" ? "Prep" : "Between waves";
-  $("t-help").textContent =
+  setText($("t-title"), p === "running" ? "Wave" : p === "prep" ? "Prep" : "Between waves");
+  setText(
+    $("t-help"),
     p === "prep"
       ? "Play fortifications and armaments from your hand, click a structure to repair or pull it down, then Start wave."
       : p === "running"
         ? "Only tactical cards can be played now."
-        : "";
+        : "",
+  );
   updateInspect();
 }
 
 function updateHud() {
   const s = status;
   if (!s) return;
-  const set = (id: string, v: string) => ($(id).textContent = v);
+  const set = (id: string, v: string) => setText($(id), v);
   set("h-wave", `${s.wave}/${s.waves}`);
   set("h-time", fmtTime(s.phase === "prep" ? 0 : s.wave_tick));
   set("h-civ", s.stats.civilians.toLocaleString());
