@@ -118,4 +118,55 @@ fn verifier_deck_and_setup_messages_read_as_words() {
         MatchError::InvalidDeck(vec![DeckError::WrongSize { size: 19, expected: 20 }, DeckError::UnknownCard { card: "x".into() }]).to_string(),
         "invalid deck: a deck has exactly 20 cards, this one has 19; unknown card \"x\""
     );
+    tampered_golden_diverges_in_words(&check);
+}
+
+/// The verifier's `Diverged` messages from real tampered records (the golden
+/// record with one attempt result flipped, one attempt dropped, one added)
+/// name attempt results as words: "won", "lost", "abandoned", never
+/// `Won`, `Lost`, `Abandoned`. `check` (no Debug names, no `_`) applies to
+/// the result messages; the attempt-count ones name `extra_attempt` and
+/// `missing_attempt`, so they only get the result-name check.
+fn tampered_golden_diverges_in_words(check: &dyn Fn(String) -> String) {
+    use sim_core::match_::AttemptResult::{self, Abandoned, Lost, Won};
+    use sim_core::record::{ReplayMap, RunRecord};
+    let path = format!("{}/tests/fixtures/run_record_golden.json", env!("CARGO_MANIFEST_DIR"));
+    let golden = RunRecord::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let level = common::level("paris-marais");
+    let words = |r: AttemptResult| r.to_string();
+    assert_eq!([words(Won), words(Lost), words(Abandoned)], ["won", "lost", "abandoned"]);
+    // (what, "record / replay", the whole message)
+    let diverged = |rec: &RunRecord| -> (String, String, String) {
+        let err = sim_core::replay(rec, ReplayMap::Level(&level)).unwrap_err();
+        let msg = err.to_string();
+        for d in ["Won", "Lost", "Abandoned", "Some(", "{ "] {
+            assert!(!msg.contains(d), "{d:?} in {msg:?}");
+        }
+        match err {
+            VerifyError::Diverged { what, record, replay, .. } => {
+                assert!(msg.contains(&record) && msg.contains(&replay), "{msg:?}");
+                (what, format!("{record} / {replay}"), msg)
+            }
+            e => panic!("expected Diverged, got {e}"),
+        }
+    };
+    // One attempt result flipped, for each result the golden record holds.
+    for (from, to) in [(Won, Lost), (Lost, Abandoned), (Abandoned, Won)] {
+        let mut rec = golden.clone();
+        let i = rec.attempts.iter().position(|a| a.result == from).unwrap_or_else(|| panic!("no {from} attempt in the golden record"));
+        rec.attempts[i].result = to;
+        let (what, vals, msg) = diverged(&rec);
+        assert_eq!((what.as_str(), vals), ("result", format!("{to} / {from}")));
+        check(msg);
+    }
+    // The last attempt dropped: the replay finishes one more.
+    let mut rec = golden.clone();
+    let last = rec.attempts.pop().unwrap();
+    let (what, vals, _) = diverged(&rec);
+    assert_eq!((what.as_str(), vals), ("extra_attempt", format!("none / {} at tick {}", last.result, last.end_tick)));
+    // An attempt added: the replay never finishes it.
+    let mut rec = golden.clone();
+    rec.attempts.push(last.clone());
+    let (what, vals, _) = diverged(&rec);
+    assert_eq!((what.as_str(), vals), ("missing_attempt", format!("{} at tick {} / none", last.result, last.end_tick)));
 }

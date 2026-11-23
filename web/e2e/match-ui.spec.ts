@@ -240,14 +240,25 @@ test("pause and speed never change the simulation", async ({ page }) => {
   const t0 = await plays();
   // Run A: 1x, 4x and pauses, through the buttons, to wave tick 300.
   await hook(page, (h) => h.pauseAt(h.tick + 300));
+  // Each click waits for the worker's status to show it, and the clock runs
+  // for a number of sim ticks, never a wall-clock time.
+  const clock = () => hook(page, (h) => ({ paused: h.perf!.paused, speed: h.perf!.speed }));
   await page.locator("#speed-1").click();
+  await expect.poll(clock).toEqual({ paused: true, speed: 1 });
   await page.locator("#pause").click(); // resume
-  await page.waitForTimeout(700);
+  await expect.poll(clock).toEqual({ paused: false, speed: 1 });
+  await expect.poll(() => hook(page, (h) => h.status!.tick), { timeout: 60_000 }).toBeGreaterThanOrEqual(t0 + 20);
   await page.locator("#pause").click(); // pause
-  await page.waitForTimeout(300);
+  await expect.poll(clock).toEqual({ paused: true, speed: 1 });
+  const held = await hook(page, (h) => h.status!.tick);
+  expect(held).toBeLessThan(t0 + 300);
   await page.locator("#speed-4").click();
+  await expect.poll(clock).toEqual({ paused: true, speed: 4 });
+  expect(await hook(page, (h) => h.status!.tick)).toBe(held);
   await page.locator("#pause").click(); // resume
-  await expect.poll(() => hook(page, (h) => h.perf!.paused && h.tick === h.status!.tick), { timeout: 120_000 }).toBe(true);
+  await expect.poll(() => hook(page, (h) => h.status!.tick), { timeout: 60_000 }).toBeGreaterThan(held);
+  // Stopped by pauseAt(t0 + 300).
+  await expect.poll(() => hookWith(page, (h, end) => h.perf!.paused && h.tick === h.status!.tick && h.status!.tick >= end, t0 + 300), { timeout: 120_000 }).toBe(true);
   await expect.poll(() => hook(page, (h) => h.tick), { timeout: 120_000 }).toBe(t0 + 300);
   const a = await hook(page, (h) => h.stateHash());
   // Run B: a new match with the same seed and actions, as fast as possible.

@@ -509,6 +509,17 @@ pub enum AttemptResult {
     Abandoned,
 }
 
+impl std::fmt::Display for AttemptResult {
+    /// As the verifier's messages say it: "won", "lost", "abandoned".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AttemptResult::Won => "won",
+            AttemptResult::Lost => "lost",
+            AttemptResult::Abandoned => "abandoned",
+        })
+    }
+}
+
 /// One attempt at a wave, kept for the whole match (retries and restarts
 /// don't drop it, unlike `WaveResult`): what the run record stores so a
 /// replay can check every attempt, lost and abandoned ones too.

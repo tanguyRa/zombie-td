@@ -662,7 +662,7 @@ impl<'r> Checker<'r> {
             let a = &m.attempts()[i];
             let t = m.tick();
             let Some(r) = self.rec.attempts.get(i) else {
-                return Err(diverged(i, a.wave, t, "extra_attempt", "none".into(), format!("{:?} at tick {}", a.result, a.end_tick)));
+                return Err(diverged(i, a.wave, t, "extra_attempt", "none".into(), format!("{} at tick {}", a.result, a.end_tick)));
             };
             if r.wave != a.wave {
                 return Err(diverged(i, a.wave, t, "wave", r.wave.to_string(), a.wave.to_string()));
@@ -677,7 +677,7 @@ impl<'r> Checker<'r> {
                 return Err(diverged(i, a.wave, t, "end_tick", r.end_tick.to_string(), a.end_tick.to_string()));
             }
             if r.result != a.result {
-                return Err(diverged(i, a.wave, t, "result", format!("{:?}", r.result), format!("{:?}", a.result)));
+                return Err(diverged(i, a.wave, t, "result", r.result.to_string(), a.result.to_string()));
             }
             if r.end_hash != a.end_hash {
                 return Err(diverged(i, a.wave, t, "end_hash", hex(r.end_hash), hex(a.end_hash)));
@@ -766,7 +766,7 @@ pub fn replay_with(
     step_to(&mut m, &mut ck, end)?;
     ck.check_finished(&m)?;
     if let Some(r) = record.attempts.get(ck.verified) {
-        return Err(diverged(ck.verified, r.wave, end, "missing_attempt", format!("{:?} at tick {}", r.result, r.end_tick), "none".into()));
+        return Err(diverged(ck.verified, r.wave, end, "missing_attempt", format!("{} at tick {}", r.result, r.end_tick), "none".into()));
     }
     let n = m.attempts().len();
     let e = &record.end;

@@ -427,6 +427,10 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       if (m.phase() === "running") paused = msg.paused;
       sendStatus();
       break;
+    case "pause_toggle":
+      if (m.phase() === "running") paused = !paused;
+      sendStatus();
+      break;
     case "speed":
       if (SPEEDS.includes(msg.speed) || (testMode && TEST_SPEEDS.includes(msg.speed))) speed = msg.speed;
       else post({ type: "error", message: `speed ${msg.speed} is not allowed` });

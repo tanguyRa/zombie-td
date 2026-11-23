@@ -275,6 +275,38 @@ test("Space pauses after a click on a speed button, without clicking it again", 
   expect(await hook(page, (h) => h.perf!.speed)).toBe(2);
 });
 
+test("two quick pause presses before any status both count", async ({ page }) => {
+  await openLevel(page, MARAIS, 1);
+  await startPaused(page);
+  await page.locator("#pause").click(); // resume
+  await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(false);
+  const advances = async () => {
+    await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(false);
+    const t = await hook(page, (h) => h.status!.tick);
+    await expect.poll(() => hook(page, (h) => h.status!.tick), { timeout: 30_000 }).toBeGreaterThanOrEqual(t + 20);
+    expect(await hook(page, (h) => h.perf!.paused)).toBe(false);
+  };
+  // Two clicks in one task: no status can arrive between them, so a handler
+  // reading the last status would ask for "paused" twice and stay paused.
+  await page.evaluate(() => {
+    const b = document.getElementById("pause") as HTMLButtonElement;
+    b.click();
+    b.click();
+  });
+  await advances();
+  // The same with two Space presses (on the body, not a hand card).
+  await page.evaluate(() => {
+    for (let i = 0; i < 2; i++) document.body.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
+  });
+  await advances();
+  // An odd number of presses in one task leaves it paused.
+  await page.evaluate(() => {
+    const b = document.getElementById("pause") as HTMLButtonElement;
+    for (let i = 0; i < 3; i++) b.click();
+  });
+  await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(true);
+});
+
 test("a seed commit after a lost wave and a retry asks first", async ({ page }) => {
   test.setTimeout(240_000);
   await openLevel(page, MARAIS, 1);

@@ -1477,7 +1477,9 @@ $("seed").addEventListener("keydown", (e) => {
 });
 $("new-match").addEventListener("click", requestNewMatch);
 $("start").addEventListener("click", () => void phaseAct({ type: phase() === "wave_won" ? "next_wave" : "start_wave" }));
-$("pause").addEventListener("click", () => send({ type: "pause", paused: !perf?.paused }));
+// The worker flips its own pause: `perf` only updates on the next status, so
+// two presses before it arrives would both send the same stale value.
+$("pause").addEventListener("click", () => send({ type: "pause_toggle" }));
 for (const s of [1, 2, 4]) $(`speed-${s}`).addEventListener("click", () => send({ type: "speed", speed: s }));
 /** Retry and restart drop the selection and the inspect panel at once. */
 function resetAct(action: Action) {
@@ -1525,7 +1527,7 @@ window.addEventListener("keydown", (e) => {
   // activation, so the click is not repeated.
   if (e.key === " " && phase() === "running" && !t.closest("#hand")) {
     e.preventDefault();
-    send({ type: "pause", paused: !perf?.paused });
+    send({ type: "pause_toggle" });
   }
 });
 
