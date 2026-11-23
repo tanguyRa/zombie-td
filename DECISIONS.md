@@ -996,7 +996,7 @@ Every choice the spec left open, and every simplification, in one place.
   checks the record's `setup.seed` for 2^53 + 1).
 - **Protocol** (`web/src/protocol.ts`). To the worker: `init {levelJson,
   setup {seed, deck?}, test?}`, `stop`, `action {id, action}`, `pause`,
-  `speed`, `pause_at {tick}` (test only), `query {id, query}` (`pick`
+  `pause_toggle`, `speed`, `pause_at {tick}` (test only), `query {id, query}` (`pick`
   at a point, `fence_length` of a polyline, `costs` of a structure id,
   `agents` (test only)),
   `record {id}`, `field`, `hash` (test only). From the worker: `ready
@@ -1038,7 +1038,20 @@ Every choice the spec left open, and every simplification, in one place.
   restart) clears both the pause and `pause_at`, so a wave never starts
   paused because the previous one was. A test checks it: the same seed and actions run once
   with button clicks at 1×, paused, then 4×, and once as fast as possible,
-  hash the same at the same wave tick.
+  hash the same at the same wave tick. That test waits on the worker's
+  status and on sim ticks after each click, never on wall-clock time.
+- **Pause is toggled in the worker (T5 review).** The Pause button and
+  Space send `pause_toggle`, which the worker applies to its own `paused`
+  (only while a wave runs, like `pause`). They used to send `pause
+  {paused: !perf.paused}`, but `perf` is only as fresh as the last
+  `status`, so two presses before the next status both asked for "paused"
+  and the second was lost. The worker owns the state and applies messages
+  in order, so a toggle there needs no reconciliation; a page-side
+  "wanted" flag reconciled from status was the alternative, but it cannot
+  tell a stale in-flight status from the worker pausing itself on
+  `pause_at` or a prep clearing the pause. `pause {paused}` stays for the
+  test hook. A test clicks Pause twice, and presses Space twice, in one
+  task and checks the wave is left unpaused and its ticks advance.
 - **Test-only speeds:** with `?test=1` (the page sends `test: true` in
   `init`; the worker refuses them otherwise) the speed may also be 16
   ticks per 50 ms or 0, "as fast as possible": the worker steps for 40 ms

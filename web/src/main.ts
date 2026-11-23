@@ -1231,7 +1231,8 @@ function toast(msg: string) {
 }
 
 /** The seed input's "New match" (Enter or the button): asks first when it
- *  would throw away a running wave or a result on screen. */
+ *  would throw away any progress (only a pristine wave-1 prep is replaced
+ *  without asking). */
 function requestNewMatch() {
   // Nothing to play on yet (a streamed map before its first blocks are in).
   if (!currentLevelJson && !session?.ready) return;
@@ -1240,8 +1241,9 @@ function requestNewMatch() {
     toast("The seed must be a whole number from 0 to 18446744073709551615");
     return;
   }
-  const p = phase();
-  if ((p === "running" || shownResult !== null) && !confirm(`Start a new match with seed ${seed}? The current match will be lost.`)) return;
+  const s = status;
+  const progress = !!s && (s.wave > 1 || s.retries > 0 || s.restarts > 0 || structures.length > 0 || s.phase !== "prep");
+  if ((progress || shownResult !== null) && !confirm(`Start a new match with seed ${seed}? The current match will be lost.`)) return;
   newMatch();
 }
 
@@ -1564,7 +1566,9 @@ $("seed").addEventListener("keydown", (e) => {
 });
 $("new-match").addEventListener("click", requestNewMatch);
 $("start").addEventListener("click", () => void waveAct({ type: phase() === "wave_won" ? "next_wave" : "start_wave" }));
-$("pause").addEventListener("click", () => send({ type: "pause", paused: !perf?.paused }));
+// The worker flips its own pause: `perf` only updates on the next status, so
+// two presses before it arrives would both send the same stale value.
+$("pause").addEventListener("click", () => send({ type: "pause_toggle" }));
 for (const s of [1, 2, 4]) $(`speed-${s}`).addEventListener("click", () => send({ type: "speed", speed: s }));
 /** Retry and restart drop the selection and the inspect panel at once. */
 function resetAct(action: Action) {
@@ -1608,10 +1612,13 @@ window.addEventListener("keydown", (e) => {
     inspected = null;
     updateInspect();
   }
-  // Space on a focused button or card activates that control only.
-  if (e.key === " " && phase() === "running" && !t.closest("button, [role=button]")) {
+  // Space on a hand card or its Keep button activates that control only.
+  // Anywhere else (a toolbar button keeps focus after a click) it pauses;
+  // preventDefault here, in keydown, stops the focused button's own Space
+  // activation, so the click is not repeated.
+  if (e.key === " " && phase() === "running" && !t.closest("#hand")) {
     e.preventDefault();
-    send({ type: "pause", paused: !perf?.paused });
+    send({ type: "pause_toggle" });
   }
 });
 

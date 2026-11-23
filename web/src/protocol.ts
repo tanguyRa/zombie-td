@@ -155,6 +155,10 @@ export type ToWorker =
   | { type: "action"; id: number; action: Action }
   /** Only while a wave runs (ignored otherwise); every prep starts unpaused. */
   | { type: "pause"; paused: boolean }
+  /** Flip the worker's own pause (same rule: only while a wave runs). The
+   *  Pause button and Space send this, never `pause` with a value read from
+   *  the last `status`, which may not reflect a press still in flight. */
+  | { type: "pause_toggle" }
   /** 1, 2 or 4; with `test` also 16, and 0 = as fast as possible. */
   | { type: "speed"; speed: number }
   /** Test only: pause by itself once the match tick reaches `tick` while a

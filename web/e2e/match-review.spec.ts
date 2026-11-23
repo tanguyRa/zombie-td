@@ -252,6 +252,86 @@ test("hand cards: Enter and Space select the focused card, Space does not pause"
   await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(false);
 });
 
+test("Space pauses after a click on a speed button, without clicking it again", async ({ page }) => {
+  await openLevel(page, MARAIS, 1);
+  await startPaused(page);
+  await page.locator("#pause").click(); // resume
+  await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(false);
+  // The clicked toolbar button keeps focus (Chromium, Firefox): Space must
+  // pause, not activate #speed-2 again.
+  await page.locator("#speed-2").click();
+  await expect.poll(() => hook(page, (h) => h.perf!.speed)).toBe(2);
+  await page.keyboard.press(" ");
+  await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(true);
+  await page.waitForTimeout(300);
+  expect(await hook(page, (h) => h.perf!.paused)).toBe(true);
+  expect(await hook(page, (h) => h.perf!.speed)).toBe(2);
+  // A focused #speed-4: Space resumes and the speed stays at 2.
+  await page.locator("#speed-4").focus();
+  await page.keyboard.press(" ");
+  await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(false);
+  await page.waitForTimeout(300);
+  expect(await hook(page, (h) => h.perf!.paused)).toBe(false);
+  expect(await hook(page, (h) => h.perf!.speed)).toBe(2);
+});
+
+test("two quick pause presses before any status both count", async ({ page }) => {
+  await openLevel(page, MARAIS, 1);
+  await startPaused(page);
+  await page.locator("#pause").click(); // resume
+  await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(false);
+  const advances = async () => {
+    await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(false);
+    const t = await hook(page, (h) => h.status!.tick);
+    await expect.poll(() => hook(page, (h) => h.status!.tick), { timeout: 30_000 }).toBeGreaterThanOrEqual(t + 20);
+    expect(await hook(page, (h) => h.perf!.paused)).toBe(false);
+  };
+  // Two clicks in one task: no status can arrive between them, so a handler
+  // reading the last status would ask for "paused" twice and stay paused.
+  await page.evaluate(() => {
+    const b = document.getElementById("pause") as HTMLButtonElement;
+    b.click();
+    b.click();
+  });
+  await advances();
+  // The same with two Space presses (on the body, not a hand card).
+  await page.evaluate(() => {
+    for (let i = 0; i < 2; i++) document.body.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
+  });
+  await advances();
+  // An odd number of presses in one task leaves it paused.
+  await page.evaluate(() => {
+    const b = document.getElementById("pause") as HTMLButtonElement;
+    for (let i = 0; i < 3; i++) b.click();
+  });
+  await expect.poll(() => hook(page, (h) => h.perf!.paused)).toBe(true);
+});
+
+test("a seed commit after a lost wave and a retry asks first", async ({ page }) => {
+  test.setTimeout(240_000);
+  await openLevel(page, MARAIS, 1);
+  const seedOf = () => hook(page, async (h) => JSON.parse(await h.record()).setup.seed as string);
+  // Lose wave 1 (no defence), as fast as the clock goes, then Retry.
+  await startPaused(page);
+  await hook(page, (h) => h.speed(16));
+  await page.locator("#pause").click(); // resume
+  await expect.poll(() => hook(page, (h) => h.phase), { timeout: 180_000, intervals: [250, 500, 1000] }).toBe("wave_lost");
+  expect(await uiAction(page, () => page.locator("#r-retry").click())).toBeNull();
+  await expect.poll(() => hook(page, (h) => h.phase === "prep" && h.status!.retries === 1)).toBe(true);
+  // Back in a wave-1 prep, but not a pristine one: a new seed asks.
+  let asked = "";
+  page.once("dialog", (d) => {
+    asked = d.message();
+    void d.dismiss();
+  });
+  await page.locator("#seed").fill("7");
+  await page.locator("#seed").press("Enter");
+  await expect.poll(() => asked).toMatch(/^Start a new match with seed 7\?/);
+  await page.waitForTimeout(700);
+  expect(await seedOf()).toBe("1");
+  expect(await hook(page, (h) => h.status!.retries)).toBe(1);
+});
+
 test("a click inside a garrisoned building inspects its garrison, not a fence next to it", async ({ page }) => {
   await openLevel(page, MARAIS, 1);
   // A building and a fence that leaves it from inside (the fence is

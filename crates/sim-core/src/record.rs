@@ -103,6 +103,15 @@ pub enum MapSource {
     Chunks,
 }
 
+impl std::fmt::Display for MapSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MapSource::Level => "whole-level",
+            MapSource::Chunks => "streamed-chunk",
+        })
+    }
+}
+
 /// The map a run was played on.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -207,6 +216,35 @@ fn outcome_of(m: &Match) -> (u32, Vec<WaveOutcome>) {
     let waves: Vec<WaveOutcome> =
         m.results().iter().map(|r| WaveOutcome { wave: r.wave, won: r.won, start_civilians: r.start_civilians, end_civilians: r.end_civilians, saved: r.saved() }).collect();
     (waves.iter().filter(|w| w.won).count() as u32, waves)
+}
+
+/// The first difference between the record's wave outcomes and the
+/// replay's, in words (`what`, record, replay): the wave count, or one
+/// field of the first wave that differs. `None` when they are equal.
+fn first_wave_difference(rec: &[WaveOutcome], rep: &[WaveOutcome]) -> Option<(String, String, String)> {
+    if rec.len() != rep.len() {
+        return Some(("wave count".into(), rec.len().to_string(), rep.len().to_string()));
+    }
+    let won = |w: bool| if w { "won" } else { "lost" }.to_string();
+    for (i, (r, p)) in rec.iter().zip(rep).enumerate() {
+        let n = r.wave;
+        if r.wave != p.wave {
+            return Some((format!("wave number at position {}", i + 1), r.wave.to_string(), p.wave.to_string()));
+        }
+        if r.won != p.won {
+            return Some((format!("wave {n} result"), won(r.won), won(p.won)));
+        }
+        if r.start_civilians != p.start_civilians {
+            return Some((format!("wave {n} start civilians"), r.start_civilians.to_string(), p.start_civilians.to_string()));
+        }
+        if r.end_civilians != p.end_civilians {
+            return Some((format!("wave {n} end civilians"), r.end_civilians.to_string(), p.end_civilians.to_string()));
+        }
+        if r.saved.to_bits() != p.saved.to_bits() {
+            return Some((format!("wave {n} share saved"), r.saved.to_string(), p.saved.to_string()));
+        }
+    }
+    None
 }
 
 impl RunRecord {
@@ -452,7 +490,7 @@ impl std::fmt::Display for VerifyError {
             SimVersion { record, verifier } => write!(f, "recorded with sim rules version {record}, this verifier runs version {verifier}"),
             ConfigHash { record, verifier } => write!(f, "config hash {record} differs from the verifier's {verifier}"),
             CardsHash { record, verifier } => write!(f, "cards hash {record} differs from the verifier's {verifier}"),
-            MapSource { record } => write!(f, "the run was played on {record:?} map data; give the matching --level, or --chunks with --shell"),
+            MapSource { record } => write!(f, "the run was played on {record} map data; give the matching --level, or --chunks with --shell"),
             MapShell => write!(f, "the map shell given (radius, bounds, centre or fences) differs from the record's"),
             BadShell { reason } => write!(f, "the record's map shell is out of bounds: {reason}"),
             Unexpected { what, record, expected } => write!(f, "the record's {what} is {record}, the server issued {expected}"),
@@ -464,11 +502,11 @@ impl std::fmt::Display for VerifyError {
             OutOfOrder { index, tick, previous } => write!(f, "action {index} at tick {tick} comes after tick {previous}"),
             FutureTick { index, tick, end_tick } => write!(f, "action {index} at tick {tick} is past the record's end (tick {end_tick})"),
             IllegalAction { index, tick, action, reason } => write!(f, "action {index} ({action}) at tick {tick} is illegal: {reason}"),
-            TooLong { attempt, wave, phase, ticks, max } => write!(f, "attempt {attempt} (wave {wave}) stayed in {phase:?} for {ticks} ticks, the limit is {max}"),
+            TooLong { attempt, wave, phase, ticks, max } => write!(f, "attempt {attempt} (wave {wave}) stayed in {phase} for {ticks} ticks, the limit is {max}"),
             Diverged { attempt, wave, tick, what, record, replay } => {
                 write!(f, "diverged at attempt {attempt} (wave {wave}), tick {tick}: {what} is {replay} in the replay, {record} in the record")
             }
-            Unfinished { phase, wave } => write!(f, "the record ends in {phase:?} at wave {wave} without being marked abandoned"),
+            Unfinished { phase, wave } => write!(f, "the record ends in {phase} at wave {wave} without being marked abandoned"),
             Outcome { what, record, replay } => write!(f, "outcome {what}: record says {record}, replay gives {replay}"),
             Cancelled { tick } => write!(f, "replay cancelled at tick {tick}"),
         }
@@ -552,7 +590,12 @@ fn precheck(record: &RunRecord, expected: Option<&ExpectedRun>, cfg: &Config, ca
             return unexpected("seed", s.seed.to_string(), seed.to_string());
         }
         if let Some(deck) = x.deck.as_ref().filter(|d| **d != s.deck) {
-            return unexpected("deck", format!("{:?}", s.deck), format!("{deck:?}"));
+            // The first difference, in words: the size, or the first card.
+            if deck.len() != s.deck.len() {
+                return unexpected("deck size", s.deck.len().to_string(), deck.len().to_string());
+            }
+            let (i, (r, x)) = s.deck.iter().zip(deck).enumerate().find(|(_, (r, x))| r != x).expect("decks of one size differ in a card");
+            return unexpected(&format!("deck card {}", i + 1), format!("{r:?}"), format!("{x:?}"));
         }
         if let Some(k) = x.population_multiplier.filter(|k| k.to_bits() != s.population_multiplier.to_bits()) {
             return unexpected("population_multiplier", s.population_multiplier.to_string(), k.to_string());
@@ -653,7 +696,7 @@ impl<'r> Checker<'r> {
             let a = &m.attempts()[i];
             let t = m.tick();
             let Some(r) = self.rec.attempts.get(i) else {
-                return Err(diverged(i, a.wave, t, "extra_attempt", "none".into(), format!("{:?} at tick {}", a.result, a.end_tick)));
+                return Err(diverged(i, a.wave, t, "extra_attempt", "none".into(), format!("{} at tick {}", a.result, a.end_tick)));
             };
             if r.wave != a.wave {
                 return Err(diverged(i, a.wave, t, "wave", r.wave.to_string(), a.wave.to_string()));
@@ -668,7 +711,7 @@ impl<'r> Checker<'r> {
                 return Err(diverged(i, a.wave, t, "end_tick", r.end_tick.to_string(), a.end_tick.to_string()));
             }
             if r.result != a.result {
-                return Err(diverged(i, a.wave, t, "result", format!("{:?}", r.result), format!("{:?}", a.result)));
+                return Err(diverged(i, a.wave, t, "result", r.result.to_string(), a.result.to_string()));
             }
             if r.end_hash != a.end_hash {
                 return Err(diverged(i, a.wave, t, "end_hash", hex(r.end_hash), hex(a.end_hash)));
@@ -757,12 +800,12 @@ pub fn replay_with(
     step_to(&mut m, &mut ck, end)?;
     ck.check_finished(&m)?;
     if let Some(r) = record.attempts.get(ck.verified) {
-        return Err(diverged(ck.verified, r.wave, end, "missing_attempt", format!("{:?} at tick {}", r.result, r.end_tick), "none".into()));
+        return Err(diverged(ck.verified, r.wave, end, "missing_attempt", format!("{} at tick {}", r.result, r.end_tick), "none".into()));
     }
     let n = m.attempts().len();
     let e = &record.end;
     if e.phase != m.phase() || e.wave != m.wave() {
-        return Err(diverged(n, m.wave(), end, "phase", format!("{:?} wave {}", e.phase, e.wave), format!("{:?} wave {}", m.phase(), m.wave())));
+        return Err(diverged(n, m.wave(), end, "phase", format!("{} (wave {})", e.phase, e.wave), format!("{} (wave {})", m.phase(), m.wave())));
     }
     // The open attempt's start tick and prep hash: checked when its prep
     // opened only if the record ends in that prep or wave; a record ending
@@ -782,7 +825,9 @@ pub fn replay_with(
     out("waves_won", e.waves_won.to_string(), waves_won.to_string())?;
     out("retries", e.retries.to_string(), m.retries().to_string())?;
     out("restarts", e.restarts.to_string(), m.restarts().to_string())?;
-    out("waves", format!("{:?}", e.waves), format!("{waves:?}"))?;
+    if let Some((what, r, p)) = first_wave_difference(&e.waves, &waves) {
+        return Err(VerifyError::Outcome { what, record: r, replay: p });
+    }
     Ok(ReplaySummary {
         setup: record.setup.clone(),
         setup_checked: expected.is_some_and(|x| !x.is_empty()),

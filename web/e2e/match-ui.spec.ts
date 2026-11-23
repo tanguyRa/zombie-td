@@ -127,7 +127,8 @@ test("invalid plays are refused with the core's reason", async ({ page }) => {
   const err = await uiAction(page, async () => {
     await clickCard(page, 2);
     await expect(page.locator("#hint")).toHaveText("Click up to 3 highlighted buildings (0/3)");
-    expect(await hook(page, (h) => h.drawn.layers)).toContain("valid");
+    // `drawn` is rebuilt each animation frame: poll, a one-shot read can see the previous frame.
+    await expect.poll(() => hook(page, (h) => h.drawn.layers)).toContain("valid");
     for (const k of inner.slice(0, 3)) {
       const p = (await hookWith(page, (h, i) => h.buildingPoint(i), k))!;
       await clickSim(page, p[0], p[1]);
@@ -200,10 +201,9 @@ test("fog: the next ring is darkened and holds no agents", async ({ page }) => {
   await openLevel(page, MARAIS, 1);
   const st = (await hook(page, (h) => h.status))!;
   await expect.poll(() => hook(page, (h) => h.drawn.layers)).toContain("fog");
-  const d = await hook(page, (h) => h.drawn);
-  expect(d.layers).toEqual(expect.arrayContaining(["outside", "fog", "buildings", "agents"]));
-  expect(d.fogRadius.revealed).toBeCloseTo(st.radius_m, 3);
-  expect(d.fogRadius.next).toBeCloseTo(st.next_radius_m, 3);
+  await expect.poll(() => hook(page, (h) => h.drawn.layers)).toEqual(expect.arrayContaining(["outside", "fog", "buildings", "agents"]));
+  await expect.poll(() => hook(page, (h) => h.drawn.fogRadius.revealed)).toBeCloseTo(st.radius_m, 3);
+  await expect.poll(() => hook(page, (h) => h.drawn.fogRadius.next)).toBeCloseTo(st.next_radius_m, 3);
   expect(st.next_radius_m).toBeGreaterThan(st.radius_m);
   // Buildings of the next ring are drawn (they are visible through the fog).
   const ring2 = await hook(page, (h) => h.buildings.filter((b) => b.wave === 2).length);
@@ -223,7 +223,8 @@ test("fog: the next ring is darkened and holds no agents", async ({ page }) => {
   await hook(page, (h) => h.startWave());
   await runTo(page, st.tick + 400);
   expect(await outside(st.radius_m + 2)).toBe(0);
-  expect(await hook(page, (h) => h.drawn.agents)).toBe(await hook(page, (h) => h.status!.stats.civilians + h.status!.stats.infected + h.status!.stats.zombies + h.status!.stats.dead));
+  const total = await hook(page, (h) => h.status!.stats.civilians + h.status!.stats.infected + h.status!.stats.zombies + h.status!.stats.dead);
+  await expect.poll(() => hook(page, (h) => h.drawn.agents)).toBe(total);
 });
 
 test("pause and speed never change the simulation", async ({ page }) => {
@@ -239,14 +240,25 @@ test("pause and speed never change the simulation", async ({ page }) => {
   const t0 = await plays();
   // Run A: 1x, 4x and pauses, through the buttons, to wave tick 300.
   await hook(page, (h) => h.pauseAt(h.tick + 300));
+  // Each click waits for the worker's status to show it, and the clock runs
+  // for a number of sim ticks, never a wall-clock time.
+  const clock = () => hook(page, (h) => ({ paused: h.perf!.paused, speed: h.perf!.speed }));
   await page.locator("#speed-1").click();
+  await expect.poll(clock).toEqual({ paused: true, speed: 1 });
   await page.locator("#pause").click(); // resume
-  await page.waitForTimeout(700);
+  await expect.poll(clock).toEqual({ paused: false, speed: 1 });
+  await expect.poll(() => hook(page, (h) => h.status!.tick), { timeout: 60_000 }).toBeGreaterThanOrEqual(t0 + 20);
   await page.locator("#pause").click(); // pause
-  await page.waitForTimeout(300);
+  await expect.poll(clock).toEqual({ paused: true, speed: 1 });
+  const held = await hook(page, (h) => h.status!.tick);
+  expect(held).toBeLessThan(t0 + 300);
   await page.locator("#speed-4").click();
+  await expect.poll(clock).toEqual({ paused: true, speed: 4 });
+  expect(await hook(page, (h) => h.status!.tick)).toBe(held);
   await page.locator("#pause").click(); // resume
-  await expect.poll(() => hook(page, (h) => h.perf!.paused && h.tick === h.status!.tick), { timeout: 120_000 }).toBe(true);
+  await expect.poll(() => hook(page, (h) => h.status!.tick), { timeout: 60_000 }).toBeGreaterThan(held);
+  // Stopped by pauseAt(t0 + 300).
+  await expect.poll(() => hookWith(page, (h, end) => h.perf!.paused && h.tick === h.status!.tick && h.status!.tick >= end, t0 + 300), { timeout: 120_000 }).toBe(true);
   await expect.poll(() => hook(page, (h) => h.tick), { timeout: 120_000 }).toBe(t0 + 300);
   const a = await hook(page, (h) => h.stateHash());
   // Run B: a new match with the same seed and actions, as fast as possible.

@@ -253,7 +253,28 @@ pub enum MatchError {
 
 impl std::fmt::Display for MatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            MatchError::InvalidConfig(reason) => write!(f, "invalid config: {reason}"),
+            MatchError::NoPlayArea => write!(f, "the level has no play area (neither a radius nor bounds)"),
+            MatchError::LevelHasBuildings => write!(f, "a streamed match starts from a level without buildings (they come in chunks)"),
+            MatchError::DuplicateBlock(id) => write!(f, "map block {id} was added twice"),
+            MatchError::BadChunk(id) => write!(f, "map block {id} has invalid bounds or building data"),
+            MatchError::AreaRevealed(id) => write!(f, "map block {id} arrived after its area was revealed"),
+            MatchError::BuildingOutsideBlock { block_id, building_id } => write!(f, "building {building_id} sticks out of map block {block_id}"),
+            MatchError::RingNotLoaded(wave) => write!(f, "the district of wave {wave} is not loaded"),
+            MatchError::InvalidDeck(errs) => {
+                f.write_str("invalid deck: ")?;
+                for (i, e) in errs.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str("; ")?;
+                    }
+                    write!(f, "{e}")?;
+                }
+                Ok(())
+            }
+            MatchError::InvalidSetup(reason) => write!(f, "invalid match setup: {reason}"),
+            MatchError::BadShell(reason) => write!(f, "invalid map shell: {reason}"),
+        }
     }
 }
 
@@ -344,7 +365,7 @@ impl ShellLimits {
         if let Some([x0, y0, x1, y1]) = shell.bounds {
             let inside = [x0, y0, x1, y1].iter().all(|v| v.is_finite() && v.abs() <= ext);
             if !inside || !(x0 < x1 && y0 < y1) || x1 - x0 > ext || y1 - y0 > ext {
-                return Err(format!("bounds {:?} must be finite, ordered, within {ext} m of the origin and at most {ext} m wide and high", [x0, y0, x1, y1]));
+                return Err(format!("bounds from ({x0}, {y0}) to ({x1}, {y1}) must be finite, ordered, within {ext} m of the origin and at most {ext} m wide and high"));
             }
         }
         if shell.fences.len() > self.max_fences {
@@ -486,6 +507,17 @@ pub enum AttemptResult {
     Lost,
     /// Left by `RetryWave` or `RestartMatch` during its prep or while it ran.
     Abandoned,
+}
+
+impl std::fmt::Display for AttemptResult {
+    /// As the verifier's messages say it: "won", "lost", "abandoned".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AttemptResult::Won => "won",
+            AttemptResult::Lost => "lost",
+            AttemptResult::Abandoned => "abandoned",
+        })
+    }
 }
 
 /// One attempt at a wave, kept for the whole match (retries and restarts
@@ -1192,7 +1224,7 @@ impl Match {
                 }
                 for (k, &b) in bs.iter().enumerate() {
                     if bs[..k].contains(&b) {
-                        return Err(ActionError::Placement { reason: format!("building {b} chosen twice") });
+                        return Err(ActionError::Placement { reason: "the same building is chosen twice".into() });
                     }
                     if !self.building_revealed(b) {
                         return Err(ActionError::NotRevealed { building: b });
