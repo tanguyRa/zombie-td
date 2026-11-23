@@ -113,12 +113,18 @@
           <button id="r-retry">Retry wave</button>
           <button id="r-restart">Restart match</button>
           <button id="r-download" class="primary">Download run record</button>
+          <button id="r-download-map" title="The streamed map of this run (shell and blocks), to verify the record headless">Download map</button>
           <button id="r-map">New location</button>
           <button id="r-close">Close</button>
         </div>
       </div>
     </div>
 
+    <div id="district" role="status" aria-live="polite" hidden>
+      <span id="d-msg"></span>
+      <progress id="d-bar" max="1" value="0"></progress>
+      <button id="d-retry" class="primary" hidden>Retry loading</button>
+    </div>
     <div id="toast" hidden></div>
     <div id="loading">
       <div class="card prep">

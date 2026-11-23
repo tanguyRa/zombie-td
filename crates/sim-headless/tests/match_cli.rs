@@ -119,6 +119,20 @@ fn streamed_run_verifies_with_a_shell_file() {
     let (code, s) = verify(&run, &["--expect-seed", "5"]);
     assert_eq!(code, Some(0), "{s}");
     assert!(s.contains("\"map_source\": \"chunks\"") && s.contains("\"shell_hash\""), "{s}");
+    // A map bundle (the browser's "Download map"): the shell with the
+    // chunks in it, given as both --chunks and --shell.
+    let mut bundle = shell_json.clone();
+    bundle["fences"] = serde_json::json!([]);
+    bundle["chunks"] = serde_json::from_str(&std::fs::read_to_string(&chunks_path).unwrap()).unwrap();
+    let bundle_path = dir.join("map.json");
+    std::fs::write(&bundle_path, bundle.to_string()).unwrap();
+    let out = Command::new(bin).arg("verify").arg(&run).arg("--chunks").arg(&bundle_path).arg("--shell").arg(&bundle_path).arg("--quiet").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+    let not_chunks = dir.join("not-chunks.json");
+    std::fs::write(&not_chunks, "{\"name\": \"x\"}").unwrap();
+    let out = Command::new(bin).arg("verify").arg(&run).arg("--chunks").arg(&not_chunks).arg("--shell").arg(&shell_path).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not a chunk list or a map bundle"));
     let mut forged = rec.clone();
     forged.map.shell.radius_m = Some(160.0);
     let bad = dir.join("forged.json");

@@ -133,8 +133,7 @@ export function fakeOverpass(ways: OsmWay[]): FakeOverpass {
       bodies--;
       return new Response(JSON.stringify(body200), { status: 200, headers: { "content-type": "application/json" } });
     }
-    // levelgen.ts's `around:` query gets every way (the fixture is one area).
-    const elements = query.includes("(around:") ? ways : ways.filter((w) => call.bboxes.some((b) => wayInBbox(w, b)));
+    const elements = ways.filter((w) => call.bboxes.some((b) => wayInBbox(w, b)));
     return new Response(JSON.stringify({ elements }), { status: 200, headers: { "content-type": "application/json" } });
   };
   return {

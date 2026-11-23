@@ -289,6 +289,19 @@ export class MapLoader {
     return true;
   }
 
+  /// How many of the blocks waves 1..wave need are loaded, out of how many.
+  ringProgress(wave: number): { loaded: number; needed: number } {
+    const w = Math.min(Math.max(wave, 0), this.waveBlocks.length);
+    let loaded = 0;
+    let needed = 0;
+    for (let k = 0; k < w; k++)
+      for (const id of this.waveBlocks[k]) {
+        needed++;
+        if (this.loaded.has(id)) loaded++;
+      }
+    return { loaded, needed };
+  }
+
   /// Resolves when `ringReady(wave)`. Rejects after `abort()`, or when a
   /// block the wave needs failed for good (all attempts used; a later
   /// `retryFailed()` can still load it, call `whenRingReady` again then).

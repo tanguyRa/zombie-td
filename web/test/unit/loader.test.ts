@@ -190,6 +190,12 @@ describe("MapLoader", () => {
     expect(l.ringReady(4)).toBe(false);
     expect(l.ringReady(8)).toBe(false);
     expect(resolved).toBe(false);
+    // Progress counts the blocks of waves 1..w (T6b's "n / m blocks").
+    const needed = (w: number) => l.waveBlocks.slice(0, w).flat().length;
+    expect(l.ringProgress(3)).toEqual({ loaded: needed(3), needed: needed(3) });
+    expect(l.ringProgress(4)).toEqual({ loaded: needed(4) - 1, needed: needed(4) });
+    expect(l.ringProgress(0)).toEqual({ loaded: 0, needed: 0 });
+    expect(l.ringProgress(99)).toEqual(l.ringProgress(8));
     gate.release();
     await ready4;
     await l.done();

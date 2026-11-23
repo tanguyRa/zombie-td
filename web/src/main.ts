@@ -8,7 +8,7 @@ import parisUrl from "../../levels/paris-marais.json?url";
 import suburbUrl from "../../levels/suburb.json?url";
 import cardsJson from "../../cards.json?raw";
 import { Place, createExplore } from "./explore";
-import { generateLevel } from "./levelgen";
+import { MapSession } from "./mapsession";
 import { parseSeed } from "./seed";
 import {
   Action,
@@ -21,6 +21,7 @@ import {
   H_SEQ,
   H_TIME,
   HandCard,
+  MatchMap,
   MatchStatus,
   Perf,
   Pick,
@@ -79,10 +80,16 @@ worker.addEventListener("error", (e) => {
 });
 
 const TEST_MODE = new URLSearchParams(location.search).get("test") === "1";
+/** Test mode retries a failed Overpass query after 50 ms instead of 1 s
+ *  (doubling each time): a clock control, the blocks are the same. */
+const TEST_BACKOFF_MS = 50;
 
 let level: StaticLevel | null = null;
 let currentPlace: Place | null = null;
+// The map of the place on screen: a built-in level pack, or a picked
+// place's streamed map (null until it is ready, and after "← Map").
 let currentLevelJson = "";
+let session: MapSession | null = null;
 const levelCache = new Map<string, string>();
 let prepAbort: AbortController | null = null;
 let shared: SharedArrayBuffer | null = null;
@@ -217,15 +224,39 @@ async function uiAct(action: Action): Promise<ActionError | null> {
 /** A phase-changing action from a button: one at a time (a double click
  *  sends one action, never a second retry or a refused second start). */
 async function phaseAct(action: Action): Promise<void> {
-  if (phaseBusy) return;
+  await phaseActResult(action);
+}
+async function phaseActResult(action: Action): Promise<ActionError | null> {
+  if (phaseBusy) return null;
   phaseBusy = true;
   updateControls();
   try {
-    await uiAct(action);
+    return await uiAct(action);
   } finally {
     phaseBusy = false;
     updateControls();
   }
+}
+
+/** Start or Next wave from a button. On a streamed map the ring it opens
+ *  must be loaded first: until then the banner says "Loading the next
+ *  district…" (or shows the error and Retry loading), and the action is sent
+ *  as soon as the ring is in. The worker adds every chunk it was sent before
+ *  the action (they are posted first), so the core finds the ring ready. */
+async function waveAct(action: Action): Promise<void> {
+  if (phaseBusy || !status) return;
+  const s = session;
+  const wave = action.type === "next_wave" ? status.wave + 1 : status.wave;
+  if (s && !s.loader.ringReady(wave)) {
+    if (s.gate.waiting !== null) return; // already waiting for it
+    const wait = s.gate.wait(wave);
+    updateControls(); // Start / Next wave disabled while it waits
+    const ok = await wait;
+    updateControls();
+    if (!ok || session !== s) return;
+  }
+  const e = await phaseActResult(action);
+  if (e?.error === "ring_not_loaded") console.error("streamed map: the core says the ring is not loaded although the loader has it", e, s?.info());
 }
 
 // ---------------------------------------------------------------- map + deck overlay
@@ -319,6 +350,10 @@ if (TEST_MODE) {
       toSim,
       toLngLat,
       enterPreset: (i) => enterGame(PRESETS[i]),
+      enterPlace: (lat, lon, name) => enterGame({ lat, lon, name }),
+      streamMap: () => session?.info() ?? null,
+      mapBundle: mapBundleJson,
+      district: () => ({ visible: !$("district").hidden, state: $("district").dataset.state ?? "", text: $("d-msg").textContent ?? "" }),
       newMatch: (seed) => {
         // The seed input plus Enter, without the confirmation.
         ($("seed") as HTMLInputElement).value = String(seed);
@@ -1161,6 +1196,10 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       if (m.fatal) prepError(m.message);
       else toast(m.message);
       break;
+    case "map":
+      session?.onWorker(m);
+      if (m.refused.length) toast(`Map error: the match refused ${m.refused.length} block${m.refused.length > 1 ? "s" : ""} (see the console)`);
+      break;
     case "field":
       fieldImage = buildFieldImage(m.data, m.w, m.h);
       break;
@@ -1194,7 +1233,8 @@ function toast(msg: string) {
 /** The seed input's "New match" (Enter or the button): asks first when it
  *  would throw away a running wave or a result on screen. */
 function requestNewMatch() {
-  if (!currentLevelJson) return;
+  // Nothing to play on yet (a streamed map before its first blocks are in).
+  if (!currentLevelJson && !session?.ready) return;
   const seed = parseSeed(($("seed") as HTMLInputElement).value);
   if (seed === null) {
     toast("The seed must be a whole number from 0 to 18446744073709551615");
@@ -1207,7 +1247,8 @@ function requestNewMatch() {
 
 /** A new match on the current level (the seed input's seed, starter deck). */
 function newMatch() {
-  if (!currentLevelJson) return;
+  // Nothing to play on yet (a streamed map before its first blocks are in).
+  if (!currentLevelJson && !session?.ready) return;
   const seed = parseSeed(($("seed") as HTMLInputElement).value);
   if (seed === null) {
     toast("The seed must be a whole number from 0 to 18446744073709551615");
@@ -1229,7 +1270,11 @@ function newMatch() {
   clearSelection();
   updateControls();
   // The starter deck ("Civil Defence Issue") until the deck builder (T7b).
-  send({ type: "init", levelJson: currentLevelJson, setup: { seed }, test: TEST_MODE });
+  session?.gate.cancel();
+  const s = session;
+  // A streamed map: the chunks loaded so far, then each later one as it arrives.
+  const map: MatchMap = s ? s.matchMap((chunk) => session === s && send({ type: "chunk", chunk })) : { level: currentLevelJson };
+  send({ type: "init", map, setup: { seed }, test: TEST_MODE });
 }
 
 // ---------------------------------------------------------------- screens
@@ -1264,18 +1309,17 @@ async function enterGame(place: Place) {
   fitView();
   updateControls();
   prepAbort?.abort();
+  session?.abort();
+  session = null;
+  currentLevelJson = "";
   const abort = new AbortController();
   prepAbort = abort;
+  if (!place.presetUrl) return enterStreamed(place, abort);
   try {
     let json = levelCache.get(placeKey(place));
     if (!json) {
-      if (place.presetUrl) {
-        prepStatus("Loading level…");
-        json = await (await fetch(place.presetUrl, { signal: abort.signal })).text();
-      } else {
-        const pack = await generateLevel(place.name, place.lat, place.lon, prepStatus, abort.signal);
-        json = JSON.stringify(pack);
-      }
+      prepStatus("Loading level…");
+      json = await (await fetch(place.presetUrl!, { signal: abort.signal })).text();
       levelCache.set(placeKey(place), json);
     }
     if (abort.signal.aborted) return;
@@ -1290,8 +1334,33 @@ async function enterGame(place: Place) {
   }
 }
 
+/** A picked place: its map streams in blocks (waves 1–2 first, then the
+ *  rest in the background, closest ring first), cached in IndexedDB. */
+async function enterStreamed(place: Place, abort: AbortController) {
+  let s: MapSession | null = null;
+  try {
+    s = await MapSession.open(place.name, place.lat, place.lon, TEST_MODE ? { backoffMs: TEST_BACKOFF_MS } : {});
+    if (abort.signal.aborted) return s.abort();
+    session = s;
+    setGeo(s.shell.center_lat, s.shell.center_lon);
+    await s.start((loaded, needed) => {
+      if (session === s) prepStatus(`Downloading the map… ${loaded} / ${needed} blocks`);
+    });
+    if (session !== s) return;
+    $("place").title = `${place.name} · streamed map, radius ${s.shell.radius_m} m · first blocks in ${(s.firstLoadMs / 1000).toFixed(1)} s`;
+    newMatch();
+  } catch (e) {
+    if (abort.signal.aborted || (s && session !== s)) return;
+    s?.abort();
+    session = null;
+    prepError(e instanceof Error ? e.message : String(e));
+  }
+}
+
 function backToMap() {
   prepAbort?.abort();
+  session?.abort();
+  session = null;
   send({ type: "stop" });
   level = null;
   status = null;
@@ -1317,7 +1386,8 @@ const PHASE_LABEL: Record<string, string> = { prep: "Prep", running: "Outbreak",
 function updateControls() {
   const p = phase();
   const startBtn = $("start") as HTMLButtonElement;
-  startBtn.disabled = phaseBusy || (p !== "prep" && p !== "wave_won");
+  const district = session?.gate.waiting != null;
+  startBtn.disabled = phaseBusy || district || (p !== "prep" && p !== "wave_won");
   startBtn.textContent = p === "wave_won" ? "Next wave" : "Start wave";
   ($("pause") as HTMLButtonElement).disabled = p !== "running";
   $("pause").textContent = perf?.paused ? "Resume" : "Pause";
@@ -1326,6 +1396,7 @@ function updateControls() {
   ($("retry") as HTMLButtonElement).disabled = phaseBusy || !p || p === "prep" || p === "match_won";
   ($("restart") as HTMLButtonElement).disabled = phaseBusy || !p;
   for (const id of ["r-next", "r-retry", "r-restart"]) ($(id) as HTMLButtonElement).disabled = phaseBusy;
+  ($("r-next") as HTMLButtonElement).disabled = phaseBusy || district;
   const mull = $("mulligan") as HTMLButtonElement;
   mull.textContent = `Mulligan (${status?.mulligan_cost ?? 1} supply)`;
   mull.disabled = phaseBusy || !status?.mulligan_available;
@@ -1376,6 +1447,9 @@ let shownResult: string | null = null;
 /** The phase changed, or a retry or restart opened a new prep (`reset`). */
 function onPhaseChange(reset = false) {
   const p = phase();
+  // A district wait belongs to the screen it was asked from (a retry or a
+  // restart from the result panel ends it).
+  session?.gate.cancel();
   // A selection belongs to one phase: the card's rules, the hint and the
   // hand all change with it.
   if (sel) clearSelection();
@@ -1445,23 +1519,38 @@ function showResult(kind: string) {
   ($("r-next") as HTMLButtonElement).hidden = kind !== "wave_won";
   ($("r-retry") as HTMLButtonElement).hidden = kind === "match_won";
   ($("r-download") as HTMLButtonElement).hidden = kind !== "match_won";
+  ($("r-download-map") as HTMLButtonElement).hidden = kind !== "match_won" || !session;
   ($("r-map") as HTMLButtonElement).hidden = kind !== "match_won";
   $("r-retry").classList.toggle("primary", kind === "wave_lost");
   $("result").hidden = false;
   shownResult = kind;
 }
 
-async function downloadRecord() {
-  const json = await fetchRecord();
+function saveJson(json: string, kind: string) {
   const blob = new Blob([json], { type: "application/json" });
   const a = document.createElement("a");
   const place = (currentPlace?.name ?? "match").normalize("NFKD").replace(/[^\w]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
   a.href = URL.createObjectURL(blob);
-  a.download = `zombie-td-run-${place}-seed${matchSeed}.json`;
+  a.download = `zombie-td-${kind}-${place}-seed${matchSeed}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function downloadRecord() {
+  saveJson(await fetchRecord(), "run");
+}
+
+/** The streamed map of this run (shell + the record's blocks): verify with
+ *  `sim-headless verify run.json --chunks map.json --shell map.json`. */
+async function mapBundleJson(): Promise<string> {
+  const s = session;
+  if (!s) throw new Error("not a streamed match");
+  return s.bundle(await fetchRecord());
+}
+async function downloadMap() {
+  saveJson(await mapBundleJson(), "map");
 }
 
 // ---------------------------------------------------------------- wiring
@@ -1474,7 +1563,7 @@ $("seed").addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Enter") requestNewMatch();
 });
 $("new-match").addEventListener("click", requestNewMatch);
-$("start").addEventListener("click", () => void phaseAct({ type: phase() === "wave_won" ? "next_wave" : "start_wave" }));
+$("start").addEventListener("click", () => void waveAct({ type: phase() === "wave_won" ? "next_wave" : "start_wave" }));
 $("pause").addEventListener("click", () => send({ type: "pause", paused: !perf?.paused }));
 for (const s of [1, 2, 4]) $(`speed-${s}`).addEventListener("click", () => send({ type: "speed", speed: s }));
 /** Retry and restart drop the selection and the inspect panel at once. */
@@ -1494,10 +1583,12 @@ $("sel-cancel").addEventListener("click", () => clearSelection());
 $("i-repair").addEventListener("click", () => inspected && void uiAct({ type: "repair", fence_id: inspected.id }).then(closeInspect));
 $("i-pull").addEventListener("click", () => inspected && void uiAct({ type: "pull_down", placement_id: inspected.id }).then(closeInspect));
 $("i-close").addEventListener("click", closeInspect);
-$("r-next").addEventListener("click", () => void phaseAct({ type: "next_wave" }));
+$("r-next").addEventListener("click", () => void waveAct({ type: "next_wave" }));
+$("d-retry").addEventListener("click", () => session?.gate.retry());
 $("r-retry").addEventListener("click", () => resetAct({ type: "retry_wave" }));
 $("r-restart").addEventListener("click", () => resetAct({ type: "restart_match" }));
 $("r-download").addEventListener("click", () => void downloadRecord());
+$("r-download-map").addEventListener("click", () => void downloadMap());
 $("r-close").addEventListener("click", () => ($("result").hidden = true));
 $("fit").addEventListener("click", () => fitView());
 for (const k of ["none", "chase", "flee"] as const) {

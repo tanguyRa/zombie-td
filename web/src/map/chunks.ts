@@ -39,7 +39,7 @@ export const CLIP_MARGIN_M = BLOCK_MARGIN_M - 0.1;
 ///   clipped to that rectangle (Sutherland–Hodgman); if fewer than 3 vertices
 ///   remain the building is dropped;
 /// - a building whose (clipped, unrounded) area is below 15 m² is dropped,
-///   like `levelgen.ts`;
+///   like the committed levels (`tools/levelgen/levelgen.py`);
 /// - coordinates are rounded to cm, half up (`floor(v * 100 + 0.5) / 100`);
 /// - buildings are sorted by OSM id.
 export function projectBlock(block: { id: BlockId; buildings: RawBuilding[] }, center: LatLon): BuildingChunk {

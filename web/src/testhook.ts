@@ -9,7 +9,8 @@
 // sim state directly. The only test-only powers are speeds 16 and 0 ("as
 // fast as possible"), `pauseAt` (and `startPaused`, built on it), and the
 // `agents` query; the worker accepts them only from a page opened with
-// `?test=1`. Queries, records and hashes reject with "aborted" when there
+// `?test=1`. With `?test=1` the map loader also retries a failed Overpass
+// query after 50 ms instead of 1 s (T6b: a clock control, same blocks). Queries, records and hashes reject with "aborted" when there
 // is no match (after "← Map"); actions resolve with an `aborted` error.
 import type { Map as MlMap } from "maplibre-gl";
 import type {
@@ -29,6 +30,25 @@ import type {
   WaveAttempt,
   WaveResult,
 } from "./protocol";
+
+/** A picked place's streamed map (`MapSession.info()`). */
+export interface HookMap {
+  center: [number, number];
+  radius: number;
+  /** Blocks first needed by each wave (index 0 = wave 1), closest first. */
+  waveBlocks: number[][];
+  /** `MapLoader.ringReady(w)` for each wave. */
+  ready: boolean[];
+  stats: { queries: number; cacheHits: number; fetched: number };
+  /** The worker's last report: blocks the match holds, blocks waiting for the wave's end. */
+  worker: { stored: number; queued: number };
+  /** Chunks the core refused (must stay empty). */
+  refused: { block: number; error: string }[];
+  firstLoadMs: number;
+  /** The wave the district banner is waiting for, or null. */
+  district: number | null;
+  aborted: boolean;
+}
 
 export type PhaseName = "loading" | MatchStatus["phase"];
 
@@ -78,6 +98,10 @@ export interface TestHookDeps {
   /** Same as typing a seed and pressing Enter (without the confirmation):
    *  a new match on the current level. A string keeps seeds above 2^53 exact. */
   newMatch(seed: number | string): void;
+  streamMap(): HookMap | null;
+  mapBundle(): Promise<string>;
+  enterPlace(lat: number, lon: number, name: string): void;
+  district(): { visible: boolean; state: string; text: string };
 }
 
 export interface TestHook {
@@ -110,6 +134,12 @@ export interface TestHook {
   readonly selection: { handIndex: number; card: string; picked: number[] } | null;
   readonly inspected: { id: number; repairCost: number; refund: number } | null;
   readonly mapIdle: boolean;
+  /** The streamed map of a picked place, or null on a built-in level. */
+  readonly map: HookMap | null;
+  /** The "Loading the next district…" banner. */
+  readonly district: { visible: boolean; state: string; text: string };
+  /** The map bundle JSON, as the Download map button saves it. */
+  mapBundle(): Promise<string>;
   stateHash(): Promise<{ tick: number; hash: string }>;
   /** The run record JSON (`WasmMatch.record()`), as the Download button saves it. */
   record(): Promise<string>;
@@ -145,6 +175,8 @@ export interface TestHook {
   toScreen(x: number, y: number): { x: number; y: number } | null;
   toSimPoint(clientX: number, clientY: number): [number, number] | null;
   enterPreset(i: number): void;
+  /** Same as dropping a pin there and pressing Start here. */
+  enterPlace(lat: number, lon: number, name?: string): void;
   newMatch(seed: number | string): void;
   debug: { map: MlMap; overlay: unknown };
 }
@@ -247,6 +279,13 @@ export function installTestHook(d: TestHookDeps): (m: FromWorker) => boolean {
     get mapIdle() {
       return !d.map.isMoving();
     },
+    get map() {
+      return d.streamMap();
+    },
+    get district() {
+      return d.district();
+    },
+    mapBundle: () => d.mapBundle(),
     stateHash() {
       const id = nextId++;
       return new Promise((ok, fail) => {
@@ -308,6 +347,7 @@ export function installTestHook(d: TestHookDeps): (m: FromWorker) => boolean {
       return s ? [s[0], s[1]] : null;
     },
     enterPreset: (i) => d.enterPreset(i),
+    enterPlace: (lat, lon, name = "Dropped pin") => d.enterPlace(lat, lon, name),
     newMatch: (seed) => d.newMatch(seed),
     debug: { map: d.map, overlay: d.overlay },
   };

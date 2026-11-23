@@ -4,8 +4,7 @@ import { BLOCK_MARGIN_M, canonicalChunk, projectBlock, snapshotHash, type Buildi
 import { fnv1a64Hex, fnv1a64HexBigInt } from "../../src/map/hash";
 import { assignToBlocks } from "../../src/map/overpass";
 import { roundCm, roundHalfUp } from "../../src/map/osm";
-import { generateLevel } from "../../src/levelgen";
-import { fakeOverpass, loadLevel, waysFromLevel, wayFromPolygon } from "./fixtures";
+import { loadLevel, waysFromLevel, wayFromPolygon } from "./fixtures";
 
 const level = loadLevel("paris-marais");
 const CENTER = { lat: level.center_lat, lon: level.center_lon };
@@ -17,26 +16,6 @@ const chunksAt = (c = CENTER) => ids.map((id) => projectBlock({ id, buildings: r
 afterEach(() => vi.unstubAllGlobals());
 
 describe("projection", () => {
-  it("matches levelgen.ts for the same buildings", async () => {
-    const fake = fakeOverpass(ways);
-    vi.stubGlobal("fetch", fake.fetch);
-    const pack = await generateLevel("t", CENTER.lat, CENTER.lon, () => {});
-    expect(pack.buildings.length).toBeGreaterThan(100);
-    const byId = new Map(chunksAt().flatMap((c) => c.buildings).map((b) => [b.id, b]));
-    let compared = 0;
-    for (const b of pack.buildings) {
-      // Buildings clipped by levelgen's circle differ by design.
-      if (b.polygon.some(([x, y]) => Math.hypot(x, y) > pack.radius_m - 1)) continue;
-      const mine = byId.get(b.id)!;
-      expect(mine).toBeDefined();
-      expect(mine.polygon).toEqual(b.polygon);
-      expect(mine.kind).toBe(b.kind);
-      expect(mine.floors).toBe(b.floors);
-      compared++;
-    }
-    expect(compared).toBeGreaterThan(100);
-  });
-
   it("reproduces the committed level within a centimetre (lat/lon round trip)", () => {
     const byId = new Map(chunksAt().flatMap((c) => c.buildings).map((b) => [b.id, b]));
     for (const b of level.buildings) {

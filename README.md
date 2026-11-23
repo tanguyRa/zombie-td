@@ -98,7 +98,8 @@ Useful extras:
   Marais, 20k–150k agents, native and WASM; about an hour). `--radii`,
   `--pops`, `--level`, `--ticks` and `--skip-wasm` narrow it down.
 - `./dev.sh python3 tools/levelgen/levelgen.py --name paris-marais --lat 48.8580 --lon 2.3580 --query-radius 500`
-  regenerates a committed level from Overpass (one query).
+  regenerates a committed level from Overpass (one query; picked places
+  stream blocks instead).
 
 ### Browser tests
 
@@ -160,18 +161,31 @@ so you can read the results without running anything.
 ## Playing
 
 1. **Map.** Browse the street map, search an address (press Enter) or click
-   to drop a pin, then **Start here**. The game downloads the buildings around
-   the pin from OpenStreetMap (one Overpass query) and grows the play area
-   until it holds 600–1,200 buildings, up to 600 m. The two built-in levels
-   (Paris Le Marais, Le Vésinet) start without any download. The last place
-   you started is remembered.
-2. **The match.** 8 waves at that place. Wave 1 plays a core of 150 m around
-   the pin; each wave reveals a ring around it, up to the level's radius.
+   to drop a pin, then **Start here**. The dashed circle is the play area:
+   1.3 km around the pin, wave 8's ring. The two built-in levels (Paris Le
+   Marais, Le Vésinet) start without any download. The last place you
+   started is remembered.
+2. **Loading.** A picked place's buildings come from OpenStreetMap
+   (Overpass) in city grid blocks of about 250 m, shared by every place
+   that covers them. The match starts as soon as the blocks of waves 1–2
+   are in (about 350 m around the pin: "Downloading the map… n / m
+   blocks"); the rest loads in the background while you play, closest ring
+   first. If you press **Next wave** before the next ring is loaded, a
+   banner says "Loading the next district… n / m blocks" and the wave opens
+   as soon as it is; if a block can't be downloaded (Overpass busy or
+   unreachable after five tries), it says so with a **Retry loading**
+   button. Blocks are cached in the browser (IndexedDB): retries, restarts,
+   a new seed and later visits to the same area need no download. A place
+   with fewer than 40 buildings in its first blocks is refused ("Pick a more
+   built-up spot").
+3. **The match.** 8 waves at that place. Wave 1 plays a core of 150 m around
+   the pin; each wave reveals a ring around it, up to 1.3 km (a built-in
+   level's rings are squeezed into its radius).
    The street map stays on screen with street names hidden; the next ring is
    drawn darker (its buildings and streets stay visible, nothing about the
    people there) and everything past it darker still. The **Seed** box
    starts a new match with another seed. **← Map** goes back.
-3. **Prep.** Your deck is the starter deck "Civil Defence Issue" (20 cards).
+4. **Prep.** Your deck is the starter deck "Civil Defence Issue" (20 cards).
    Each prep you draw 5 cards (up to 2 kept from the last wave) and get
    supply (shown in the HUD with the deck and discard counts). The hand is
    at the bottom: name, supply cost, kind, rarity. Click a card, then:
@@ -188,21 +202,23 @@ so you can read the results without running anything.
    building to **Repair** it (cost shown) or **Pull it down** (refund
    shown: the full cost and the card back for something placed in this
    prep, half otherwise). Then **Start wave**.
-4. **The wave.** The outbreak starts (its locations are hidden). Only
+5. **The wave.** The outbreak starts (its locations are hidden). Only
    **tactical** cards can be played now (Grenades, Paratrooper…): click the
    card, then a point. The HUD shows the wave n/8, civilians, infected and
    zombies, the share saved against the red **15%** line, and the
    civilians' stamina: they tire as the wave goes on (zombies don't), so
    stalling punishes itself. **Pause** (Space) and 1× / 2× / 4× only change
    how fast you watch; they never change the outcome.
-5. **Result.** A wave is won when no zombies or infected are left, lost when
+6. **Result.** A wave is won when no zombies or infected are left, lost when
    fewer than 15% of its civilians are. The panel shows the saved share and
    the supply earned, with **Next wave**, **Retry wave** (same outbreak,
    same draws) and **Restart match**. After wave 8, the match panel shows
    the retries, the civilians saved and a table per wave, and **Download run
    record** saves the run (seed, deck, every action with its tick, the
    state hash after every wave attempt), which `sim-headless verify`
-   replays and checks.
+   replays and checks. On a picked place **Download map** saves the map the
+   run used (the shell and its blocks) next to it: `sim-headless verify
+   run.json --chunks map.json --shell map.json`.
 
 Pan by dragging the map (except while drawing a fence), zoom with the wheel
 or the +/− buttons, **Frame level** to re-centre. The debug panel shows the
@@ -288,10 +304,15 @@ don't change the outcome (S2). The fence ring in S3 is first breached after
   deck.gl as an overlay on the MapLibre street map (`@deck.gl/mapbox`).
   Layer data stays in sim meters; a model matrix turns it into lng/lat
   offsets from the level centre, the exact inverse of the level projection.
-- **`web/src/explore.ts`, `web/src/levelgen.ts`**: the map screen
-  (MapLibre GL with OpenFreeMap tiles, Nominatim search) and a browser port
-  of the level generator.
-- **`tools/levelgen`**: Overpass → level pack JSON. Committed levels:
+- **`web/src/explore.ts`**: the map screen (MapLibre GL with OpenFreeMap
+  tiles, Nominatim search).
+- **`web/src/map/`, `web/src/stream.ts`, `web/src/mapsession.ts`**: the
+  streamed map of a picked place: the global block grid, per-block Overpass
+  queries, the IndexedDB block cache, the loader (waves 1–2 first, the
+  rest in the background), and the glue to the worker's match
+  (`Match::new_streaming` + `add_buildings`).
+- **`tools/levelgen`**: Overpass → level pack JSON, for the committed
+  (built-in) levels only. Committed levels:
   `levels/paris-marais.json` (659 buildings, r = 400 m) and
   `levels/suburb.json` (Le Vésinet, 375 buildings, r = 250 m).
 - **`config.default.json`**: every tunable number, read by both the headless

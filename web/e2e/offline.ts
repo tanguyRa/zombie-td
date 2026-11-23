@@ -4,7 +4,7 @@
 // Overpass, Nominatim, …) is aborted. Every request and every request the
 // router handled are recorded per test, and the fixture's teardown fails the
 // test if any non-local request was neither answered locally nor aborted.
-import { test as base, expect, type Page, type Request } from "@playwright/test";
+import { test as base, expect, type Page, type Request, type Route } from "@playwright/test";
 import type { TestHook } from "../src/testhook";
 import blankStyle from "./fixtures/style.json" with { type: "json" };
 
@@ -20,7 +20,13 @@ export function isLocal(url: string, local: string): boolean {
   }
 }
 
-export const test = base.extend<{ blocked: string[]; requests: Request[]; local: string }>({
+/** Answer requests to `url` in the test (e.g. fixture Overpass responses).
+ *  Registered on the context after the offline router, so it runs first;
+ *  every request it sees counts as handled for the leak check (the handler
+ *  must fulfil or abort it). */
+export type RouteExternal = (url: RegExp, handler: (route: Route) => Promise<void> | void) => Promise<void>;
+
+export const test = base.extend<{ blocked: string[]; requests: Request[]; local: string; handled: Set<Request>; routeExternal: RouteExternal }>({
   blocked: async ({}, use) => {
     await use([]);
   },
@@ -30,11 +36,21 @@ export const test = base.extend<{ blocked: string[]; requests: Request[]; local:
   local: async ({ baseURL }, use) => {
     await use(new URL(baseURL!).origin);
   },
-  context: async ({ context, local, blocked, requests }, use) => {
-    // Requests the router answered locally or aborted (the same Request
-    // objects as the context's "request" events): matched per request, so
-    // a URL blocked once can't hide a later request to it that got out.
-    const handled = new Set<Request>();
+  // Requests the router answered locally or aborted (the same Request
+  // objects as the context's "request" events): matched per request, so
+  // a URL blocked once can't hide a later request to it that got out.
+  handled: async ({}, use) => {
+    await use(new Set<Request>());
+  },
+  routeExternal: async ({ context, handled }, use) => {
+    await use(async (url, handler) => {
+      await context.route(url, (route) => {
+        handled.add(route.request());
+        return handler(route);
+      });
+    });
+  },
+  context: async ({ context, local, blocked, requests, handled }, use) => {
     context.on("request", (req) => requests.push(req));
     await context.route("**/*", (route) => {
       const req = route.request();

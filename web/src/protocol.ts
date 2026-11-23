@@ -2,6 +2,8 @@
 // worker. The worker owns the WASM `WasmMatch` (sim-core `Match`); the main
 // thread only renders and sends actions (DECISIONS.md, "Browser match").
 
+import type { BuildingChunk } from "./map/chunks";
+
 // ------------------------------------------------------------ match types
 // Mirrors of the sim-core serde types (`match_.rs`). Coordinates are sim
 // meters (grid origin at a corner).
@@ -137,10 +139,17 @@ export type QueryResult =
 
 // ------------------------------------------------------------ messages
 
+/** The map a match is built on: a whole level pack (`Match::new`, the
+ *  built-in levels) or a streamed shell plus the chunks loaded so far
+ *  (`Match::new_streaming`, picked places; later chunks come as `chunk`). */
+export type MatchMap = { level: string } | { shell: string; chunks: BuildingChunk[] };
+
 export type ToWorker =
-  /** Build a match on a whole level (`Match::new`). `test` unlocks the
-   *  test-only speeds and `pause_at`. */
-  | { type: "init"; levelJson: string; setup: { seed: string; deck?: string[] }; test?: boolean }
+  /** Build a match. `test` unlocks the test-only speeds and `pause_at`. */
+  | { type: "init"; map: MatchMap; setup: { seed: string; deck?: string[] }; test?: boolean }
+  /** A streamed block for `add_buildings`: added at once unless a wave
+   *  runs, else queued until it ends. Answered by `map`. */
+  | { type: "chunk"; chunk: BuildingChunk }
   | { type: "stop" }
   /** Queued and applied at the next tick boundary; answered by `action`. */
   | { type: "action"; id: number; action: Action }
@@ -203,6 +212,11 @@ export type FromWorker =
   | { type: "record"; id: number; json: string }
   | { type: "record"; id: number; aborted: true }
   | { type: "error"; message: string; fatal?: boolean }
+  /** Streamed map bookkeeping (after an init or a `chunk`): blocks the match
+   *  holds, blocks queued until the running wave ends, and the chunks the
+   *  core refused (`AreaRevealed` and the like: never expected, reported
+   *  loudly by the page). */
+  | { type: "map"; stored: number; queued: number; refused: { block: number; error: string }[] }
   | { type: "field"; kind: "chase" | "flee"; data: Int32Array; w: number; h: number }
   | { type: "hash"; id: number; tick: number; hash: string }
   | { type: "hash"; id: number; aborted: true };

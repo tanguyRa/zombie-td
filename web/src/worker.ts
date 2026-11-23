@@ -8,6 +8,13 @@
 // stepped while a wave runs: prep and the result screens are static (no
 // cosmetic wander), so the run record holds no idle prep ticks and a replay
 // never pays for them (DECISIONS.md, "Browser match (T5)").
+//
+// Streamed maps (picked places): the match is built on a shell and the
+// chunks loaded so far; later chunks arrive as `chunk` messages and go to
+// `add_buildings` only while no wave runs (a chunk arriving mid-wave waits
+// for its end). The core stores them and applies them at the reveal that
+// first needs them, in block id order, so when a chunk arrives never
+// changes the game (DECISIONS.md, "Streaming map (T6b)").
 import init, { WasmMatch } from "./wasm/pkg/sim_wasm.js";
 import configJson from "../../config.default.json?raw";
 import {
@@ -35,6 +42,7 @@ import {
   sharedBytes,
   slotViews,
 } from "./protocol";
+import { ChunkQueue, errorText } from "./stream";
 
 const config = JSON.parse(configJson);
 const TICK_MS = 1000 / config.tick_hz;
@@ -66,6 +74,7 @@ let buildingCount = -1;
 let gridW = 0;
 let cell = 2;
 const queue: { id: number; action: Action }[] = [];
+const chunks = new ChunkQueue();
 
 const post = (msg: FromWorker, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, transfer);
 
@@ -196,6 +205,15 @@ function afterChange() {
   sendStatus(st);
 }
 
+/** Hand the queued chunks to the match unless a wave runs, then report. */
+function flushChunks(report = false) {
+  if (!m) return;
+  const w = m;
+  const before = chunks.stored;
+  const refused = chunks.size ? chunks.flush(w.phase(), (c) => w.add_buildings(JSON.stringify(c))) : [];
+  if (report || refused.length || chunks.stored !== before) post({ type: "map", stored: chunks.stored, queued: chunks.size, refused });
+}
+
 function applyQueued(): boolean {
   if (!m || queue.length === 0) return false;
   const replies: FromWorker[] = [];
@@ -229,7 +247,9 @@ function stepOnce() {
 
 function loop(gen: number) {
   if (gen !== generation || !m) return;
-  // Actions first: they apply at this tick boundary.
+  // Chunks that waited for the wave's end, then actions (they apply at this
+  // tick boundary): a Next wave sent after a chunk always finds it added.
+  flushChunks();
   applyQueued();
   const now = performance.now();
   acc += now - lastTime;
@@ -345,24 +365,23 @@ function query(q: Query): QueryResult {
 async function initMatch(msg: Extract<ToWorker, { type: "init" }>) {
   const myGen = ++generation;
   if (loopTimer) clearTimeout(loopTimer);
+  // Drop the old match now: `chunk` messages that arrive while the WASM
+  // loads belong to the new match and must wait for it.
+  if (m) m.free();
+  m = null;
+  abortQueue();
+  const map = msg.map;
+  chunks.reset("chunks" in map ? map.chunks.map((c) => c.block_id) : []);
   if (!wasmReady) wasmReady = init();
   const wasm = (await wasmReady) as { memory: WebAssembly.Memory };
   if (myGen !== generation) return; // a newer init or a stop arrived meanwhile
   memory = wasm.memory;
-  if (m) m.free();
-  m = null;
-  abortQueue();
   testMode = !!msg.test;
   try {
-    m = new WasmMatch(msg.levelJson, JSON.stringify(msg.setup));
+    const setup = JSON.stringify(msg.setup);
+    m = "level" in map ? new WasmMatch(map.level, setup) : WasmMatch.new_streaming(map.shell, setup, JSON.stringify(map.chunks));
   } catch (e) {
-    let text = String(e);
-    try {
-      text = JSON.parse(text).message;
-    } catch {
-      /* plain string */
-    }
-    post({ type: "error", message: `Could not build the match: ${text}`, fatal: true });
+    post({ type: "error", message: `Could not build the match: ${errorText(e)}`, fatal: true });
     return;
   }
   gridW = m.grid_w();
@@ -393,6 +412,7 @@ async function initMatch(msg: Extract<ToWorker, { type: "init" }>) {
     },
   });
   afterChange();
+  if ("chunks" in map) flushChunks(true);
   lastTime = performance.now();
   acc = 0;
   loop(generation);
@@ -407,6 +427,14 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     m?.free();
     m = null;
     abortQueue();
+    chunks.reset();
+    return;
+  }
+  if (msg.type === "chunk") {
+    // Kept for the match being built when there is none yet (dropped by
+    // the next init or stop).
+    chunks.push(msg.chunk);
+    flushChunks(true);
     return;
   }
   if (!m) {

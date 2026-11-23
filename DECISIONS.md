@@ -882,9 +882,10 @@ Every choice the spec left open, and every simplification, in one place.
 - **Search:** Nominatim, one request per submit (its usage policy forbids
   search-as-you-type). Clicking the map drops a pin and asks Nominatim's
   reverse endpoint for a street name.
-- **Play area preview:** the dashed circle on the map is the maximum query
-  radius (600 m). The real radius is chosen after the download.
-- **Live level generation** (`web/src/levelgen.ts`) follows `levelgen.py`:
+- **Play area preview:** the dashed circle on the map is the play area,
+  the 1.3 km wave-8 disc (T6b; it was levelgen's 600 m query radius).
+- **Live level generation** (`web/src/levelgen.ts`, retired by T6b:
+  picked places now stream blocks, "Streaming map (T6b)") followed `levelgen.py`:
   one Overpass query at 600 m, radius grown from 100 m in 50 m steps until
   600–1,200 buildings, same kinds, floors and 15 m² minimum. Sparse places
   use the full 600 m; fewer than 40 buildings is refused with a message. It
@@ -894,7 +895,9 @@ Every choice the spec left open, and every simplification, in one place.
   anyway), and invalid rings are not repaired. If overpass-api.de fails, a
   second public instance (overpass.private.coffee) is tried.
 - **Built-in levels** stay as presets on the map screen and need no network.
-- **Downloaded levels are cached in memory** for the session, so going back
+- **Downloaded levels are cached in memory** for the session (T6b: picked
+  places use the IndexedDB block cache instead; the built-in level packs
+  are still kept in memory), so going back
   to the map and starting the same pin again doesn't re-query Overpass. The
   last started place is remembered in `localStorage` (map position only).
 - **One map for both screens.** The MapLibre map from the map screen stays
@@ -985,8 +988,8 @@ Every choice the spec left open, and every simplification, in one place.
 ## Browser match (T5)
 
 - **The worker owns a `WasmMatch`** built with `Match::new` on the whole
-  level pack (the built-in levels and the live ones, as before; streaming
-  comes with T6b) and the starter deck (`setup` without `deck`; the deck
+  level pack for the built-in levels, or `Match::new_streaming` on a shell
+  and blocks for a picked place (T6b, "Streaming map") and the starter deck (`setup` without `deck`; the deck
   builder is T7b). The seed is sent as a decimal string, end to end: the
   input is a text field parsed with `BigInt` (`web/src/seed.ts`, 0 to
   2^64 - 1, never through `Number`), so seeds above 2^53 are exact (a test
@@ -1192,7 +1195,7 @@ yet: that comes after T5).
   use a cosine computed with + − × ÷ only (Taylor series to x^24, |x| ≤
   π/2), because `Math.cos` is implementation-defined and could differ by an
   ulp between browsers, moving a block edge or a building by a centimetre
-  and so the snapshot hash. `levelgen.ts` now uses the same shared
+  and so the snapshot hash. `levelgen.ts` (retired in T6b) used the same shared
   projection (`map/osm.ts`); the Python tool keeps `math.cos` (identical
   after cm rounding in practice).
 - **A building belongs to the block containing its anchor vertex**: the
@@ -1328,9 +1331,156 @@ yet: that comes after T5).
   `ring_ready(1)`, `ring_ready(2)` and not `ring_ready(3)`; every other chunk
   is accepted by `add_buildings`; then `ring_ready(8)`; and the snapshot
   hashes recomputed in Rust equal the JS ones.
-- **`levelgen.ts`'s grow-the-radius logic stays** for now (the current
-  game still uses it); retiring or porting it to blocks is part of the
-  integration step.
+- **`levelgen.ts`'s grow-the-radius logic** was retired by T6b (below).
+
+## Streaming map (T6b)
+
+- **Picked places stream; built-in levels don't.** A place picked on the map
+  is played on a **shell**: its centre (rounded to 1e-6°, ~10 cm), radius
+  `wave8_radius_m` (1300 m), no buildings, no fences (`stream.ts`
+  `buildShell`, checked against the `ShellLimits` rules a radius-only shell
+  can break, plus the block grid's own limits: no centre within 1° of the
+  antimeridian or above 85° latitude). Its rings are the config's
+  (`matchRingRadii` on a 1300 m level). The worker builds it with
+  `WasmMatch.new_streaming(shell, setup, chunks)`. The built-in levels
+  (Paris Le Marais, Le Vésinet) keep `WasmMatch::new` on their whole level
+  pack, so their records, golden hashes and the T5 tests are unchanged.
+- **`levelgen.ts` is retired.** Its single Overpass query and its sizing
+  rule (grow the radius in 50 m steps until 600–1,200 buildings, up to
+  600 m) are replaced by the fixed ring radii: every picked place is a
+  1.3 km wave-8 match, the scale T1 chose, however dense. The "too empty to
+  play" check stays, on the waves 1–2 blocks: fewer than 40 buildings there
+  (about 350 m around the pin) refuses the place. The map screen's dashed
+  circle is now the 1.3 km play area. `tools/levelgen/levelgen.py` stays,
+  for the committed levels only (they are whole-level packs, sized by its
+  600–1,200 rule); it is not ported to blocks, since nothing else uses it.
+  Its "One Overpass query per level" note (Level data) applies to it
+  alone.
+- **Flow.** "Start here" opens a `MapSession` (`mapsession.ts`): the shell,
+  a `MapLoader` with the page's block cache (`openBlockCache()`, opened
+  once) and its `DistrictGate`. `start()` loads waves 1–2 (cache, then
+  Overpass), shown as "Downloading the map… n / m blocks" (polled every
+  200 ms). Then `init` sends the shell and **every chunk loaded so far**
+  (`loader.chunks()`), and every later `chunk` event is posted to the worker
+  as it arrives. Chunks the loader emits before the first `init` are in
+  that snapshot, so each block reaches a match once; "New match" (another
+  seed) rebuilds on the same snapshot with no request.
+- **Protocol additions.** To the worker: `init {map: {level} | {shell,
+  chunks}, setup, test?}` (was `levelJson`) and `chunk {chunk}`. From the
+  worker: `map {stored, queued, refused}` after an init and after each
+  chunk is added or queued.
+- **Chunks are added only while no wave runs.** The worker's `ChunkQueue`
+  (`stream.ts`) adds a chunk at once in prep and on the result screens and
+  queues it while a wave runs; the queue is flushed at the start of every
+  loop turn (before the queued actions, so a Next wave posted after a chunk
+  always finds it added). "At the next prep" in the plan would deadlock: the
+  next ring's chunks that arrived mid-wave must be in before Next wave, which
+  is pressed on the result screen. The core allows `add_buildings` in any
+  phase and stores chunks outside the match state (applied at the reveal
+  that first needs them, in block id order), so the timing never reaches a
+  hash; holding them during a wave only keeps that work out of the wave's
+  ticks. A block is handed over once (`ChunkQueue` drops repeats); `init`
+  and `stop` drop the queue.
+- **A refused chunk is a bug, reported loudly.** With the loader's superset
+  rule (`MapLoader.ringReady` implies `ring_ready`) and chunks added before
+  every Next wave, `AreaRevealed` can't happen. If the core refuses one
+  anyway, the worker reports it in `map.refused`, the page logs
+  `console.error`, shows a toast and keeps it in the test hook
+  (`map.refused`, which every stream test asserts empty). A `ring_not_loaded`
+  refusal of Next wave while the loader says the ring is in is logged the
+  same way.
+- **Next wave waits for its ring.** Start and Next wave go through
+  `waveAct`: on a streamed map, when `loader.ringReady(wave)` is false
+  (Next wave: the next wave; Start: the current one, always ready since
+  `start()` covers waves 1–2), the `DistrictGate` shows a banner, "Loading
+  the next district… n / m blocks" (`MapLoader.ringProgress`, the blocks of
+  waves 1..w, updated on each `chunk` event), with Start and Next wave
+  disabled, and sends the action as soon as `whenRingReady` resolves. When a
+  block the ring needs failed all its attempts, `whenRingReady` rejects:
+  the banner turns into the error with a **Retry loading** button
+  (`loader.retryFailed()`, then it waits again). Any phase change (a retry
+  or restart from the result panel), a new match or leaving cancels the
+  wait. The core still has the last word (`NextWave` refuses
+  `ring_not_loaded`), so a page bug can't start a wave on partial data.
+- **Retry and restart never re-fetch:** the match keeps its stored chunks
+  and the loader keeps going (or is done) in the background; the cache
+  only matters to the next visit. Leaving the match (← Map, New location)
+  aborts the loader: no request and no chunk after it. A second visit to the
+  same area is served from IndexedDB with zero requests.
+- **Each Overpass request has a 120 s limit** (`OVERPASS_REQUEST_TIMEOUT_MS`
+  in `map/osm.ts`, above the queries' own `[timeout:90]`): past it the
+  endpoint counts as failed ("Overpass did not answer within 120 s") and the
+  next one, then the loader's backoff, takes over. Found in the manual check
+  below: the fallback instance held one request for 267 s; with no limit a
+  request that never answers would never fail, so neither the retry nor
+  Retry loading would ever come.
+- **Test-only backoff.** With `?test=1` a failed Overpass query is retried
+  after 50 ms (doubling, 5 attempts) instead of 1 s, so the failure test
+  sees the error in under a second. A clock control: the blocks are the same.
+- **Map bundle for headless verification.** The match panel of a streamed
+  match has **Download map** next to Download run record: one JSON file,
+  the shell (a `LevelPack` without buildings, so it is a valid `--shell`)
+  plus `chunks`, the record's `map.blocks` in block id order. `sim-headless
+  verify --chunks` (and `tools/verify-run.mjs`) now also takes that bundle
+  as well as a plain `BuildingChunk[]` (a tooling change in sim-headless
+  only; sim-core, sim-wasm and the record format are unchanged), so
+  `verify run.json --chunks map.json --shell map.json` replays it. The
+  record covers the blocks the match holds when it is saved (every chunk
+  stored, applied or not), which the bundle reproduces exactly. A server
+  never uses a client's bundle (Run records, "the server must replay only
+  on map chunks it fetched itself"): it is a tester's tool.
+- **Tests.** Unit (`stream.test.ts`): the shell, the chunk queue (added
+  outside waves in block id order, held while a wave runs, repeats dropped,
+  refusals reported), the gate on a real `MapLoader` with the fake
+  Overpass (progress while a block is held, the error and Retry loading,
+  cancel and abort), the bundle. E2E (`e2e/stream.spec.ts`, all three
+  browsers) routes Overpass to per-block fixture answers built from the
+  committed Marais level (the T6a fixtures' bbox parsing and
+  vertex-or-segment rule), through `routeExternal` in `e2e/offline.ts`, so
+  the network-leak teardown counts them as handled. Two tests:
+  1. A picked place on the fixture: the first load asks for exactly the
+     10 waves 1–2 blocks (2 queries) while every background query is held,
+     so prep can't have waited for one; background blocks released during a
+     paused wave 1 wait in the worker (`queued` > 0) and are added at its
+     end; wave 2 opens without the banner; a held wave-3 block makes Next
+     wave show "Loading the next district… n / m blocks" with Start and Next
+     wave disabled, and wave 3's prep opens 0.4–0.9 s after the block is
+     let through; all 109 blocks are then held by the match; Retry wave and
+     Restart make zero requests; the record (chunks mode, 109 blocks) and
+     the map bundle verify with the native `sim-headless verify --chunks
+     map.json --shell map.json`, every attempt hash and the final hash equal
+     to the browser's (identical in the three browsers: snapshot
+     `8bfb826a2d0cdf55`); ← Map aborts the loader; after a reload the same
+     place gets to prep with zero requests (109 IndexedDB hits).
+  2. Every query with a wave-3 block answers 504: after the five attempts
+     (test backoff) Next wave shows the error and Retry loading; with the
+     server fixed, Retry loading opens wave 3.
+  Run times in the whole suite (M1 Pro, three workers): test 1 takes
+  2.5 min in Chromium, 2.2 min in WebKit and 8.5 min in Firefox (its WASM
+  is ~3x slower; the native replay of the record on the 1.3 km grid is
+  part of it); test 2 takes 43 s, 40 s and 3.5 min. The whole suite
+  (54 tests) takes about 13.5 min, Firefox's stream file being the
+  longest (12 min). The budgets (12 min a wave, 45 and 25 min a test) are
+  wide because a wave's cost on the 1.3 km grid is minutes in Firefox
+  under contention.
+- **Manual check, a dense picked place** (central Paris, 48.8604 N 2.3470 E,
+  live Overpass, Chromium in the desktop preview, M1 Pro, test speed "as
+  fast as possible"). The 1.3 km shell has 110 blocks (6, 6, 10, 11, 15,
+  20, 22, 20 per wave) and a 1357² grid. **Loading** depended entirely on
+  the public Overpass servers, which were overloaded that evening: the
+  first load (12 blocks, 2 queries) took 267 s, because overpass-api.de
+  answered one batch 502 at once and the fallback instance held it for
+  267 s (the other batch took 48 s; a single block by curl took 31 s). The
+  background then fetched 12 more blocks, and later queries timed out
+  (hence the 120 s limit above). A second visit from the cache reached
+  prep in 0.6 s with no request. **Sim cost** (wall ms per tick over the
+  wave, and the worst sim p95 seen): wave 1 993 ticks, 2.8 ms, p95 3.8 ms,
+  1.3k agents; wave 2 6,768 ticks, 3.3 ms, p95 4.8 ms, 5.2k agents; wave 3
+  ~7,000 ticks, 4.2–4.6 ms, p95 5.6–11.5 ms, 7.1k agents; wave 4
+  6,200–7,800 ticks, 5.5–5.7 ms, p95 8.1–8.5 ms, 7.9k agents. That is
+  well inside the 50 ms of a 20 Hz tick at 1×, with headroom for waves 5–8.
+  The number of buildings applied grew 540 → 884 → 1,638 → 2,428 over
+  waves 1–4.
 
 ## Run records (T4)
 

@@ -1,10 +1,11 @@
 // Map screen: a street map (MapLibre + OpenFreeMap tiles) where the player
 // browses, searches an address (Nominatim) and drops a pin. "Start here"
-// hands the pin to the planning screen, which downloads the buildings.
+// hands the pin to the game, which streams its map in blocks (the dashed
+// circle is the wave-8 play area).
 // The same map stays on screen during the game, under the deck.gl layers.
 import maplibregl, { GeoJSONSource, LngLatLike } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { QUERY_RADIUS_M } from "./levelgen";
+import { PLAY_RADIUS_M } from "./stream";
 
 const STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const NOMINATIM = "https://nominatim.openstreetmap.org";
@@ -80,7 +81,7 @@ export function createExplore(opts: ExploreOptions) {
   if (import.meta.env.DEV) (window as unknown as { __map: unknown }).__map = map;
 
   map.on("load", () => {
-    map.addSource("area", { type: "geojson", data: circleGeoJson(start.lat, start.lon, QUERY_RADIUS_M) });
+    map.addSource("area", { type: "geojson", data: circleGeoJson(start.lat, start.lon, PLAY_RADIUS_M) });
     map.addLayer({ id: "area-fill", type: "fill", source: "area", paint: { "fill-color": "#e53935", "fill-opacity": 0.06 } });
     map.addLayer({ id: "area-line", type: "line", source: "area", paint: { "line-color": "#e53935", "line-width": 2, "line-dasharray": [2, 2] } });
     render();
@@ -124,7 +125,7 @@ export function createExplore(opts: ExploreOptions) {
     }
     const src = map.getSource("area") as GeoJSONSource | undefined;
     if (src) {
-      src.setData(pick ? circleGeoJson(pick.lat, pick.lon, QUERY_RADIUS_M) : { type: "FeatureCollection", features: [] });
+      src.setData(pick ? circleGeoJson(pick.lat, pick.lon, PLAY_RADIUS_M) : { type: "FeatureCollection", features: [] });
     }
   }
 

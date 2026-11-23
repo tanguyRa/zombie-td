@@ -1,6 +1,7 @@
 // Shared OpenStreetMap helpers: Overpass endpoints, the building-kind and
-// floors mapping, and the local projection. Used by `levelgen.ts` (one query
-// per level) and the block loader (`overpass.ts`, `chunks.ts`).
+// floors mapping, and the local projection. Used by the block loader
+// (`overpass.ts`, `chunks.ts`); `tools/levelgen/levelgen.py` has the same
+// mapping for the committed levels.
 
 export const OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://overpass.private.coffee/api/interpreter"];
 
@@ -141,16 +142,34 @@ export function overpassBodyError(body: unknown): string | null {
   return null;
 }
 
+/// How long one endpoint may take to answer (the queries ask Overpass for at
+/// most 90 s). A public instance can hold a request for minutes; without a
+/// limit it never fails, so neither the retry nor the player's Retry
+/// loading would ever come.
+export const OVERPASS_REQUEST_TIMEOUT_MS = 120_000;
+
 /// POST one Overpass QL query, trying each endpoint in turn. An HTTP error,
-/// an unparsable body, a body without an `elements` array or one with an
-/// error `remark` (timeout, out of memory) is a failure of that endpoint.
-/// Throws with a player-readable message when all fail.
-export async function overpassQuery(query: string, opts: { fetch?: FetchFn; signal?: AbortSignal; urls?: string[] } = {}): Promise<OsmWay[]> {
+/// an unparsable body, a body without an `elements` array, one with an
+/// error `remark` (timeout, out of memory) or no answer within `timeoutMs`
+/// is a failure of that endpoint. Throws with a player-readable message
+/// when all fail.
+export async function overpassQuery(query: string, opts: { fetch?: FetchFn; signal?: AbortSignal; urls?: string[]; timeoutMs?: number } = {}): Promise<OsmWay[]> {
   const f: FetchFn = opts.fetch ?? ((i, init) => fetch(i, init));
+  const limit = opts.timeoutMs ?? OVERPASS_REQUEST_TIMEOUT_MS;
   let lastErr = "";
   for (const url of opts.urls ?? OVERPASS_URLS) {
+    // This request's own signal: the caller's abort, or the time limit.
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort();
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    if (opts.signal?.aborted) ctl.abort();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctl.abort();
+    }, limit);
     try {
-      const r = await f(url, { method: "POST", body: new URLSearchParams({ data: query }), signal: opts.signal });
+      const r = await f(url, { method: "POST", body: new URLSearchParams({ data: query }), signal: ctl.signal });
       if (r.ok) {
         const body: unknown = await r.json();
         const bad = overpassBodyError(body);
@@ -161,7 +180,10 @@ export async function overpassQuery(query: string, opts: { fetch?: FetchFn; sign
       lastErr = r.status === 429 || r.status === 504 ? `Overpass is busy (${r.status})` : `Overpass error ${r.status}`;
     } catch (e) {
       if (opts.signal?.aborted) throw e;
-      lastErr = `Could not reach Overpass (${String(e)})`;
+      lastErr = timedOut ? `Overpass did not answer within ${Math.round(limit / 1000)} s` : `Could not reach Overpass (${String(e)})`;
+    } finally {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onAbort);
     }
   }
   throw new Error(`${lastErr}. Try again in a minute.`);

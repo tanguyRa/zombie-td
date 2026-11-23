@@ -3,7 +3,9 @@
 //! [--expect-multiplier K]`: replay a run record and check every wave hash
 //! (sim-core `record`). The map always comes from the verifier: a level, or
 //! the shell and the chunks; the `--expect-*` flags are what the server
-//! issued. Exit code 0 when the run verifies, 1 when it is rejected, 2 on
+//! issued. `--chunks` takes a `BuildingChunk[]` or a map bundle (the
+//! browser's "Download map": a shell with a `chunks` array, so the same
+//! file is also the `--shell`). Exit code 0 when the run verifies, 1 when it is rejected, 2 on
 //! bad arguments (an unknown flag, a flag given twice, a stray argument)
 //! or unreadable files.
 
@@ -32,6 +34,22 @@ fn level_arg(s: &str) -> sim_core::LevelPack {
         sim_core::LevelPack::from_json(&read(s)).unwrap_or_else(|e| fail(e))
     } else {
         crate::matchcmd::load_any_level(s)
+    }
+}
+
+/// A `BuildingChunk[]`, or a map bundle `{ ..shell, "chunks": [...] }`.
+fn chunks_arg(path: &str) -> Vec<BuildingChunk> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum ChunksFile {
+        List(Vec<BuildingChunk>),
+        Bundle { chunks: Vec<BuildingChunk> },
+    }
+    let text = read(path);
+    match serde_json::from_str::<ChunksFile>(&text) {
+        Ok(ChunksFile::List(c)) | Ok(ChunksFile::Bundle { chunks: c }) => c,
+        // The untagged error says nothing useful: report the list's.
+        Err(_) => serde_json::from_str::<Vec<BuildingChunk>>(&text).unwrap_or_else(|e| fail(format!("{path}: not a chunk list or a map bundle ({e})"))),
     }
 }
 
@@ -128,7 +146,7 @@ pub fn cmd(args: &[String]) {
             let mut pack = level_arg(s);
             pack.buildings.clear();
             shell = pack;
-            chunks = serde_json::from_str(&read(path)).unwrap_or_else(|e| fail(format!("{path}: {e}")));
+            chunks = chunks_arg(path);
             ReplayMap::Chunks { shell: &shell, chunks: &chunks }
         }
         _ => fail(format!("give either --level, or --chunks and --shell\n{USAGE}")),

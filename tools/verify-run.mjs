@@ -3,6 +3,7 @@
 //   wasm-pack build crates/sim-wasm --release --target nodejs --out-dir pkg-node
 //   node tools/verify-run.mjs run.json --level levels/paris-marais.json
 //   node tools/verify-run.mjs run.json --chunks chunks.json --shell shell.json
+//   node tools/verify-run.mjs run.json --chunks map.json --shell map.json  (a map bundle)
 //        [--expect-seed N] [--expect-deck id,id,...] [--expect-multiplier K]
 // The map is always the verifier's: a level, or the shell (level JSON
 // without buildings) and the chunks. The --expect-* flags are what the
@@ -64,12 +65,20 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const { verify_level, verify_chunks } = require(join(root, "crates/sim-wasm/pkg-node/sim_wasm.js"));
 
+// A `BuildingChunk[]`, or a map bundle (the browser's "Download map": the
+// shell plus a `chunks` array, so the same file is also the --shell).
+function chunksJson(path) {
+  const text = readFileSync(path, "utf8");
+  const v = JSON.parse(text);
+  return Array.isArray(v) ? text : JSON.stringify(v.chunks);
+}
+
 const record = readFileSync(run, "utf8");
 const t0 = performance.now();
 try {
   const summary = level
     ? verify_level(record, readFileSync(level, "utf8"), expectedJson)
-    : verify_chunks(record, readFileSync(shell, "utf8"), readFileSync(chunks, "utf8"), expectedJson);
+    : verify_chunks(record, readFileSync(shell, "utf8"), chunksJson(chunks), expectedJson);
   const s = JSON.parse(summary);
   console.log(JSON.stringify(s, null, 2));
   console.log(`verified: ${s.phase} at wave ${s.wave}, ${s.waves_won} waves won, ${s.attempts} attempts, ${s.end_tick} ticks, ${((performance.now() - t0) / 1000).toFixed(2)}s (WASM)${s.setup_checked ? "" : " (seed, deck and multiplier not checked against an issued run: --expect-*)"}`);

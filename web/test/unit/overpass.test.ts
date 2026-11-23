@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blockAt, blockBoundsLocal, blockLatLonBounds, blockRowCol, blockId, blocksForDisc, type BlockId } from "../../src/map/blocks";
 import { assignToBlocks, blocksQuery, fetchBlocks, rawBuildingOf } from "../../src/map/overpass";
-import { overpassBodyError, project, type OsmWay } from "../../src/map/osm";
+import { overpassBodyError, overpassQuery, project, type FetchFn, type OsmWay } from "../../src/map/osm";
 import { fakeOverpass, loadLevel, parseBboxes, timeoutBody, wayInBbox, waysFromLevel, wayFromPolygon } from "./fixtures";
 
 const PARIS = { lat: 48.858, lon: 2.358 };
@@ -175,5 +175,39 @@ describe("overpass block queries", () => {
     expect(one).toEqual(expected);
     expect(all).toEqual(expected);
     expect(pairs).toEqual(expected);
+  });
+});
+
+describe("overpassQuery time limit", () => {
+  /** A fetch whose first URL never answers (until aborted), the second answers. */
+  const hanging = (): { fetch: FetchFn; seen: string[] } => {
+    const seen: string[] = [];
+    const fetch: FetchFn = (url, init) => {
+      seen.push(url);
+      if (url.includes("slow"))
+        return new Promise((_, rej) => init?.signal?.addEventListener("abort", () => rej(new DOMException("aborted", "AbortError"))));
+      return Promise.resolve(new Response(JSON.stringify({ elements: [] }), { status: 200 }));
+    };
+    return { fetch, seen };
+  };
+
+  it("gives up on an endpoint that holds the request, and tries the next", async () => {
+    const h = hanging();
+    expect(await overpassQuery("q", { fetch: h.fetch, urls: ["https://slow.test", "https://ok.test"], timeoutMs: 30 })).toEqual([]);
+    expect(h.seen).toEqual(["https://slow.test", "https://ok.test"]);
+  });
+
+  it("fails with a readable message when every endpoint hangs", async () => {
+    const h = hanging();
+    await expect(overpassQuery("q", { fetch: h.fetch, urls: ["https://slow.test"], timeoutMs: 30 })).rejects.toThrow(/^Overpass did not answer within 0 s\. Try again in a minute\.$/);
+  });
+
+  it("still passes the caller's abort through", async () => {
+    const h = hanging();
+    const ctl = new AbortController();
+    const p = overpassQuery("q", { fetch: h.fetch, urls: ["https://slow.test", "https://ok.test"], signal: ctl.signal, timeoutMs: 60_000 });
+    ctl.abort();
+    await expect(p).rejects.toThrow(/aborted/);
+    expect(h.seen).toEqual(["https://slow.test"]);
   });
 });
