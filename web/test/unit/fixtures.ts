@@ -156,30 +156,13 @@ export function fakeOverpass(ways: OsmWay[]): FakeOverpass {
   };
 }
 
-/// The level plus sparse copies of it filling a disc of `radius` metres:
-/// copies on an 800 m grid around the original (the Marais is 400 m in
-/// radius), each keeping one building in `keepEvery`, so a streamed 1.3 km
-/// match gets newcomers in every ring without the full wave-8 population
-/// (the first-session E2E: the test bot can clear 8 waves on it). Copies
-/// get new ids (`id + copy × 10^11`; OSM ids here are below 10^11).
-export function sparseTiledLevel(level: LevelJson, radius: number, keepEvery: number): LevelJson {
-  const buildings = [...level.buildings];
-  const step = 2 * level.radius_m;
-  const n = Math.ceil(radius / step);
-  let copy = 0;
-  for (let i = -n; i <= n; i++)
-    for (let j = -n; j <= n; j++) {
-      if (i === 0 && j === 0) continue;
-      copy++;
-      const [dx, dy] = [i * step, j * step];
-      level.buildings.forEach((b, k) => {
-        if ((k + copy) % keepEvery !== 0) return;
-        const polygon = b.polygon.map(([x, y]) => [x + dx, y + dy]);
-        const cx = polygon.reduce((a, p) => a + p[0], 0) / polygon.length;
-        const cy = polygon.reduce((a, p) => a + p[1], 0) / polygon.length;
-        if (Math.hypot(cx, cy) > radius) return;
-        buildings.push({ ...b, id: b.id + copy * 1e11, polygon });
-      });
-    }
-  return { ...level, name: `${level.name}-sparse-tiled`, radius_m: radius, buildings };
+/// A village: the level's buildings whose centroid is within `radius`
+/// metres of its centre, nothing else. On a streamed 1.3 km match every
+/// civilian lives in wave 1's ring and every garrison stands among them,
+/// while the outer rings' outbreaks have to come to them: the test bot
+/// clears 8 waves on it (first-session.spec.ts). The plain Marais leaves too
+/// few civilians for wave 8 (DECISIONS, "Replay viewer and first session").
+export function villageLevel(level: LevelJson, radius: number): LevelJson {
+  const centroid = (p: number[][]) => [p.reduce((a, q) => a + q[0], 0) / p.length, p.reduce((a, q) => a + q[1], 0) / p.length];
+  return { ...level, name: `${level.name}-village`, radius_m: radius, buildings: level.buildings.filter((b) => Math.hypot(...(centroid(b.polygon) as [number, number])) <= radius) };
 }
