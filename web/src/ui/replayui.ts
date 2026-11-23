@@ -81,6 +81,35 @@ export interface ReplayUiDeps extends ResolveDeps {
 
 type CheckState = "pending" | "ok" | "bad";
 
+/** The panel's check rows for `rec`, from the checks passed so far and the
+ *  replay's error: per attempt (plus the attempt open at the end of the
+ *  record, if any) its prep and end states, and the final row's. A
+ *  divergence with no row of its own (past the last attempt of a record
+ *  that ends on a result screen) marks the final row. */
+export function checkRows(rec: RecordView, checks: ReplayCheck[], err: VerifyErrorJson | null) {
+  const at = err?.error === "diverged" ? divergedAt(err) : null;
+  const n = rec.attempts.length;
+  // The attempt open at the end of the record (a record ending in a
+  // prep or a wave) has a prep check too.
+  const open = rec.end.phase === "prep" || rec.end.phase === "running" ? 1 : 0;
+  const rows: { attempt: number; wave: number; prep: CheckState; end: CheckState; result: string }[] = [];
+  for (let i = 0; i < n + open; i++) {
+    const a = rec.attempts[i];
+    const state = (what: "prep" | "end"): CheckState => {
+      if (checks.some((c) => c.attempt === i && c.what === what)) return "ok";
+      if (err && at === what && err.attempt === i) return "bad";
+      return "pending";
+    };
+    rows.push({ attempt: i, wave: a?.wave ?? rec.end.wave, prep: state("prep"), end: a ? state("end") : "pending", result: a ? a.result : "open at the end" });
+  }
+  let final: CheckState = checks.some((c) => c.what === "final") ? "ok" : "pending";
+  if (err && (at === "final" || (at === null && err.error !== "diverged"))) final = "bad";
+  // A prep or end divergence at or past the attempt count: only the open
+  // attempt's prep has a row there; anything else is the record's end.
+  if (err && at !== null && at !== "final" && (err.attempt ?? 0) >= n && !(at === "prep" && open === 1 && err.attempt === n)) final = "bad";
+  return { rows, final };
+}
+
 export class ReplayUi {
   // ---- picker state
   private pickRecord: { json: string; record: RecordView; name: string } | null = null;
@@ -304,26 +333,7 @@ export class ReplayUi {
   private rows() {
     const rec = this.src?.record;
     if (!rec) return { rows: [], final: "pending" as CheckState };
-    const err = this.progress?.error ?? null;
-    const at = err?.error === "diverged" ? divergedAt(err) : null;
-    const n = rec.attempts.length;
-    // The attempt open at the end of the record (a record ending in a
-    // prep or a wave) has a prep check too.
-    const open = rec.end.phase === "prep" || rec.end.phase === "running" ? 1 : 0;
-    const rows: { attempt: number; wave: number; prep: CheckState; end: CheckState; result: string }[] = [];
-    for (let i = 0; i < n + open; i++) {
-      const a = rec.attempts[i];
-      const state = (what: "prep" | "end"): CheckState => {
-        if (this.checks.some((c) => c.attempt === i && c.what === what)) return "ok";
-        if (err && at === what && err.attempt === i) return "bad";
-        return "pending";
-      };
-      rows.push({ attempt: i, wave: a?.wave ?? rec.end.wave, prep: state("prep"), end: a ? state("end") : "pending", result: a ? a.result : "open at the end" });
-    }
-    let final: CheckState = this.checks.some((c) => c.what === "final") ? "ok" : "pending";
-    if (err && (at === "final" || (at === null && err.error !== "diverged"))) final = "bad";
-    if (err && err.error === "diverged" && at === "end" && (err.attempt ?? 0) >= n) final = "bad";
-    return { rows, final };
+    return checkRows(rec, this.checks, this.progress?.error ?? null);
   }
 
   private render() {

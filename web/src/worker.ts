@@ -64,6 +64,11 @@ let latest = 0;
 let lastWrite = 0;
 let paused = false;
 let speed = 1;
+/** The speed of played matches and of replays, each kept across matches of
+ *  its kind: a replay's Max never carries into a played match (`speed` is
+ *  the current match's, one of these). */
+let playSpeed = 1;
+let replaySpeed = 1;
 let pauseAt: number | null = null;
 let acc = 0;
 let lastTime = 0;
@@ -406,10 +411,12 @@ function replayLoop(gen: number) {
       if (acc > 250) acc = 250;
       const ticks = Math.floor(acc / TICK_MS) * speed;
       if (ticks > 0) {
-        acc -= Math.floor(acc / TICK_MS) * TICK_MS;
         // One action per slice, then a short hold: a prep's plays (applied
         // on one tick, since the browser never steps prep) can be followed.
         const r = replaySlice(ticks, 1, 0, 0);
+        // Only the ticks that ran use up the budget (a slice stops after
+        // its first action).
+        acc -= (r.ticks / speed) * TICK_MS;
         if (r.actions > 0) holdUntil = performance.now() + REPLAY_ACTION_HOLD_MS / speed;
       }
     }
@@ -480,7 +487,9 @@ function query(q: Query): QueryResult {
   }
 }
 
-async function initMatch(msg: Extract<ToWorker, { type: "init" }>) {
+/** Build a match (or a replay). `jump`: a replay rebuilt for a jump to
+ *  this wave, set before its loop first runs (1: paused at the start). */
+async function initMatch(msg: Extract<ToWorker, { type: "init" }>, jump: number | null = null) {
   const myGen = ++generation;
   matchTag = msg.match;
   if (loopTimer) clearTimeout(loopTimer);
@@ -521,7 +530,8 @@ async function initMatch(msg: Extract<ToWorker, { type: "init" }>) {
   latest = 0;
   lastWrite = 0;
   tickMs = [];
-  paused = false; // speed is kept across matches
+  paused = jump !== null && jump <= 1;
+  speed = msg.replay ? replaySpeed : playSpeed;
   pauseAt = null;
   lastPhase = null;
   buildingCount = -1;
@@ -546,6 +556,7 @@ async function initMatch(msg: Extract<ToWorker, { type: "init" }>) {
   lastTime = performance.now();
   acc = 0;
   if (replaySrc) {
+    if (jump !== null && jump > 1) jumpTo = jump;
     // The opening check (attempt 0's prep) and the first report.
     replaySlice(0, 0, 0, 0);
     replayLoop(generation);
@@ -562,11 +573,12 @@ async function replayJump(w: number) {
   const st = status();
   const ahead = st.wave < w;
   if (!ahead) {
+    // Rebuilt paused or already jumping: its loop must never run a slice
+    // with no stop wave (at Max that would run on past the target).
     const src = replaySrc;
-    const keepSpeed = speed;
-    await initMatch(src);
-    speed = keepSpeed;
+    await initMatch(src, w);
     if (!m || replaySrc !== src) return;
+    if (w > 1) return;
   }
   if (w <= 1) {
     paused = true;
@@ -629,7 +641,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         paused = !paused;
         break;
       case "speed":
-        if (SPEEDS.includes(msg.speed) || msg.speed === 0) speed = msg.speed;
+        if (SPEEDS.includes(msg.speed) || msg.speed === 0) speed = replaySpeed = msg.speed;
         else post({ type: "error", message: `speed ${msg.speed} is not allowed` });
         break;
       case "pause_at":
@@ -661,7 +673,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       sendStatus();
       break;
     case "speed":
-      if (SPEEDS.includes(msg.speed) || (testMode && TEST_SPEEDS.includes(msg.speed))) speed = msg.speed;
+      if (SPEEDS.includes(msg.speed) || (testMode && TEST_SPEEDS.includes(msg.speed))) speed = playSpeed = msg.speed;
       else post({ type: "error", message: `speed ${msg.speed} is not allowed` });
       sendStatus();
       break;

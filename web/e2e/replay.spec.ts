@@ -14,7 +14,7 @@ import { LOAD_WAIT_MS } from "./ui";
 
 const GOLDEN_PATH = `${REPO}crates/sim-core/tests/fixtures/run_record_golden.json`;
 const GOLDEN = JSON.parse(readFileSync(GOLDEN_PATH, "utf8")) as {
-  attempts: { wave: number; end_hash: string; result: string }[];
+  attempts: { wave: number; start_tick: number; end_hash: string; result: string }[];
   end: { tick: number; hash: string };
   actions: unknown[];
 };
@@ -93,6 +93,79 @@ test("a built-in level run replays offline: jump, step, max speed, every check g
   await expect(page.locator("#result")).toBeHidden();
   await page.locator("#back").click();
   expect(await profileState(page)).toEqual(before);
+});
+
+/** Play at Max until the replay is past `tick`. */
+async function maxPast(page: Page, tick: number) {
+  await page.locator("#rv-speed-0").click();
+  if ((await replay(page)).paused) await page.locator("#rv-pause").click();
+  await expect.poll(async () => (await replay(page)).tick, { timeout: REPLAY_MS, intervals: [50, 100, 250] }).toBeGreaterThan(tick);
+}
+
+/** Jump to wave `w` from the panel and wait until the jump is over. */
+async function jump(page: Page, w: number) {
+  await page.locator("#rv-wave").selectOption(String(w));
+  await page.locator("#rv-jump").click();
+  await expect.poll(async () => {
+    const r = await replay(page);
+    return r.jumping === null && r.paused && (await hook(page, (h) => h.wave)) === w;
+  }, { timeout: REPLAY_MS }).toBe(true);
+}
+
+test("a jump at Max lands on its wave: back to wave 1 at tick 0, forward and back to a wave's prep", async ({ page }) => {
+  test.setTimeout(REPLAY_MS + 2 * LOAD_WAIT_MS);
+  await openApp(page);
+  await pick(page, [{ name: "run.json", text: readFileSync(GOLDEN_PATH, "utf8") }]);
+  await expect.poll(async () => (await replay(page)).checks.length, { timeout: LOAD_WAIT_MS }).toBeGreaterThan(0);
+  const firstOf = (w: number) => GOLDEN.attempts.find((a) => a.wave === w)!.start_tick;
+  // Running at Max, then back to wave 1: the very start, nothing replayed.
+  await maxPast(page, 3000);
+  await jump(page, 1);
+  // Held there (a slice at Max right after the rebuild would move it on).
+  await page.waitForTimeout(500);
+  expect(await replay(page)).toMatchObject({ tick: 0, nextAction: 0, paused: true, jumping: null, speed: 0 });
+  expect(await hook(page, (h) => [h.wave, h.phase, h.perf?.paused])).toEqual([1, "prep", true]);
+  // Forward to wave 3, at Max on past it, then back to wave 2: each stops at
+  // the start of that wave's first prep.
+  await jump(page, 3);
+  expect((await replay(page)).tick).toBe(firstOf(3));
+  await maxPast(page, firstOf(3) + 500);
+  await jump(page, 2);
+  await page.waitForTimeout(500);
+  expect(await replay(page)).toMatchObject({ tick: firstOf(2), paused: true, jumping: null, speed: 0 });
+  expect(await hook(page, (h) => [h.wave, h.phase, h.perf?.paused])).toEqual([2, "prep", true]);
+});
+
+test("a replay's Max speed doesn't carry into a played match", async ({ page }) => {
+  test.setTimeout(REPLAY_MS + 4 * LOAD_WAIT_MS);
+  await openApp(page);
+  // A played match at 2x.
+  await page.getByRole("button", { name: "Paris — Le Marais" }).click();
+  await expect.poll(() => hook(page, (h) => h.phase), { timeout: LOAD_WAIT_MS }).toBe("prep");
+  await page.locator("#speed-2").click();
+  await expect.poll(() => hook(page, (h) => h.perf?.speed)).toBe(2);
+  await page.locator("#back").click();
+  // A replay at Max.
+  await pick(page, [{ name: "run.json", text: readFileSync(GOLDEN_PATH, "utf8") }]);
+  await expect.poll(async () => (await replay(page)).checks.length, { timeout: LOAD_WAIT_MS }).toBeGreaterThan(0);
+  await maxPast(page, 1000);
+  expect((await replay(page)).speed).toBe(0);
+  await page.locator("#back").click();
+  // The next played match is back at its own 2x, and the page shows it.
+  await page.getByRole("button", { name: "Paris — Le Marais" }).click();
+  await expect.poll(() => hook(page, (h) => h.phase), { timeout: LOAD_WAIT_MS }).toBe("prep");
+  expect(await hook(page, (h) => h.perf?.speed)).toBe(2);
+  await expect(page.locator("#speed-2")).toHaveClass(/\bon\b/);
+  await expect(page.locator("#speed-1")).not.toHaveClass(/\bon\b/);
+  await expect(page.locator("#speed-4")).not.toHaveClass(/\bon\b/);
+  // And it runs at 2x (40 ticks a second), not flat out.
+  expect(await hook(page, (h) => h.act({ type: "start_wave" }))).toBeNull();
+  await expect.poll(() => hook(page, (h) => h.phase)).toBe("running");
+  const t0 = await hook(page, (h) => h.tick);
+  await page.waitForTimeout(1000);
+  const ran = (await hook(page, (h) => h.tick)) - t0;
+  expect(ran).toBeGreaterThan(0);
+  expect(ran).toBeLessThan(120);
 });
 
 test("a tampered record: the viewer names the attempt and what diverged", async ({ page }) => {

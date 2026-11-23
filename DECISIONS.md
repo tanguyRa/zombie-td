@@ -2416,15 +2416,20 @@ calls `matchSetup()`, `startMatch()`, the tracker's `abandon()` /
   `WasmMatch` holding a `Replayer`). `replay_run(max_ticks, max_actions,
   max_ms, stop_wave)` steps it within those budgets and returns the new
   checks, the position and the outcome (summary or `VerifyError` JSON).
-  The worker's replay loop: 1×/2×/4× step that many ticks per 50 ms like a
-  played match, one action per slice and then a hold of 400 ms / speed
-  (the browser never steps prep, so a whole prep's plays are on one tick:
-  the hold lets them be followed); Max runs 40 ms slices back to back;
+  The worker's replay loop: the panel offers 1×, 4× and Max. 1× and 4×
+  step that many ticks per 50 ms like a played match, one action per
+  slice and then a hold of 400 ms / speed (the browser never steps prep,
+  so a whole prep's plays are on one tick: the hold lets them be
+  followed), and only the ticks a slice ran use up its time budget; Max
+  runs 40 ms slices back to back. The replay speed is kept apart from the
+  played speed (each carries over to the next match of its kind), so a
+  replay at Max never makes the next played match run flat out;
   Step (`replay_ctl step`) is one tick plus the actions due before it,
   paused; Jump to wave n runs at Max until wave n's prep opens
   (`stop_wave`), then pauses, and a jump to the current wave or before
   rebuilds the match from the record first (the replay only goes
-  forward). Pause works in any phase. The worker posts the usual
+  forward), already paused (wave 1) or already jumping, so no slice
+  without a stop wave runs after the rebuild. Pause works in any phase. The worker posts the usual
   `status` / `state` / `placements` / `geometry`, so the game view draws
   the replay as it draws a match, plus a `replay` progress message.
 - **Read-only, and never the profile.** In replay mode `WasmMatch.apply`
