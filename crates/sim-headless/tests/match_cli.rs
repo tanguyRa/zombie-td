@@ -199,3 +199,49 @@ fn verify_run_mjs_rejects_bad_arguments() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `sim-headless verify` and `tools/verify-run.mjs` read numbers with one
+/// grammar: a seed is `^\d+$` (up to 2^64 - 1), a multiplier a plain
+/// decimal `^\d+(\.\d+)?$`. Each refused value is a usage error (exit 2,
+/// naming the flag) in both, before any file is read; accepted values get
+/// past the argument check in both.
+#[test]
+fn both_verifiers_share_one_number_grammar() {
+    let bin = env!("CARGO_BIN_EXE_sim-headless");
+    let tool = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/verify-run.mjs");
+    let node = Command::new("node").arg("--version").output().is_ok();
+    let huge = format!("1{}", "0".repeat(400));
+    let bad: Vec<(&str, &str)> = [
+        ("--expect-seed", vec!["", "+3", "-1", " 3", "3 ", "0x1", "1e3", "3.0", "18446744073709551616"]),
+        ("--expect-multiplier", vec!["", "+0.3", "-0.3", " 0.3", ".3", "3.", "0x1", "1e-1", "inf", "NaN", huge.as_str()]),
+    ]
+    .into_iter()
+    .flat_map(|(f, vs)| vs.into_iter().map(move |v| (f, v)))
+    .collect();
+    for (flag, v) in &bad {
+        let out = Command::new(bin).args(["verify", "missing-run.json", "--level", "paris-marais", flag, v]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "verify {flag} {v:?}: {err}");
+        assert!(err.contains(&format!("{flag} {v:?}: ")), "verify {flag} {v:?}: {err}");
+        if node {
+            let out = Command::new("node").arg(tool).args(["missing-run.json", "--level", "l.json", flag, v]).output().unwrap();
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "verify-run.mjs {flag} {v:?}: {err}");
+            assert!(err.contains(&format!("{flag} {v:?}: ")), "verify-run.mjs {flag} {v:?}: {err}");
+        }
+    }
+    // Accepted values reach the next step (reading the run file).
+    for (flag, v) in [("--expect-seed", "0"), ("--expect-seed", "18446744073709551615"), ("--expect-multiplier", "0.3"), ("--expect-multiplier", "1")] {
+        let out = Command::new(bin).args(["verify", "missing-run.json", "--level", "paris-marais", flag, v]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("missing-run.json") && !err.contains(flag), "verify {flag} {v:?}: {err}");
+        if node {
+            let out = Command::new("node").arg(tool).args(["missing-run.json", "--level", "l.json", flag, v]).output().unwrap();
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(!err.contains("usage:") && !err.contains(flag), "verify-run.mjs {flag} {v:?}: {err}");
+        }
+    }
+    if !node {
+        eprintln!("node not found: the verify-run.mjs half of the grammar check was skipped");
+    }
+}

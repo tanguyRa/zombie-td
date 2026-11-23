@@ -12,7 +12,7 @@
 use std::time::Instant;
 
 use sim_core::match_::BuildingChunk;
-use sim_core::record::{replay_with, ExpectedRun, ReplayLimits, ReplayMap, ReplayProgress, RunRecord};
+use sim_core::record::{replay_with, ExpectedRun, ReplayLimits, ReplayMap, ReplayProgress, RunRecord, SetupChecked};
 
 use crate::common::*;
 
@@ -101,13 +101,40 @@ impl Args {
         self.values.get(name).map(String::as_str)
     }
 
-    /// Like `flag`, parsed; a value that doesn't parse is a usage error.
-    fn parsed<T: std::str::FromStr>(&self, name: &str) -> Option<T>
-    where
-        T::Err: std::fmt::Display,
-    {
-        self.flag(name).map(|v| v.parse().unwrap_or_else(|e| fail(format!("{name} {v:?}: {e}"))))
+    /// A whole number (`^\d+$`, no sign, no spaces, no `0x`), as a `u64`;
+    /// anything else, or a value over `u64::MAX`, is a usage error.
+    fn integer(&self, name: &str) -> Option<u64> {
+        self.flag(name).map(|v| parse_integer(v).unwrap_or_else(|e| fail(format!("{name} {v:?}: {e}"))))
     }
+
+    /// A plain decimal (`^\d+(\.\d+)?$`: no sign, exponent, `inf`, `nan`
+    /// or hex), as an `f32`; anything else is a usage error.
+    fn decimal(&self, name: &str) -> Option<f32> {
+        self.flag(name).map(|v| parse_decimal(v).unwrap_or_else(|e| fail(format!("{name} {v:?}: {e}"))))
+    }
+}
+
+/// The one number grammar of `verify` and `tools/verify-run.mjs` (same
+/// rules, same tests): seeds and tick counts are `^\d+$`.
+pub fn parse_integer(v: &str) -> Result<u64, String> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("not a whole number (digits only)".into());
+    }
+    v.parse::<u64>().map_err(|_| "over 18446744073709551615".into())
+}
+
+/// Multipliers are a plain decimal, `^\d+(\.\d+)?$`.
+pub fn parse_decimal(v: &str) -> Result<f32, String> {
+    let (int, frac) = v.split_once('.').unwrap_or((v, "1"));
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(int) || !digits(frac) {
+        return Err("not a plain decimal number (digits, optionally a point and more digits)".into());
+    }
+    let k: f32 = v.parse().map_err(|e| format!("{e}"))?;
+    if !k.is_finite() {
+        return Err("too large".into());
+    }
+    Ok(k)
 }
 
 /// `--expect-*`: `None` when no flag is given.
@@ -119,21 +146,33 @@ fn expected_arg(args: &Args) -> Option<ExpectedRun> {
             v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
         }
     });
-    let x = ExpectedRun { seed: args.parsed("--expect-seed"), deck, population_multiplier: args.parsed("--expect-multiplier") };
+    let x = ExpectedRun { seed: args.integer("--expect-seed"), deck, population_multiplier: args.decimal("--expect-multiplier") };
     (!x.is_empty()).then_some(x)
+}
+
+/// The verdict line's note on the setup fields not compared with an issued
+/// run ("" when all three were: `setup_checked`).
+fn not_checked_note(c: &SetupChecked) -> String {
+    let missing: Vec<&str> = [(c.seed, "seed"), (c.deck, "deck"), (c.population_multiplier, "multiplier")].iter().filter(|(on, _)| !on).map(|(_, n)| *n).collect();
+    if missing.is_empty() {
+        return String::new();
+    }
+    format!(" ({} not checked against an issued run: --expect-*)", missing.join(", "))
 }
 
 pub fn cmd(args: &[String]) {
     let args = Args::parse(args);
+    // Every flag value is checked before any file is read.
+    let expected = expected_arg(&args);
+    let max_ticks = args.integer("--max-ticks");
     let record = RunRecord::from_json(&read(&args.run)).unwrap_or_else(|e| fail(e));
     let level = args.flag("--level");
     let chunks_path = args.flag("--chunks");
     let shell_arg = args.flag("--shell");
-    let expected = expected_arg(&args);
     let quiet = args.switches.contains("--quiet");
     let cfg = load_config();
     let mut limits = ReplayLimits::for_config(&cfg);
-    if let Some(t) = args.parsed("--max-ticks") {
+    if let Some(t) = max_ticks {
         limits.max_ticks = t;
     }
     let level_pack;
@@ -176,13 +215,37 @@ pub fn cmd(args: &[String]) {
                 s.attempts,
                 s.end_tick,
                 t0.elapsed().as_secs_f64(),
-                if s.setup_checked { "" } else { " (seed, deck and multiplier not checked against an issued run: --expect-*)" }
+                not_checked_note(&s.checked)
             );
         }
         Err(e) => {
             println!("{}", serde_json::to_string(&e).unwrap());
             println!("rejected: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_decimal, parse_integer};
+
+    /// The grammar shared with `tools/verify-run.mjs` (the CLI test runs the
+    /// same values through both).
+    #[test]
+    fn numbers_are_digits_or_a_plain_decimal() {
+        for (v, want) in [("0", Some(0)), ("2", Some(2)), ("007", Some(7)), ("18446744073709551615", Some(u64::MAX))] {
+            assert_eq!(parse_integer(v).ok(), want, "{v:?}");
+        }
+        for v in ["", "+3", "-1", " 3", "3 ", "0x1", "1e3", "3.0", "18446744073709551616", "\u{663}"] {
+            assert!(parse_integer(v).is_err(), "{v:?} must be refused");
+        }
+        for (v, want) in [("0.3", 0.3f32), ("1", 1.0), ("0.375", 0.375), ("2.50", 2.5)] {
+            assert_eq!(parse_decimal(v).map(f32::to_bits), Ok(want.to_bits()), "{v:?}");
+        }
+        let huge = format!("1{}", "0".repeat(400));
+        for v in ["", "+0.3", "-0.3", " 0.3", "0.3 ", ".3", "3.", "0x1", "1e-1", "1E2", "inf", "NaN", "0.3.1", huge.as_str()] {
+            assert!(parse_decimal(v).is_err(), "{v:?} must be refused");
         }
     }
 }

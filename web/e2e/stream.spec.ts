@@ -6,24 +6,19 @@
 // keep arriving, and Retry loading recovers; retry and restart never
 // re-fetch; a second visit is served from the cache; and the run record plus
 // the map bundle verify headless in chunks mode with the browser's hashes.
-import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import type { Page, Route } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import cardsJson from "../../cards.json" with { type: "json" };
-import { blockAt, blocksForDisc } from "../src/map/blocks";
-import { loadConfig, loadLevel, parseBboxes, wayInBbox, waysFromLevel } from "../test/unit/fixtures";
+import { blocksForDisc } from "../src/map/blocks";
+import { loadConfig, loadLevel } from "../test/unit/fixtures";
 import { playPrep, type CardInfo } from "./bot";
-import { expect, hook, test, type RouteExternal } from "./offline";
+import { expect, hook, test } from "./offline";
+import { fixtureOverpass, verifyChunks } from "./streamfixture";
 import { LOAD_WAIT_MS, pageApi } from "./ui";
 
-const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const cfg = loadConfig();
 const level = loadLevel("paris-marais");
-const ways = waysFromLevel(level);
 const PLACE = { lat: level.center_lat, lon: level.center_lon, name: "Marais (fixture)" };
-const OVERPASS = /^https:\/\/(overpass-api\.de|overpass\.private\.coffee)\//;
-const CORS = { "Access-Control-Allow-Origin": "*", "Cross-Origin-Resource-Policy": "cross-origin" };
 /** The loader's disc for wave w: ring radius + block margin + one cell diagonal. */
 const disc = (w: number) => cfg.match.ring_radius_m[w - 1] + cfg.match.block_margin_m + cfg.cell_size_m * Math.SQRT2;
 /** Waves 1–2's blocks, computed here from the block grid alone. */
@@ -35,61 +30,6 @@ const WAVE_MS = 12 * 60_000;
 /** The match seed: the default (1), on which the bot wins waves 1 and 2 of
  *  the fixture on the first try (seeds 2–8 lose one of them). */
 const SEED = 1;
-
-interface Call {
-  blocks: number[];
-  status: number;
-}
-
-/** A fixture Overpass: answers each `way["building"](bbox)` union from the
- *  Marais ways (vertex or segment in a box, like Overpass). `hold` delays
- *  matching queries until released; `fail` answers them 504. */
-function fixtureOverpass() {
-  const calls: Call[] = [];
-  const holds: { pred: (blocks: number[]) => boolean; gate: Promise<void>; release: () => void }[] = [];
-  let fail: ((blocks: number[]) => boolean) | null = null;
-  const handler = async (route: Route) => {
-    const q = new URLSearchParams(route.request().postData() ?? "").get("data") ?? "";
-    const boxes = parseBboxes(q);
-    const blocks = boxes.map(([s, w, n, e]) => blockAt((s + n) / 2, (w + e) / 2));
-    const call: Call = { blocks, status: 0 };
-    calls.push(call);
-    // A copy: a release removes its hold while others still wait on it.
-    for (const h of [...holds]) if (h.pred(blocks)) await h.gate;
-    try {
-      if (fail?.(blocks)) {
-        call.status = 504;
-        return await route.fulfill({ status: 504, headers: CORS, body: "busy" });
-      }
-      const elements = ways.filter((w) => boxes.some((b) => wayInBbox(w, b)));
-      call.status = 200;
-      await route.fulfill({ status: 200, contentType: "application/json", headers: CORS, body: JSON.stringify({ elements }) });
-    } catch {
-      // The page aborted the request meanwhile (leaving the match).
-    }
-  };
-  return {
-    calls,
-    install: (routeExternal: RouteExternal) => routeExternal(OVERPASS, handler),
-    hold(pred: (blocks: number[]) => boolean) {
-      let release!: () => void;
-      const gate = new Promise<void>((r) => (release = r));
-      const h = { pred, gate, release };
-      holds.push(h);
-      return {
-        release: () => {
-          holds.splice(holds.indexOf(h), 1);
-          release();
-        },
-      };
-    },
-    setFail(f: ((blocks: number[]) => boolean) | null) {
-      fail = f;
-    },
-    /** Every block id a query asked for (answered or not). */
-    blocks: () => new Set(calls.flatMap((c) => c.blocks)),
-  };
-}
 
 /** The map screen with the pin on the fixture place (the last place, as
  *  "Start here" saves it), then "Start here": wave 1's prep. */
@@ -132,26 +72,6 @@ async function runWave(page: Page) {
 }
 
 const mapInfo = (page: Page) => hook(page, (h) => h.map!);
-
-/** `sim-headless verify --chunks --shell` (native, release): the summary. */
-function verifyChunks(run: string, map: string): { phase: string; map_source: string; snapshot_hash: string; attempt_hashes: string[]; final_hash: string } {
-  let out: string;
-  try {
-    out = execFileSync("cargo", ["run", "--release", "-q", "-p", "sim-headless", "--", "verify", run, "--chunks", map, "--shell", map, "--quiet"], {
-      cwd: ROOT,
-      encoding: "utf8",
-      maxBuffer: 64 << 20,
-      timeout: 5 * 60_000,
-    });
-  } catch (e) {
-    const err = e as { stdout?: string; stderr?: string };
-    throw new Error(`sim-headless verify rejected the record:\n${err.stdout ?? ""}\n${err.stderr ?? ""}`);
-  }
-  const at = out.lastIndexOf("\nverified:");
-  expect(at, out).toBeGreaterThan(0);
-  console.log(out.slice(at + 1).trim());
-  return JSON.parse(out.slice(0, at));
-}
 
 test("a picked place streams its map: first blocks, background rings, a slow then failing block, Retry loading, no re-fetch, headless verify, cached revisit", async ({ page, routeExternal }, info) => {
   // Alone: about 1 min in Chromium and WebKit, Firefox's WASM about 3x

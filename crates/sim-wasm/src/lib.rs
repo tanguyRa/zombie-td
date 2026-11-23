@@ -243,7 +243,7 @@ pub fn fixture_hash(level_json: &str) -> Result<String, JsValue> {
 // ================================================================== match
 
 use sim_core::match_::{Action, BuildingChunk, Match, MatchSetup};
-use sim_core::record::{ReplayMap, RunRecord};
+use sim_core::record::{ReplayLimits, ReplayMap, ReplayStep, Replayer, RunRecord};
 
 /// A JS error value: the JSON of `{"error": <kind>, ...fields, "message":
 /// <readable text>}` (parse it with `JSON.parse(String(e))`).
@@ -287,6 +287,12 @@ pub struct WasmMatch {
     m: Match,
     pos: Vec<f32>,
     render: Vec<u8>,
+    /// Replay mode (the replay viewer): the record's actions drive the
+    /// match through sim-core's `Replayer`, and `apply` / `add_buildings`
+    /// are refused (`read_only`).
+    replay: Option<Replayer>,
+    /// Checks already handed out by `replay_run`.
+    checks_sent: usize,
 }
 
 #[wasm_bindgen]
@@ -315,13 +321,107 @@ impl WasmMatch {
 
     fn wrap(m: Match) -> WasmMatch {
         let cap = m.sim().x.len();
-        let mut w = WasmMatch { m, pos: vec![0.0; cap * 2], render: vec![0; cap] };
+        let mut w = WasmMatch { m, pos: vec![0.0; cap * 2], render: vec![0; cap], replay: None, checks_sent: 0 };
         w.pack();
         w
     }
 
+    /// Replay a run record (JSON) played on a whole level (JSON): the
+    /// match is built from the record's setup, then `replay_run` applies
+    /// its actions on their ticks and checks every attempt (sim-core
+    /// `Replayer`, the verifier's own rules). Throws the `VerifyError` JSON
+    /// when the record can't even start (format, hashes, map, setup).
+    pub fn replay_level(record_json: &str, level_json: &str) -> Result<WasmMatch, JsValue> {
+        let record = RunRecord::from_json(record_json).map_err(|e| js_msg("bad_record", e))?;
+        let level = LevelPack::from_json(level_json).map_err(|e| js_msg("bad_level", e))?;
+        WasmMatch::replaying(record, ReplayMap::Level(&level))
+    }
+
+    /// Replay a run record on a streamed map: the shell and the chunks
+    /// (a `BuildingChunk[]`, any order; the record's blocks are picked out).
+    pub fn replay_chunks(record_json: &str, shell_json: &str, chunks_json: &str) -> Result<WasmMatch, JsValue> {
+        let record = RunRecord::from_json(record_json).map_err(|e| js_msg("bad_record", e))?;
+        let shell = LevelPack::from_json(shell_json).map_err(|e| js_msg("bad_shell", e))?;
+        let chunks: Vec<BuildingChunk> = serde_json::from_str(chunks_json).map_err(|e| js_msg("bad_chunks", e))?;
+        WasmMatch::replaying(record, ReplayMap::Chunks { shell: &shell, chunks: &chunks })
+    }
+
+    fn replaying(record: RunRecord, map: ReplayMap) -> Result<WasmMatch, JsValue> {
+        let cfg = Config::default_config();
+        let limits = ReplayLimits::for_config(&cfg);
+        let (r, m) = Replayer::start(record, map, None, cfg, sim_core::CardDb::default_cards(), limits).map_err(|e| js_err(&e))?;
+        let mut w = WasmMatch::wrap(m);
+        w.replay = Some(r);
+        Ok(w)
+    }
+
+    /// Whether this match is a replay (read-only).
+    pub fn is_replay(&self) -> bool {
+        self.replay.is_some()
+    }
+
+    /// Advance a replay: apply the record's actions due and step ticks,
+    /// until `max_ticks` ticks or `max_actions` actions were done, or
+    /// `max_ms` of wall time passed (0: no limit), or (`stop_wave` > 0)
+    /// the prep of wave `stop_wave` just opened, or the replay finished.
+    /// Returns `{ticks, actions, done, stopped_at_wave, tick, end_tick,
+    /// next_action, checks: [new ReplayCheck...], summary?, error?}` (the
+    /// error is the `VerifyError` JSON with `message`, the summary the
+    /// `ReplaySummary`; both stay in every later answer).
+    pub fn replay_run(&mut self, max_ticks: u32, max_actions: u32, max_ms: f64, stop_wave: u8) -> Result<String, JsValue> {
+        let Some(r) = self.replay.as_mut() else { return Err(js_msg("not_a_replay", "this match is not a replay")) };
+        let t0 = if max_ms > 0.0 { perf_now() } else { 0.0 };
+        let (mut ticks, mut actions, mut stopped) = (0u32, 0u32, false);
+        // The opening check comes with the first answer, even one that steps nothing.
+        let _ = r.check_start(&self.m);
+        while ticks < max_ticks && actions < max_actions && r.outcome().is_none() {
+            match r.step(&mut self.m) {
+                Ok(ReplayStep::Tick) => ticks += 1,
+                Ok(ReplayStep::Action(_)) => {
+                    actions += 1;
+                    if stop_wave > 0 && self.m.phase() == sim_core::Phase::Prep && self.m.wave() == stop_wave && self.m.tick() == self.m.attempt_start_tick() {
+                        stopped = true;
+                        break;
+                    }
+                }
+                Ok(ReplayStep::Done) | Err(_) => break,
+            }
+            if max_ms > 0.0 && perf_now() - t0 >= max_ms {
+                break;
+            }
+        }
+        let r = self.replay.as_ref().unwrap();
+        let checks = &r.checks()[self.checks_sent..];
+        self.checks_sent = r.checks().len();
+        let mut out = serde_json::json!({
+            "ticks": ticks,
+            "actions": actions,
+            "done": r.outcome().is_some(),
+            "stopped_at_wave": stopped,
+            "tick": self.m.tick(),
+            "end_tick": r.end_tick(),
+            "next_action": r.next_action(),
+            "checks": checks,
+        });
+        match r.outcome() {
+            Some(Ok(s)) => out["summary"] = serde_json::to_value(s).unwrap(),
+            Some(Err(e)) => out["error"] = serde_json::from_str(&js_err(e).as_string().unwrap()).unwrap(),
+            None => {}
+        }
+        self.pack();
+        Ok(out.to_string())
+    }
+
+    /// The record a replay plays (JSON), as given.
+    pub fn replay_record(&self) -> Result<String, JsValue> {
+        self.replay.as_ref().map(|r| r.record().to_json()).ok_or_else(|| js_msg("not_a_replay", "this match is not a replay"))
+    }
+
     /// Add one `BuildingChunk` (JSON). Map data, not a player action.
     pub fn add_buildings(&mut self, chunk_json: &str) -> Result<(), JsValue> {
+        if self.replay.is_some() {
+            return Err(js_msg("read_only", "a replay gets its whole map up front"));
+        }
         let c: BuildingChunk = serde_json::from_str(chunk_json).map_err(|e| js_msg("bad_chunks", e))?;
         self.m.add_buildings(c).map_err(|e| js_err(&e))
     }
@@ -332,6 +432,9 @@ impl WasmMatch {
     /// Apply an `Action` (JSON, e.g. `{"type":"play_card","hand_index":0,
     /// "target":{"point":[x,y]}}`). A refusal throws the `ActionError` JSON.
     pub fn apply(&mut self, action_json: &str) -> Result<(), JsValue> {
+        if self.replay.is_some() {
+            return Err(js_msg("read_only", "a replay plays the record's actions only"));
+        }
         let a: Action = serde_json::from_str(action_json).map_err(|e| js_msg("bad_action", e))?;
         let r = self.m.apply(a).map_err(|e| js_err(&e));
         self.pack();
@@ -339,7 +442,11 @@ impl WasmMatch {
     }
 
     /// Advance `ticks` ticks (any phase; result phases just count ticks).
+    /// A replay steps only through `replay_run`.
     pub fn step(&mut self, ticks: u32) {
+        if self.replay.is_some() {
+            return;
+        }
         for _ in 0..ticks {
             self.m.step_timed(&mut PerfClock);
         }

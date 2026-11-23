@@ -8,7 +8,9 @@ import parisUrl from "../../levels/paris-marais.json?url";
 import suburbUrl from "../../levels/suburb.json?url";
 import cardsJson from "../../cards.json?raw";
 import { Place, createExplore } from "./explore";
-import { MapSession } from "./mapsession";
+import { MapSession, blockCache } from "./mapsession";
+import type { ReplaySource } from "./replay";
+import { ReplayUi } from "./ui/replayui";
 import { parseSeed } from "./seed";
 import { placeLabel } from "./profile/sanitize";
 import { ProfileUi } from "./ui/profileui";
@@ -88,7 +90,7 @@ const TEST_MODE = new URLSearchParams(location.search).get("test") === "1";
 /** Test mode retries a failed Overpass query after 50 ms instead of 1 s
  *  (doubling each time): a clock control, the blocks are the same. */
 const TEST_BACKOFF_MS = 50;
-/** Test mode gives an Overpass request and a batch an hour instead of 45 s
+/** Test mode gives an Overpass request and a batch an hour instead of 90 s
  *  and 150 s: the stream E2E holds a "slow" request through whole waves
  *  (minutes in Firefox). The limits themselves are unit-tested. */
 const TEST_TIME_LIMIT_MS = 60 * 60_000;
@@ -152,6 +154,9 @@ let phaseBusy = false;
 let keepPending: { list: number[]; inFlight: number } | null = null;
 // The seed of the match on screen (a decimal string: u64, exact).
 let matchSeed = "1";
+// The replay on screen (the replay viewer), or null for a played match. A
+// replay is read-only: no action is sent, nothing reaches the profile.
+let replay: ReplaySource | null = null;
 
 // Interpolation buffers (alternated so deck.gl sees a new array each frame).
 let posBufs: F32[] = [new Float32Array(0), new Float32Array(0)];
@@ -288,7 +293,21 @@ const profileUi = new ProfileUi({
   snapshot: () => (status && level ? { status, results, towers, structures, rings: level.rings } : null),
   record: fetchRecord,
   resultShowsMatchWon: () => !$("result").hidden && $("result").dataset.kind === "match_won",
+  openReplay: (json, name) => void replayUi.openRecord(json, name),
 });
+
+// The replay viewer (T8, ui/replayui.ts): the picker on the map screen and
+// the panel over the game view. The built-in levels replay offline; a
+// streamed run takes its map bundle, or the block cache when it has every
+// block of the record.
+const replayUi = new ReplayUi({
+  levels: PRESETS.map((p) => ({ name: p.name, load: () => levelJson(p) })),
+  cache: blockCache,
+  start: (src) => enterReplay(src),
+  send: (m) => send(m),
+  toast: (msg) => toast(msg),
+});
+$("open-replay").addEventListener("click", () => replayUi.openPicker());
 /** Bumped by every new match and by "← Map": a match setup still waiting
  *  for the profile is dropped. */
 let matchGen = 0;
@@ -395,6 +414,8 @@ if (TEST_MODE) {
         void newMatch();
       },
       profile: () => profileUi.hook(),
+      replay: () => replayUi.hook(),
+      clearMapCache: async () => (await blockCache()).clear(),
       picked: () => explore.picked(),
       backToMap,
     });
@@ -408,7 +429,7 @@ const phase = () => status?.phase ?? null;
 
 // ---------------------------------------------------------------- input
 map.on("click", (e) => {
-  if (!inGame() || !status) return;
+  if (!inGame() || !status || replay) return;
   const p = toSim(e.lngLat);
   if (!p) return;
   void onMapClick(p[0], p[1]);
@@ -564,7 +585,7 @@ function drawnLength(d: number[][] | null): number {
 
 function selectCard(i: number) {
   const c = hand[i];
-  if (!c) return;
+  if (!c || replay) return;
   if (sel?.handIndex === i) {
     clearSelection();
     return;
@@ -704,6 +725,7 @@ function keptNow(): number[] {
 }
 
 async function toggleKeep(i: number) {
+  if (replay) return;
   const list = keptNow();
   const at = list.indexOf(i);
   if (at >= 0) list.splice(at, 1);
@@ -735,7 +757,7 @@ function renderHand() {
   for (const c of hand) {
     const def = CARDS.get(c.card);
     const b = document.createElement("div");
-    b.className = `hcard rarity-${c.rarity}${c.playable ? "" : " unplayable"}${sel?.handIndex === c.hand_index ? " selected" : ""}`;
+    b.className = `hcard rarity-${c.rarity}${c.playable ? "" : " unplayable"}${sel?.handIndex === c.hand_index ? " selected" : ""}${replay ? " readonly" : ""}`;
     b.dataset.card = c.card;
     b.dataset.index = String(c.hand_index);
     b.setAttribute("role", "button");
@@ -758,6 +780,12 @@ function renderHand() {
       selectCard(c.hand_index);
     });
     const isKept = kept.includes(c.hand_index);
+    if (replay) {
+      // Read-only: the record's keep marks, no controls.
+      if (isKept) b.appendChild(Object.assign(document.createElement("span"), { className: "c-keep on", textContent: "Kept" }));
+      el.appendChild(b);
+      continue;
+    }
     const keep = document.createElement("button");
     keep.className = `c-keep${isKept ? " on" : ""}`;
     keep.textContent = isKept ? "Kept for next wave" : "Keep";
@@ -1169,7 +1197,7 @@ worker.onmessage = (ev: MessageEvent<FromWorkerTagged>) => {
   if (liveMatch === 0 || m.match !== liveMatch) return;
   switch (m.type) {
     case "ready": {
-      profileUi.tracker.onReady();
+      if (!replay) profileUi.tracker.onReady();
       level = m.level;
       shared = m.shared;
       posBufs = [new Float32Array(level.capacity * 2), new Float32Array(level.capacity * 2)];
@@ -1208,7 +1236,7 @@ worker.onmessage = (ev: MessageEvent<FromWorkerTagged>) => {
       // structure ids may be reused, the hand is new.
       const reset = !!prev && (prev.retries !== status.retries || prev.restarts !== status.restarts);
       if (prev?.phase !== status.phase || reset) onPhaseChange(reset);
-      profileUi.tracker.onStatus(status); // first blood
+      if (!replay) profileUi.tracker.onStatus(status); // first blood
       updateControls();
       updateHud();
       break;
@@ -1245,6 +1273,9 @@ worker.onmessage = (ev: MessageEvent<FromWorkerTagged>) => {
       break;
     case "field":
       fieldImage = buildFieldImage(m.data, m.w, m.h);
+      break;
+    case "replay":
+      if (replay) replayUi.onProgress(m);
       break;
   }
 };
@@ -1360,6 +1391,7 @@ async function enterGame(place: Place) {
   profileUi.tracker.abandon(); // a match still on screen is left
   matchGen++;
   liveMatch = 0;
+  leaveReplay();
   document.body.dataset.screen = "game";
   explore.setActive(false);
   overlay.setProps({ layers: [] });
@@ -1397,6 +1429,67 @@ async function enterGame(place: Place) {
     if (abort.signal.aborted) return;
     prepError(e instanceof Error ? e.message : String(e));
   }
+}
+
+/** A built-in level's pack (fetched once). */
+async function levelJson(place: Place): Promise<string> {
+  let json = levelCache.get(placeKey(place));
+  if (!json) {
+    json = await (await fetch(place.presetUrl!)).text();
+    levelCache.set(placeKey(place), json);
+  }
+  return json;
+}
+
+/** The replay viewer: the game view on the record's map, the worker
+ *  replaying the record (read-only). No profile call: the match tracker
+ *  never sees a replay. */
+function enterReplay(src: ReplaySource) {
+  matchGen++;
+  const gen = matchGen;
+  prepAbort?.abort();
+  session?.abort();
+  session = null;
+  currentLevelJson = "";
+  replay = src;
+  document.body.dataset.screen = "game";
+  document.body.dataset.replay = "1";
+  explore.setActive(false);
+  overlay.setProps({ layers: [] });
+  const sh = src.record.map.shell;
+  setGeo(sh.center_lat, sh.center_lon);
+  currentPlace = { name: `Replay · ${src.title}`, lat: sh.center_lat, lon: sh.center_lon };
+  $("place").textContent = currentPlace.name;
+  $("place").title = `${src.title} · seed ${src.record.setup.seed}`;
+  matchSeed = src.record.setup.seed;
+  $("result").hidden = true;
+  shownResult = null;
+  level = null;
+  status = null;
+  hand = [];
+  structures = [];
+  results = [];
+  attempts = [];
+  towers = new Float32Array(0);
+  fences = new Float32Array(0);
+  buildings = [];
+  inspected = null;
+  clearSelection();
+  fitted = false;
+  fitView();
+  updateControls();
+  prepStatus("Preparing the replay…");
+  liveMatch = gen;
+  send({ type: "init", match: gen, map: src.map, setup: { seed: src.record.setup.seed }, test: TEST_MODE, replay: { record: src.recordJson } });
+  replayUi.begin(src);
+}
+
+/** Back from a replay to the normal game UI. */
+function leaveReplay() {
+  if (!replay) return;
+  replay = null;
+  delete document.body.dataset.replay;
+  replayUi.end();
 }
 
 /** A picked place: its map streams in blocks (waves 1–2 first, then the
@@ -1441,6 +1534,7 @@ function backToMap() {
   inspected = null;
   updateInspect();
   renderHand();
+  leaveReplay();
   document.body.dataset.screen = "explore";
   overlay.setProps({ layers: [] });
   explore.setActive(true);
@@ -1527,6 +1621,9 @@ function onPhaseChange(reset = false) {
   // structures back: an open inspect panel would show another structure.
   if (reset) closeInspect();
   else void refreshInspect();
+  // A replay shows no result panel (its buttons would act) and never
+  // reaches the profile: the replay panel shows the checks.
+  if (replay) return;
   // The worker sends the state (hand, results) before the status that
   // changed the phase, so the results are already here.
   if (p === "wave_won" || p === "wave_lost" || p === "match_won") showResult(p);
@@ -1635,7 +1732,7 @@ async function downloadMap() {
 $("back").addEventListener("click", backToMap);
 $("prep-back").addEventListener("click", backToMap);
 $("r-map").addEventListener("click", backToMap);
-$("prep-retry").addEventListener("click", () => currentPlace && enterGame(currentPlace));
+$("prep-retry").addEventListener("click", () => (replay ? enterReplay(replay) : currentPlace && enterGame(currentPlace)));
 // The seed only commits on Enter or New match (a blur alone does nothing).
 $("seed").addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Enter") requestNewMatch();
@@ -1692,6 +1789,11 @@ window.addEventListener("keydown", (e) => {
   // Anywhere else (a toolbar button keeps focus after a click) it pauses;
   // preventDefault here, in keydown, stops the focused button's own Space
   // activation, so the click is not repeated.
+  if (e.key === " " && inGame() && replay && !t.closest("#hand")) {
+    e.preventDefault();
+    send({ type: "pause_toggle" });
+    return;
+  }
   if (e.key === " " && phase() === "running" && !t.closest("#hand")) {
     e.preventDefault();
     send({ type: "pause_toggle" });

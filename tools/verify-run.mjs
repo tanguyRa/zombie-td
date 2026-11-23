@@ -46,19 +46,30 @@ const chunks = arg("--chunks");
 const shell = arg("--shell");
 if (!!level === !!chunks || !!chunks !== !!shell) usage("give either --level, or --chunks and --shell");
 
+// One number grammar with `sim-headless verify` (parse_integer and
+// parse_decimal in crates/sim-headless/src/verify.rs, same tests): a seed
+// is `^\d+$` up to 2^64 - 1, a multiplier a plain decimal `^\d+(\.\d+)?$`
+// (no sign, spaces, exponent, hex, inf or nan).
+const U64_MAX = (1n << 64n) - 1n;
+function integerArg(name, v) {
+  if (!/^\d+$/.test(v)) usage(`${name} ${JSON.stringify(v)}: not a whole number (digits only)`);
+  if (BigInt(v) > U64_MAX) usage(`${name} ${JSON.stringify(v)}: over 18446744073709551615`);
+  return v; // a decimal string: JS numbers stop at 2^53
+}
+function decimalArg(name, v) {
+  if (!/^\d+(\.\d+)?$/.test(v)) usage(`${name} ${JSON.stringify(v)}: not a plain decimal number (digits, optionally a point and more digits)`);
+  const k = Number(v);
+  if (!Number.isFinite(Math.fround(k))) usage(`${name} ${JSON.stringify(v)}: too large`);
+  return k;
+}
+
 const expected = {};
 const seed = arg("--expect-seed");
-if (seed !== undefined) {
-  if (!/^\d+$/.test(seed)) usage(`--expect-seed ${JSON.stringify(seed)}: not a decimal integer`);
-  expected.seed = seed; // a decimal string: JS numbers stop at 2^53
-}
+if (seed !== undefined) expected.seed = integerArg("--expect-seed", seed);
 const deck = arg("--expect-deck");
 if (deck !== undefined) expected.deck = deck.split(",").map((s) => s.trim()).filter(Boolean);
 const mult = arg("--expect-multiplier");
-if (mult !== undefined) {
-  if (mult.trim() === "" || !Number.isFinite(Number(mult))) usage(`--expect-multiplier ${JSON.stringify(mult)}: not a number`);
-  expected.population_multiplier = Number(mult);
-}
+if (mult !== undefined) expected.population_multiplier = decimalArg("--expect-multiplier", mult);
 const expectedJson = Object.keys(expected).length ? JSON.stringify(expected) : undefined;
 
 // A `BuildingChunk[]`, or a map bundle (the browser's "Download map": the
@@ -86,6 +97,19 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const { verify_level, verify_chunks } = require(join(root, "crates/sim-wasm/pkg-node/sim_wasm.js"));
 
+// The verdict's note on the setup fields not compared with an issued run
+// ("" when all three were, i.e. `setup_checked`).
+function notChecked(c) {
+  const missing = [
+    [c.seed, "seed"],
+    [c.deck, "deck"],
+    [c.population_multiplier, "multiplier"],
+  ]
+    .filter(([on]) => !on)
+    .map(([, n]) => n);
+  return missing.length ? ` (${missing.join(", ")} not checked against an issued run: --expect-*)` : "";
+}
+
 const record = readFileSync(run, "utf8");
 const t0 = performance.now();
 try {
@@ -94,7 +118,7 @@ try {
     : verify_chunks(record, readFileSync(shell, "utf8"), chunksText, expectedJson);
   const s = JSON.parse(summary);
   console.log(JSON.stringify(s, null, 2));
-  console.log(`verified: ${s.phase} at wave ${s.wave}, ${s.waves_won} waves won, ${s.attempts} attempts, ${s.end_tick} ticks, ${((performance.now() - t0) / 1000).toFixed(2)}s (WASM)${s.setup_checked ? "" : " (seed, deck and multiplier not checked against an issued run: --expect-*)"}`);
+  console.log(`verified: ${s.phase} at wave ${s.wave}, ${s.waves_won} waves won, ${s.attempts} attempts, ${s.end_tick} ticks, ${((performance.now() - t0) / 1000).toFixed(2)}s (WASM)${notChecked(s.checked)}`);
 } catch (e) {
   const err = JSON.parse(String(e));
   console.log(JSON.stringify(err));

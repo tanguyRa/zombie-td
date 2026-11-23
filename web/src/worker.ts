@@ -33,6 +33,8 @@ import {
   Pick,
   Query,
   QueryResult,
+  ReplayCheck,
+  ReplayProgressMsg,
   SLOTS,
   SPEEDS,
   Structure,
@@ -76,6 +78,37 @@ let gridW = 0;
 let cell = 2;
 const queue: { id: number; action: Action }[] = [];
 const chunks = new ChunkQueue();
+
+// ---- replay viewer (init.replay): the record's actions drive the match
+// through sim-core's `Replayer` (`WasmMatch.replay_*` / `replay_run`); pause
+// and speed decide only when it steps, like a played match. Never claims,
+// never reads or writes the profile: the page sends only the record and map.
+/** The init a replay was built from (to rebuild it for a jump back). */
+let replaySrc: Extract<ToWorker, { type: "init" }> | null = null;
+/** A jump in progress: run as fast as possible until this wave's prep opens. */
+let jumpTo: number | null = null;
+/** Steps asked for while paused (`replay_ctl step`). */
+let stepsAsked = 0;
+/** Wall time before which the next replay slice waits (a short hold after
+ *  each action at 1×–4×, so a prep's plays can be followed). */
+let holdUntil = 0;
+let replayReset = true;
+let replayDone = false;
+/** Hold after a replayed action at 1× (divided by the speed). */
+const REPLAY_ACTION_HOLD_MS = 400;
+interface ReplayRun {
+  ticks: number;
+  actions: number;
+  done: boolean;
+  stopped_at_wave: boolean;
+  tick: number;
+  end_tick: number;
+  next_action: number;
+  checks: ReplayCheck[];
+  summary?: Record<string, unknown>;
+  error?: ReplayProgressMsg["error"];
+}
+let replayActions = 0;
 
 /** The page's id of the match being built or played (the last `init`'s
  *  `match`; 0 after a `stop`): every message is tagged with it. */
@@ -190,7 +223,7 @@ function afterChange() {
   const st = status();
   if (st.phase !== lastPhase) {
     if (st.phase === "prep" || lastPhase === null) sendGeometryIfChanged();
-    if (st.phase === "prep") {
+    if (st.phase === "prep" && !replaySrc) {
       tickMs = [];
       // Every prep starts unpaused: a pause belongs to the wave it was
       // pressed in, not to the next one or a retry. (Tests that need a wave
@@ -305,6 +338,86 @@ function loop(gen: number) {
   const fast = !paused && speed === 0 && m.phase() === "running";
   loopTimer = setTimeout(() => loop(gen), fast ? 0 : Math.max(0, TICK_MS - acc - 1));
 }
+/** One replay slice: `replay_run` with these budgets, then everything the
+ *  page shows, and the `replay` progress message. */
+function replaySlice(maxTicks: number, maxActions: number, maxMs: number, stopWave: number): ReplayRun {
+  const t0 = performance.now();
+  const r = JSON.parse(m!.replay_run(maxTicks, maxActions, maxMs, stopWave)) as ReplayRun;
+  if (r.ticks > 0) {
+    // Per-tick cost of this slice (the HUD's "Sim ms/tick").
+    tickMs.push((performance.now() - t0) / r.ticks);
+    if (tickMs.length > 100) tickMs.shift();
+  }
+  if (r.ticks > 0 || r.actions > 0 || r.checks.length > 0 || r.done !== replayDone || replayReset) {
+    publish();
+    if (r.actions > 0 || status().phase !== lastPhase) afterChange();
+    else {
+      sendStatus();
+      if (performance.now() - lastPlacementsSend > 250) sendPlacements();
+    }
+    postReplay(r);
+  }
+  replayDone = r.done;
+  return r;
+}
+
+function postReplay(r: ReplayRun) {
+  post({
+    type: "replay",
+    reset: replayReset,
+    tick: r.tick,
+    endTick: r.end_tick,
+    nextAction: r.next_action,
+    actions: replayActions,
+    checks: r.checks,
+    done: r.done,
+    error: r.error ?? null,
+    summary: r.summary ?? null,
+    paused,
+    speed,
+    jumping: jumpTo,
+  });
+  replayReset = false;
+}
+
+function replayLoop(gen: number) {
+  if (gen !== generation || !m) return;
+  const now = performance.now();
+  let next = TICK_MS;
+  if (jumpTo !== null) {
+    const r = replaySlice(1e9, 1e9, FAST_SLICE_MS, jumpTo);
+    if (r.stopped_at_wave || r.done) {
+      jumpTo = null;
+      paused = true;
+      sendStatus();
+      postReplay({ ...r, checks: [] });
+    }
+    next = 0;
+  } else if (stepsAsked > 0) {
+    stepsAsked--;
+    replaySlice(1, 1e9, 0, 0);
+    next = 0;
+  } else if (!paused && !replayDone && now >= holdUntil) {
+    if (speed === 0) {
+      replaySlice(1e9, 1e9, FAST_SLICE_MS, 0);
+      next = 0;
+    } else {
+      acc += now - lastTime;
+      if (acc > 250) acc = 250;
+      const ticks = Math.floor(acc / TICK_MS) * speed;
+      if (ticks > 0) {
+        acc -= Math.floor(acc / TICK_MS) * TICK_MS;
+        // One action per slice, then a short hold: a prep's plays (applied
+        // on one tick, since the browser never steps prep) can be followed.
+        const r = replaySlice(ticks, 1, 0, 0);
+        if (r.actions > 0) holdUntil = performance.now() + REPLAY_ACTION_HOLD_MS / speed;
+      }
+    }
+  } else acc = 0;
+  lastTime = now;
+  loopTimer = setTimeout(() => replayLoop(gen), next === 0 ? 0 : Math.max(0, TICK_MS - acc - 1));
+}
+
 function query(q: Query): QueryResult {
   const w = m!;
   switch (q.q) {
@@ -383,11 +496,23 @@ async function initMatch(msg: Extract<ToWorker, { type: "init" }>) {
   if (myGen !== generation) return; // a newer init or a stop arrived meanwhile
   memory = wasm.memory;
   testMode = !!msg.test;
+  replaySrc = msg.replay ? msg : null;
+  jumpTo = null;
+  stepsAsked = 0;
+  holdUntil = 0;
+  replayReset = true;
+  replayDone = false;
   try {
-    const setup = JSON.stringify(msg.setup);
-    m = "level" in map ? new WasmMatch(map.level, setup) : WasmMatch.new_streaming(map.shell, setup, JSON.stringify(map.chunks));
+    if (msg.replay) {
+      const rec = msg.replay.record;
+      replayActions = (JSON.parse(rec) as { actions: unknown[] }).actions.length;
+      m = "level" in map ? WasmMatch.replay_level(rec, map.level) : WasmMatch.replay_chunks(rec, map.shell, JSON.stringify(map.chunks));
+    } else {
+      const setup = JSON.stringify(msg.setup);
+      m = "level" in map ? new WasmMatch(map.level, setup) : WasmMatch.new_streaming(map.shell, setup, JSON.stringify(map.chunks));
+    }
   } catch (e) {
-    post({ type: "error", message: `Could not build the match: ${errorText(e)}`, fatal: true });
+    post({ type: "error", message: `${msg.replay ? "Can't replay this run" : "Could not build the match"}: ${errorText(e)}`, fatal: true });
     return;
   }
   gridW = m.grid_w();
@@ -418,10 +543,38 @@ async function initMatch(msg: Extract<ToWorker, { type: "init" }>) {
     },
   });
   afterChange();
-  if ("chunks" in map) flushChunks(true);
   lastTime = performance.now();
   acc = 0;
+  if (replaySrc) {
+    // The opening check (attempt 0's prep) and the first report.
+    replaySlice(0, 0, 0, 0);
+    replayLoop(generation);
+    return;
+  }
+  if ("chunks" in map) flushChunks(true);
   loop(generation);
+}
+
+/** Jump to wave `w`'s first prep: forward from here, or (at or past it)
+ *  rebuilt from the record first. Paused when it gets there. */
+async function replayJump(w: number) {
+  if (!m || !replaySrc) return;
+  const st = status();
+  const ahead = st.wave < w;
+  if (!ahead) {
+    const src = replaySrc;
+    const keepSpeed = speed;
+    await initMatch(src);
+    speed = keepSpeed;
+    if (!m || replaySrc !== src) return;
+  }
+  if (w <= 1) {
+    paused = true;
+    sendStatus();
+    postReplay(JSON.parse(m.replay_run(0, 0, 0, 0)) as ReplayRun);
+    return;
+  }
+  jumpTo = w;
 }
 
 self.onmessage = async (ev: MessageEvent<ToWorker>) => {
@@ -430,6 +583,8 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
   if (msg.type === "stop") {
     generation++;
     matchTag = 0;
+    replaySrc = null;
+    jumpTo = null;
     if (loopTimer) clearTimeout(loopTimer);
     m?.free();
     m = null;
@@ -438,6 +593,8 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     return;
   }
   if (msg.type === "chunk") {
+    // A replay has its whole map up front.
+    if (replaySrc) return;
     // Kept for the match being built when there is none yet (dropped by
     // the next init or stop).
     chunks.push(msg.chunk);
@@ -451,10 +608,47 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     else if (msg.type === "query" || msg.type === "record" || msg.type === "hash") post({ type: msg.type, id: msg.id, aborted: true } as FromWorker);
     return;
   }
+  if (replaySrc) {
+    // The replay viewer: read-only. Its own controls, pause and speed (any
+    // phase), the read-only queries; actions are refused.
+    switch (msg.type) {
+      case "action":
+        post({ type: "action", id: msg.id, action: msg.action, error: { error: "read_only", message: "a replay plays the record's actions only" } });
+        return;
+      case "replay_ctl":
+        if (msg.op === "step") {
+          paused = true;
+          stepsAsked++;
+        } else void replayJump(msg.wave);
+        sendStatus();
+        return;
+      case "pause":
+        paused = msg.paused;
+        break;
+      case "pause_toggle":
+        paused = !paused;
+        break;
+      case "speed":
+        if (SPEEDS.includes(msg.speed) || msg.speed === 0) speed = msg.speed;
+        else post({ type: "error", message: `speed ${msg.speed} is not allowed` });
+        break;
+      case "pause_at":
+        break;
+      default:
+        handleRead(msg);
+        return;
+    }
+    holdUntil = 0;
+    sendStatus();
+    postReplay(JSON.parse(m.replay_run(0, 0, 0, 0)) as ReplayRun);
+    return;
+  }
   switch (msg.type) {
     case "action":
       // Applied at the next tick boundary (the start of the next loop turn).
       queue.push({ id: msg.id, action: msg.action });
+      break;
+    case "replay_ctl":
       break;
     case "pause":
       // Only a running wave can be paused (prep and the result screens
@@ -475,6 +669,15 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       if (testMode) pauseAt = msg.tick;
       sendStatus();
       break;
+    default:
+      handleRead(msg);
+  }
+};
+
+/** Read-only requests, for a played match and a replay alike. */
+function handleRead(msg: ToWorker) {
+  const w = m!;
+  switch (msg.type) {
     case "query":
       if (msg.query.q === "agents" && !testMode) {
         post({ type: "query", id: msg.id, aborted: true });
@@ -483,15 +686,16 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       post({ type: "query", id: msg.id, result: query(msg.query) });
       break;
     case "record":
-      post({ type: "record", id: msg.id, json: m.record() });
+      // A replay answers with the record it plays.
+      post({ type: "record", id: msg.id, json: replaySrc ? w.replay_record() : w.record() });
       break;
     case "hash":
-      post({ type: "hash", id: msg.id, tick: Number(m.tick()), hash: m.state_hash() });
+      post({ type: "hash", id: msg.id, tick: Number(w.tick()), hash: w.state_hash() });
       break;
     case "field": {
-      const data = new Int32Array(msg.kind === "chase" ? m.chase_field() : m.flee_field());
-      post({ type: "field", kind: msg.kind, data, w: m.grid_w(), h: m.grid_h() }, [data.buffer]);
+      const data = new Int32Array(msg.kind === "chase" ? w.chase_field() : w.flee_field());
+      post({ type: "field", kind: msg.kind, data, w: w.grid_w(), h: w.grid_h() }, [data.buffer]);
       break;
     }
   }
-};
+}

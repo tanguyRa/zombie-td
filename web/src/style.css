@@ -155,3 +155,35 @@ dd.strong { font-weight: 700; color: var(--accent); }
 #r-waves th, #r-waves td { padding: 2px 10px; text-align: right; border-bottom: 1px solid var(--line); }
 #r-waves th { color: var(--text-2); font-weight: 500; }
 .card .row { flex-wrap: wrap; }
+
+/* ---- replay viewer (T8) */
+#replay-panel { top: 68px; left: 16px; width: 260px; max-height: calc(100vh - 230px); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+#replay-panel[hidden] { display: none; }
+#replay-panel h2, #replay-panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-2); margin: 4px 0 0; }
+#replay-panel .help { margin: 0; font-size: 12px; color: var(--text-2); }
+body[data-replay="1"] #tools,
+body[data-replay="1"] #topbar .group,
+body[data-replay="1"] #topbar label,
+body[data-replay="1"] #new-match,
+body[data-replay="1"] #result { display: none !important; }
+body[data-replay="1"] #hand { left: 292px; }
+.hcard.readonly { cursor: default; opacity: 0.9; }
+.rv-progress { height: 6px; background: #2a2d33; border-radius: 3px; overflow: hidden; }
+.rv-progress .fill { height: 100%; background: var(--accent); width: 0; }
+#rv-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+#rv-checks li { display: flex; align-items: center; gap: 6px; }
+#rv-checks li.bad { color: #ffd0d0; }
+.rv-att { flex: 1; }
+.rv-dot { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #2a2d33; color: var(--text-2); }
+.rv-dot.ok { background: #1d5a34; color: #c8f5d8; }
+.rv-dot.bad { background: #7a2020; color: #ffd0d0; }
+.rv-verdict { margin: 0; font-size: 13px; }
+.rv-verdict[data-state="ok"] { color: #a9f0c4; }
+.rv-verdict[data-state="bad"] { color: #ffb3b3; }
+.rp-card { max-width: 520px; }
+.rp-drop { display: block; border: 2px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center; cursor: pointer; color: var(--text); margin: 10px 0; }
+.rp-drop.over { border-color: var(--accent); background: #1d3a2a; }
+#rp-files { display: none; }
+#rp-loaded { margin: 0 0 8px; padding-left: 18px; font-size: 12px; }
+#replay-picker .hint { min-height: 0; }
+.hist-buttons { display: flex; gap: 6px; }

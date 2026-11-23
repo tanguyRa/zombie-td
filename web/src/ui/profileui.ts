@@ -198,6 +198,8 @@ export interface ProfileUiDeps {
   record: () => Promise<string>;
   /** The result panel is showing the match won (the payout goes into it). */
   resultShowsMatchWon: () => boolean;
+  /** Open the replay viewer on a stored run record (the history's Replay). */
+  openReplay?: (recordJson: string, name: string) => void;
 }
 
 export class ProfileUi {
@@ -749,6 +751,19 @@ export class ProfileUi {
           }),
         );
       });
+      // Replay: reads the stored record only (the viewer never writes the profile).
+      const rp = button("Replay", { class: "small hist-replay" }, () => {
+        void this.track(
+          p.getMatch(s.matchId).then((r) => {
+            if (!r?.runRecord) {
+              this.d.toast("No run record stored for this match");
+              return;
+            }
+            this.closeScreen();
+            this.d.openReplay?.(JSON.stringify(r.runRecord), `${where} · ${m.claimedAt.slice(0, 10)}`);
+          }),
+        );
+      });
       const outcome = m.cleared ? "Cleared" : `Abandoned in wave ${s.furthestWave}`;
       list.append(
         el(
@@ -763,14 +778,14 @@ export class ProfileUi {
               `${(s.savedPerWave.length ? Math.max(...s.savedPerWave) : 0).toLocaleString("en-US")} saved · ${m.payout.total} ticket${m.payout.total === 1 ? "" : "s"}` +
               (s.mvpCard ? ` · MVP ${cardName(s.mvpCard)}` : ""),
           ),
-          dl,
+          el("span", { class: "hist-buttons" }, rp, dl),
         ),
       );
     }
     return el(
       "div",
       { id: "history" },
-      el("p", { class: "hint", text: items.length ? `${items.length} match${items.length === 1 ? "" : "es"}, newest first. The map of a streamed match is not stored: download it from the match panel at the end of the match.` : "No match yet." }),
+      el("p", { class: "hint", text: items.length ? `${items.length} match${items.length === 1 ? "" : "es"}, newest first. Replay plays a run back with its hash checks. The map of a streamed match is not stored: a replay takes it from this browser's map cache, or from the map bundle downloaded from the match panel at the end of the match.` : "No match yet." }),
       list,
     );
   }

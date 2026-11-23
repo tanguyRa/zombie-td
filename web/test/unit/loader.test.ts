@@ -512,7 +512,7 @@ describe("MapLoader: time to a permanent failure", () => {
     expect(failedAt).toBe(2 * OVERPASS_REQUEST_TIMEOUT_MS);
     expect(failedAt).toBeLessThanOrEqual(BOUND_MS);
     expect(err!.message).toMatch(
-      /ring 3 can't be loaded: \d+ blocks? failed \(Overpass could not load these blocks within 150 s \(last error: Overpass did not answer within 90 s\)\. Try again in a minute\.\)/,
+      /ring 3 can't be loaded: \d+ blocks? failed \(Overpass could not load these blocks in time \(last error: Overpass did not answer within 90 s\)\. Try again in a minute\.\)/,
     );
     await vi.advanceTimersByTimeAsync(BOUND_MS);
     await l.done();
@@ -539,7 +539,7 @@ describe("MapLoader: time to a permanent failure", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(r.at).toBe(DEFAULT_BATCH_BUDGET_MS - 1 + OVERPASS_REQUEST_TIMEOUT_MS);
     expect(r.at).toBeLessThanOrEqual(BOUND_MS);
-    expect(r.err!.message).toBe("Overpass could not load these blocks within 150 s (last error: Overpass did not answer within 90 s). Try again in a minute.");
+    expect(r.err!.message).toBe("Overpass could not load these blocks in time (last error: Overpass did not answer within 90 s). Try again in a minute.");
     expect(calls.length).toBe(3);
   });
 
@@ -561,7 +561,7 @@ describe("MapLoader: time to a permanent failure", () => {
     // Attempt 1: both endpoints (0-120 s); backoff 1 s; attempt 2 starts at
     // 121 s, its first endpoint answers at 181 s, past the budget: no more.
     expect(r.at).toBe(181_000);
-    expect(r.err!.message).toBe("Overpass could not load these blocks within 150 s (last error: Overpass is busy (504)). Try again in a minute.");
+    expect(r.err!.message).toBe("Overpass could not load these blocks in time (last error: Overpass is busy (504)). Try again in a minute.");
     expect(calls.length).toBe(3);
   });
 
@@ -584,7 +584,7 @@ describe("MapLoader: time to a permanent failure", () => {
     await vi.advanceTimersByTimeAsync(60_000 + OVERPASS_REQUEST_TIMEOUT_MS);
     // The first endpoint runs to its 90 s limit; the budget (60 s) is over by then, so the second is never tried.
     expect(r.at).toBe(OVERPASS_REQUEST_TIMEOUT_MS);
-    expect(r.err!.message).toBe("Overpass could not load these blocks within 60 s (last error: Overpass did not answer within 90 s). Try again in a minute.");
+    expect(r.err!.message).toBe("Overpass could not load these blocks in time (last error: Overpass did not answer within 90 s). Try again in a minute.");
     expect(calls.length).toBe(1);
   });
 });

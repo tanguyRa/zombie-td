@@ -785,6 +785,7 @@ fn the_issued_seed_deck_and_multiplier_are_enforced() {
     let issued = ExpectedRun { seed: Some(p.setup.seed), deck: Some(p.setup.deck.clone()), population_multiplier: Some(p.setup.population_multiplier) };
     let s = run(&issued).unwrap();
     assert_eq!(s.setup, p.setup);
+    assert!(s.setup_checked && s.checked.all(), "{:?}", s.checked);
     let t = Instant::now();
     let e = run(&ExpectedRun { seed: Some(p.setup.seed + 1), ..issued.clone() }).unwrap_err();
     assert!(matches!(&e, VerifyError::Unexpected { what, .. } if what == "seed"), "{e:?}");
@@ -796,8 +797,16 @@ fn the_issued_seed_deck_and_multiplier_are_enforced() {
     let e = run(&ExpectedRun { population_multiplier: Some(p.setup.population_multiplier * 1.25), ..issued.clone() }).unwrap_err();
     assert!(matches!(&e, VerifyError::Unexpected { what, .. } if what == "population_multiplier"), "{e:?}");
     assert!(t.elapsed().as_millis() < 500, "{:?}", t.elapsed());
-    // Only the seed given: the rest unchecked.
-    run(&ExpectedRun { seed: Some(p.setup.seed), ..Default::default() }).unwrap();
+    // Only some fields given: the rest unchecked, and the run is not
+    // `setup_checked` (a server that forgot a field can't pay out on it).
+    let s = run(&ExpectedRun { seed: Some(p.setup.seed), ..Default::default() }).unwrap();
+    assert!(!s.setup_checked);
+    assert_eq!(s.checked, sim_core::record::SetupChecked { seed: true, deck: false, population_multiplier: false });
+    let s = run(&ExpectedRun { deck: None, ..issued.clone() }).unwrap();
+    assert!(!s.setup_checked);
+    assert_eq!(s.checked, sim_core::record::SetupChecked { seed: true, deck: false, population_multiplier: true });
+    let s = replay_with(p, level_map(), None, cfg.clone(), CardDb::default_cards(), &lim, &mut |_| true).unwrap();
+    assert!(!s.setup_checked && s.checked == sim_core::record::SetupChecked::default());
     // JSON: the seed as a string or a number, unknown keys refused.
     let x = ExpectedRun::from_json(r#"{"seed": "18446744073709551615", "population_multiplier": 0.3}"#).unwrap();
     assert_eq!((x.seed, x.deck, x.population_multiplier), (Some(u64::MAX), None, Some(0.3)));
@@ -861,4 +870,73 @@ fn unknown_record_fields_are_refused() {
         let e = RunRecord::from_json(&v.to_string()).unwrap_err();
         assert!(e.contains("unknown field"), "{path}: {e}");
     }
+}
+
+/// The step-by-step verifier (the browser's replay viewer): stepping a
+/// `Replayer` to the end gives `replay`'s summary, and its checks are a
+/// prep and an end check per attempt, in order, then the final one.
+#[test]
+fn the_replayer_steps_to_the_same_summary_with_every_check() {
+    use sim_core::record::{CheckKind, ReplayStep, Replayer};
+    let r = prefix();
+    let cfg = common::cfg();
+    let lim = ReplayLimits::for_config(&cfg);
+    let (mut rp, mut m) = Replayer::start(r.clone(), level_map(), None, cfg.clone(), CardDb::default_cards(), lim.clone()).unwrap();
+    assert!(rp.checks().is_empty(), "the first check is the first step's");
+    let (mut ticks, mut actions) = (0u64, 0usize);
+    loop {
+        match rp.step(&mut m).unwrap() {
+            ReplayStep::Tick => ticks += 1,
+            ReplayStep::Action(i) => {
+                assert_eq!(i, actions);
+                actions += 1
+            }
+            ReplayStep::Done => break,
+        }
+    }
+    assert_eq!((ticks, actions), (r.end.tick, r.actions.len()));
+    let summary = rp.outcome().unwrap().clone().unwrap();
+    assert_eq!(summary, replay(r, level_map()).unwrap());
+    // Finished: stepping again changes nothing.
+    assert_eq!(rp.step(&mut m), Ok(ReplayStep::Done));
+    assert_eq!(m.tick(), r.end.tick);
+    let checks = rp.checks();
+    let n = r.attempts.len();
+    let ends: Vec<_> = checks.iter().filter(|c| c.what == CheckKind::End).collect();
+    assert_eq!(ends.len(), n);
+    for (i, (c, a)) in ends.iter().zip(&r.attempts).enumerate() {
+        assert_eq!((c.attempt, c.wave, c.tick, c.hash, c.result), (i, a.wave, a.end_tick, a.end_hash, Some(a.result)));
+    }
+    let preps: Vec<_> = checks.iter().filter(|c| c.what == CheckKind::Prep).collect();
+    assert_eq!(preps.len(), n + 1, "every attempt's prep, the open one's included");
+    for (i, c) in preps.iter().enumerate() {
+        let want = r.attempts.get(i).map_or(r.end.prep_hash, |a| a.prep_hash);
+        assert_eq!((c.attempt, c.hash), (i, want));
+    }
+    // Each attempt's prep check comes before its end check.
+    for i in 0..n {
+        let p = checks.iter().position(|c| c.what == CheckKind::Prep && c.attempt == i).unwrap();
+        let e = checks.iter().position(|c| c.what == CheckKind::End && c.attempt == i).unwrap();
+        assert!(p < e, "attempt {i}");
+    }
+    let last = checks.last().unwrap();
+    assert_eq!((last.what, last.hash, last.attempt), (CheckKind::Final, r.end.hash, n));
+
+    // A tampered end hash: every check before the divergence passed, then
+    // the error, which every later step returns again.
+    let mut bad = r.clone();
+    bad.attempts[2].end_hash ^= 1;
+    let (mut rp, mut m) = Replayer::start(bad, level_map(), None, cfg, CardDb::default_cards(), lim).unwrap();
+    let e = loop {
+        match rp.step(&mut m) {
+            Ok(ReplayStep::Done) => panic!("the tampered record verified"),
+            Ok(_) => {}
+            Err(e) => break e,
+        }
+    };
+    assert!(matches!(&e, VerifyError::Diverged { attempt: 2, what, .. } if what == "end_hash"), "{e:?}");
+    assert_eq!(rp.checks().iter().filter(|c| c.what == CheckKind::End).count(), 2);
+    let t = m.tick();
+    assert_eq!(rp.step(&mut m), Err(e));
+    assert_eq!(m.tick(), t, "a rejected replay stops");
 }

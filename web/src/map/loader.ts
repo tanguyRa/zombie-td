@@ -479,7 +479,9 @@ export class MapLoader {
       : undefined;
     const budgetError = (last: unknown) => {
       const why = last === undefined ? "" : ` (last error: ${String((last as Error)?.message ?? last).replace(/\. Try again in a minute\.$/, "")})`;
-      return new Error(`Overpass could not load these blocks within ${Math.round(batchBudgetMs / 1000)} s${why}. Try again in a minute.`, { cause: last });
+      // No duration in the text: the budget only stops new attempts, so the
+      // batch can fail up to one request limit later than the budget.
+      return new Error(`Overpass could not load these blocks in time${why}. Try again in a minute.`, { cause: last });
     };
     let lastErr: unknown;
     try {

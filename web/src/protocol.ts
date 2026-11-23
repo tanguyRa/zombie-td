@@ -148,7 +148,7 @@ export type ToWorker =
   /** Build a match. `test` unlocks the test-only speeds and `pause_at`.
    *  `match`: the page's id of this match, echoed on every message the
    *  worker posts until the next `init` or `stop` (`FromWorkerTagged`). */
-  | { type: "init"; match: number; map: MatchMap; setup: { seed: string; deck?: string[]; population_multiplier?: number }; test?: boolean }
+  | { type: "init"; match: number; map: MatchMap; setup: { seed: string; deck?: string[]; population_multiplier?: number }; test?: boolean; replay?: ReplayInit }
   /** A streamed block for `add_buildings`: added at once unless a wave
    *  runs, else queued until it ends. Answered by `map`. */
   | { type: "chunk"; chunk: BuildingChunk }
@@ -170,7 +170,66 @@ export type ToWorker =
   | { type: "query"; id: number; query: Query }
   | { type: "field"; kind: "chase" | "flee" }
   | { type: "record"; id: number }
-  | { type: "hash"; id: number }; // test hook only (?test=1)
+  | { type: "hash"; id: number } // test hook only (?test=1)
+  /** Replay viewer only: `step` one tick (with the actions due before it)
+   *  while paused; `jump` to the start of wave `wave`'s first prep (back
+   *  in time rebuilds the match from the record), then pause. */
+  | { type: "replay_ctl"; op: "step" }
+  | { type: "replay_ctl"; op: "jump"; wave: number };
+
+/** `init.replay`: build the match from a run record (its setup) on `map`
+ *  (the whole level, or the shell and **every** block of the record) and
+ *  play the record's actions on their ticks, checking every attempt
+ *  (sim-core `Replayer`). The match is read-only: actions and chunks are
+ *  refused. `setup` is ignored. */
+export interface ReplayInit {
+  record: string;
+}
+
+/** sim-core `ReplayCheck`: one passed check of the record. */
+export interface ReplayCheck {
+  attempt: number;
+  wave: number;
+  tick: number;
+  what: "prep" | "end" | "final";
+  hash: string;
+  result?: "won" | "lost" | "abandoned";
+}
+
+/** sim-core `VerifyError` JSON (tagged `error`) with its `message`. */
+export interface VerifyErrorJson {
+  error: string;
+  message: string;
+  attempt?: number;
+  wave?: number;
+  tick?: number;
+  what?: string;
+  record?: string;
+  replay?: string;
+  [k: string]: unknown;
+}
+
+/** The replay viewer's progress (after every replay slice that did something). */
+export interface ReplayProgressMsg {
+  type: "replay";
+  /** True on the first message after a (re)build: drop the checks shown so far. */
+  reset: boolean;
+  tick: number;
+  endTick: number;
+  /** Index of the next action of the record, and how many there are. */
+  nextAction: number;
+  actions: number;
+  /** New checks since the last message, in order. */
+  checks: ReplayCheck[];
+  done: boolean;
+  error: VerifyErrorJson | null;
+  summary: Record<string, unknown> | null;
+  paused: boolean;
+  /** 1, 2, 4, or 0 = max. */
+  speed: number;
+  /** The wave a jump is running to, or null. */
+  jumping: number | null;
+}
 
 export interface StaticLevel {
   /** Agent slots (the shared buffer's capacity). */
@@ -225,7 +284,8 @@ export type FromWorker =
   | { type: "map"; stored: number; queued: number; refused: { block: number; error: string }[] }
   | { type: "field"; kind: "chase" | "flee"; data: Int32Array; w: number; h: number }
   | { type: "hash"; id: number; tick: number; hash: string }
-  | { type: "hash"; id: number; aborted: true };
+  | { type: "hash"; id: number; aborted: true }
+  | ReplayProgressMsg;
 
 /** What the worker actually posts: every message carries the `match` of the
  *  `init` it was posted under (0 after a `stop` and before the first init).

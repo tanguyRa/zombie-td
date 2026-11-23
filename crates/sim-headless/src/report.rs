@@ -374,6 +374,10 @@ pub fn run(args: &[String]) {
         Some((scale::intro_md(o.ticks, o.clusters), scale::table_md(&runs)))
     };
 
+    // ------------------------------------------------------ 8-wave match
+    eprintln!("[report] 8-wave match (Marais, seed 1) and its replay");
+    let match8 = Some(match_section(!skip_wasm));
+
     // ------------------------------------------------------ targets
     let find = |rt: &str| summaries.iter().find(|s| s.runtime == rt && s.population == 100_000).cloned();
     let mut targets = Vec::new();
@@ -405,7 +409,7 @@ pub fn run(args: &[String]) {
     }
     let rows = scenario_rows(&runs);
 
-    let ctx = Ctx { quick, env, targets, groups, tests, test_notes, rows, summaries, wasm_note, ticks, seeds, scale: scale_sec };
+    let ctx = Ctx { quick, env, targets, groups, tests, test_notes, rows, summaries, wasm_note, ticks, seeds, scale: scale_sec, match8 };
     let md = markdown(&ctx);
     std::fs::write(reports.join("headless-report.md"), &md).unwrap();
     let html = html(&ctx, &runs, &bench_runs);
@@ -430,6 +434,66 @@ struct Ctx {
     seeds: u32,
     /// Scale section: intro paragraph and table (markdown).
     scale: Option<(String, String)>,
+    /// The 8-wave match: (intro, per-wave table, timings).
+    match8: Option<(String, String, String)>,
+}
+
+/// The 8-wave match section: `sim-headless match --level paris-marais
+/// --seed 1` (the scripted starter-deck defence), its per-wave table, the
+/// time to play it, and the time to replay its run record natively and in
+/// WASM under Node (`tools/verify-run.mjs`, when the `pkg-node` build is
+/// there).
+fn match_section(wasm: bool) -> (String, String, String) {
+    use std::time::Instant;
+    let o = crate::matchcmd::MatchOpts { level: "paris-marais".into(), seed: 1, retries: 3, max_wave_s: 1800, fast_forward_to: 0, multiplier: None, no_tactical: false };
+    let t0 = Instant::now();
+    let (m, rows) = crate::matchcmd::run(&o);
+    let play_s = t0.elapsed().as_secs_f64();
+    let table = crate::matchcmd::table(&m, &rows);
+    let rec = sim_core::RunRecord::from_match(&m);
+    let level = crate::matchcmd::load_any_level("paris-marais");
+    let t1 = Instant::now();
+    let verdict = match sim_core::replay(&rec, sim_core::ReplayMap::Level(&level)) {
+        Ok(s) => format!("verified ({} attempts, final hash `{:016x}`)", s.attempts, s.final_hash),
+        Err(e) => format!("**rejected**: {e}"),
+    };
+    let replay_s = t1.elapsed().as_secs_f64();
+    let mut wasm_line = "WASM replay: not run (`--skip-wasm`).".to_string();
+    if wasm {
+        let root = repo_root();
+        let pkg = root.join("crates/sim-wasm/pkg-node/sim_wasm.js");
+        wasm_line = if !pkg.is_file() {
+            "WASM replay: not run (no `crates/sim-wasm/pkg-node` build; `./run-all.sh` makes it).".into()
+        } else {
+            let f = std::env::temp_dir().join(format!("zombie-td-report-run-{}.json", std::process::id()));
+            std::fs::write(&f, rec.to_json()).unwrap();
+            let t = Instant::now();
+            let out = std::process::Command::new("node").current_dir(&root).args(["tools/verify-run.mjs", f.to_str().unwrap(), "--level", "levels/paris-marais.json"]).output();
+            let secs = t.elapsed().as_secs_f64();
+            std::fs::remove_file(&f).ok();
+            match out {
+                Ok(o) if o.status.success() => format!("WASM (Node) replay: {secs:.1} s, verified (`tools/verify-run.mjs`, Node start-up included)."),
+                Ok(o) => format!("WASM replay: **failed**: {}", String::from_utf8_lossy(&o.stdout).lines().last().unwrap_or("")),
+                Err(e) => format!("WASM replay: not run ({e})."),
+            }
+        };
+    }
+    let intro = format!(
+        "`sim-headless match --level paris-marais --seed 1`: the starter deck \"Civil Defence Issue\" played by the scripted defence (armaments on spread-out buildings, fences as arcs, tactical cards on the densest zombies, up to 3 retries per lost wave). One row per wave attempt; tick times are this run's, native, single thread."
+    );
+    let lines: Vec<&str> = table.lines().collect();
+    let (rows_md, tail) = match lines.iter().position(|l| l.is_empty()) {
+        Some(i) => (lines[..i].join("\n"), lines[i + 1..].join(" ")),
+        None => (table.clone(), String::new()),
+    };
+    let timings = format!(
+        "{tail}. Played in {play_s:.1} s (wall, native). Run record: {} actions, {} attempts, {} ticks ({:.0} s of game time). Native replay: {replay_s:.1} s, {verdict}. {wasm_line}",
+        rec.actions.len(),
+        rec.attempts.len(),
+        rec.end.tick,
+        rec.end.tick as f64 / 20.0
+    );
+    (intro, rows_md, timings)
 }
 
 fn pf(p: Option<bool>) -> &'static str {
@@ -541,6 +605,9 @@ fn markdown(c: &Ctx) -> String {
             let _ = writeln!(s, "Top hot spots, {rt} 100k: {hs}.\n");
         }
     }
+    if let Some((intro, table, timings)) = &c.match8 {
+        let _ = writeln!(s, "## 8-wave match\n\n{intro}\n\n{table}\n\n{timings}\n");
+    }
     if let Some((intro, table)) = &c.scale {
         let _ = writeln!(s, "## Scale (wave 8)\n\n{intro}\n\n{table}");
     }
@@ -640,6 +707,9 @@ fn html(c: &Ctx, runs: &[RunResult], bench_runs: &[BenchRun]) -> String {
     }
     body.push_str("</section>");
 
+    if let Some((intro, table, timings)) = &c.match8 {
+        let _ = write!(body, "<section><h2>8-wave match</h2><p>{}</p>{}<p>{}</p></section>", esc(intro), md_table_to_html(table), esc(timings));
+    }
     if let Some((intro, table)) = &c.scale {
         let _ = write!(body, "<section><h2>Scale (wave 8)</h2><p>{}</p>{}</section>", esc(intro), md_table_to_html(table));
     }

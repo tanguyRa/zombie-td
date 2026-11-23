@@ -15,6 +15,7 @@
 import type { Map as MlMap } from "maplibre-gl";
 import type { Place } from "./explore";
 import type { ProfileHook } from "./ui/profileui";
+import type { ReplayHook } from "./ui/replayui";
 import type {
   Action,
   ActionError,
@@ -105,6 +106,8 @@ export interface TestHookDeps {
   enterPlace(lat: number, lon: number, name: string): void;
   district(): { visible: boolean; state: string; text: string };
   profile(): ProfileHook;
+  replay(): ReplayHook;
+  clearMapCache(): Promise<void>;
   picked(): Place | null;
   backToMap(): void;
 }
@@ -187,6 +190,12 @@ export interface TestHook {
   backToMap(): void;
   /** The local profile (T7b): state snapshots, the screens, the claims. */
   readonly profile: ProfileHook;
+  /** The replay viewer (T8): progress, the checks, the verdict, the picker. */
+  readonly replay: ReplayHook;
+  /** Empty the map block cache (IndexedDB): a later replay of a streamed
+   *  run must then be given its map bundle. Map data only: no sim state,
+   *  no profile. */
+  clearMapCache(): Promise<void>;
   /** The pin on the map screen, with the admin names the profile will store. */
   readonly picked: Place | null;
   debug: { map: MlMap; overlay: unknown };
@@ -362,6 +371,10 @@ export function installTestHook(d: TestHookDeps): (m: FromWorker) => boolean {
     newMatch: (seed) => d.newMatch(seed),
     backToMap: () => d.backToMap(),
     profile: d.profile(),
+    get replay() {
+      return d.replay();
+    },
+    clearMapCache: () => d.clearMapCache(),
     get picked() {
       return d.picked();
     },

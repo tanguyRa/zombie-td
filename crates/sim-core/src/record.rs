@@ -403,10 +403,14 @@ pub struct ReplaySummary {
     /// The record's setup (seed, multiplier, deck): what the run was
     /// played with, for the server to store or check.
     pub setup: RecordSetup,
-    /// Whether `setup` was checked against what the server issued: an
-    /// `ExpectedRun` with at least one field was given (`replay_with`).
-    /// `false` for `replay` and for `None` (tests and tools).
+    /// Whether `setup` was **fully** checked against what the server
+    /// issued: the `ExpectedRun` gave the seed, the deck and the multiplier
+    /// (`checked` says which were). `false` for `replay`, for `None` and
+    /// for a partial expectation, so a server bug that forgets a field
+    /// can't pass for a checked run. A server refuses to pay out on `false`.
     pub setup_checked: bool,
+    /// Which setup fields were compared with the `ExpectedRun`.
+    pub checked: SetupChecked,
     pub map_source: MapSource,
     /// `mapsnap::snapshot_hash` of the buildings replayed on (= the record's).
     #[serde(with = "hex64")]
@@ -429,6 +433,25 @@ pub struct ReplaySummary {
     /// End hash of every attempt, in order.
     pub attempt_hashes: Vec<String>,
     pub waves: Vec<WaveOutcome>,
+}
+
+/// Which fields of the record's setup were compared with what the server
+/// issued (`ExpectedRun`): a field given there is checked, `None` is not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SetupChecked {
+    pub seed: bool,
+    pub deck: bool,
+    pub population_multiplier: bool,
+}
+
+impl SetupChecked {
+    pub fn of(expected: Option<&ExpectedRun>) -> SetupChecked {
+        expected.map_or_else(SetupChecked::default, |x| SetupChecked { seed: x.seed.is_some(), deck: x.deck.is_some(), population_multiplier: x.population_multiplier.is_some() })
+    }
+    /// Seed, deck and multiplier were all checked.
+    pub fn all(&self) -> bool {
+        self.seed && self.deck && self.population_multiplier
+    }
 }
 
 /// Why a record was rejected. Serialised with an `error` tag.
@@ -650,27 +673,178 @@ fn build_match(record: &RunRecord, map: ReplayMap, cfg: Config, cards: CardDb) -
     built.map_err(|e| VerifyError::Setup { reason: e.to_string() })
 }
 
-/// The replay's bookkeeping: which recorded attempts were matched so far
-/// and how long the current phase has lasted.
-struct Checker<'r> {
-    rec: &'r RunRecord,
-    lim: &'r ReplayLimits,
+/// One check of the record against the replay, in the order the replay
+/// makes them (the replay viewer shows them as they happen).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ReplayCheck {
+    /// Index into the record's `attempts` (`attempts.len()` is the attempt
+    /// open at the end of the record).
+    pub attempt: usize,
+    pub wave: u8,
+    /// Match tick of the check.
+    pub tick: u64,
+    /// `prep`: the attempt's prep opened with the recorded wave, start tick
+    /// and prep hash. `end`: it ended on the recorded tick with the recorded
+    /// result and end hash. `final`: the end of the record (phase, wave,
+    /// open attempt, final hash and outcome summary) matched.
+    pub what: CheckKind,
+    /// The hash that was compared (prep, end or final hash).
+    #[serde(with = "hex64")]
+    pub hash: u64,
+    /// The attempt's result (`end` checks only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::match_::AttemptResult>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckKind {
+    Prep,
+    End,
+    Final,
+}
+
+/// What one `Replayer::step` did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayStep {
+    /// Applied the record's action with this index (on the current tick).
+    Action(usize),
+    /// Stepped one tick.
+    Tick,
+    /// The record's end was reached and everything matched (see
+    /// `Replayer::outcome` for the summary).
+    Done,
+}
+
+/// The replay verifier, one step at a time: `replay_with` runs it to the
+/// end, the browser's replay viewer (`WasmMatch::replay_*`) steps it at the
+/// speed the viewer picks and draws the match in between. It does not own
+/// the match, so the caller can read (render) it between steps; it must not
+/// change it (the viewer's `WasmMatch` refuses actions in replay mode).
+pub struct Replayer {
+    rec: RunRecord,
+    lim: ReplayLimits,
+    shell_hash: u64,
+    checked: SetupChecked,
+    /// The opening check (attempt 0's prep) is made by the first step, so a
+    /// viewer gets a match to show even when the record diverges at tick 0.
+    started: bool,
+    /// Index of the next action to apply.
+    next: usize,
     /// Attempts of the replay compared so far.
     verified: usize,
     /// (phase, wave, attempts) when the current phase was entered, and the
     /// tick it was entered on.
     phase_key: (Phase, u8, usize),
     phase_since: u64,
+    checks: Vec<ReplayCheck>,
+    outcome: Option<Result<ReplaySummary, VerifyError>>,
 }
 
 fn diverged(attempt: usize, wave: u8, tick: u64, what: &str, record: String, replay: String) -> VerifyError {
     VerifyError::Diverged { attempt, wave, tick, what: what.to_string(), record, replay }
 }
 
-impl<'r> Checker<'r> {
+impl Replayer {
+    /// Check everything that needs no simulation and the map, and build the
+    /// match from the record's setup on the verifier's map. Rejections are
+    /// those of `replay_with` up to `setup`.
+    pub fn start(record: RunRecord, map: ReplayMap, expected: Option<&ExpectedRun>, cfg: Config, cards: CardDb, lim: ReplayLimits) -> Result<(Replayer, Match), VerifyError> {
+        precheck(&record, expected, &cfg, &cards, &lim)?;
+        let shell_hash = shell_hash(match map {
+            ReplayMap::Level(level) => level,
+            ReplayMap::Chunks { shell, .. } => shell,
+        });
+        let m = build_match(&record, map, cfg, cards)?;
+        let checked = SetupChecked::of(expected);
+        let phase_key = (m.phase(), m.wave(), 0);
+        let r = Replayer { rec: record, lim, shell_hash, checked, started: false, next: 0, verified: 0, phase_key, phase_since: 0, checks: Vec::new(), outcome: None };
+        Ok((r, m))
+    }
+
+    pub fn record(&self) -> &RunRecord {
+        &self.rec
+    }
+    /// Every check made so far, in order.
+    pub fn checks(&self) -> &[ReplayCheck] {
+        &self.checks
+    }
+    /// Index of the next action to apply (`record().actions.len()` once all are).
+    pub fn next_action(&self) -> usize {
+        self.next
+    }
+    /// The record's end tick (the replay stops there).
+    pub fn end_tick(&self) -> u64 {
+        self.rec.end.tick
+    }
+    /// `None` while the replay runs; the summary, or the first rejection.
+    pub fn outcome(&self) -> Option<&Result<ReplaySummary, VerifyError>> {
+        self.outcome.as_ref()
+    }
+
+    /// One step: the action due on this tick, else one tick, else (at the
+    /// record's end) the final checks. Once finished it returns the same
+    /// outcome again (`Done`, or the rejection) without touching the match.
+    pub fn step(&mut self, m: &mut Match) -> Result<ReplayStep, VerifyError> {
+        if let Some(o) = &self.outcome {
+            return o.as_ref().map(|_| ReplayStep::Done).map_err(Clone::clone);
+        }
+        match self.step_inner(m) {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                self.outcome = Some(Err(e.clone()));
+                Err(e)
+            }
+        }
+    }
+
+    /// The opening check (attempt 0's prep: wave, start tick, prep hash),
+    /// made once; `step` makes it first if it wasn't. A viewer calls it to
+    /// show the first check before playing.
+    pub fn check_start(&mut self, m: &Match) -> Result<(), VerifyError> {
+        if let Some(Err(e)) = &self.outcome {
+            return Err(e.clone());
+        }
+        if !self.started {
+            self.started = true;
+            if let Err(e) = self.check_prep(m) {
+                self.outcome = Some(Err(e.clone()));
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    fn step_inner(&mut self, m: &mut Match) -> Result<ReplayStep, VerifyError> {
+        if !self.started {
+            self.started = true;
+            self.check_prep(m)?;
+        }
+        if let Some((tick, action)) = self.rec.actions.get(self.next).filter(|la| la.tick == m.tick()).map(|la| (la.tick, la.action.clone())) {
+            let index = self.next;
+            m.apply(action.clone()).map_err(|reason| VerifyError::IllegalAction { index, tick, action: action.name().to_string(), reason })?;
+            self.next += 1;
+            if matches!(action, Action::NextWave | Action::RetryWave | Action::RestartMatch) {
+                self.check_finished(m)?;
+                self.check_prep(m)?;
+            }
+            self.check_tick(m)?;
+            return Ok(ReplayStep::Action(index));
+        }
+        let target = self.rec.actions.get(self.next).map_or(self.rec.end.tick, |la| la.tick);
+        if m.tick() < target {
+            m.step();
+            self.check_tick(m)?;
+            return Ok(ReplayStep::Tick);
+        }
+        let summary = self.finish(m)?;
+        self.outcome = Some(Ok(summary));
+        Ok(ReplayStep::Done)
+    }
+
     /// The attempt that just opened (phase Prep): its wave, start tick and
     /// prep hash against the record (the final open attempt's are in `end`).
-    fn check_prep(&self, m: &Match) -> Result<(), VerifyError> {
+    fn check_prep(&mut self, m: &Match) -> Result<(), VerifyError> {
         let i = m.attempts().len();
         let (wave, start, prep) = match self.rec.attempts.get(i) {
             Some(a) => (a.wave, a.start_tick, a.prep_hash),
@@ -686,6 +860,7 @@ impl<'r> Checker<'r> {
         if prep != m.prep_hash() {
             return Err(diverged(i, wave, t, "prep_hash", hex(prep), hex(m.prep_hash())));
         }
+        self.checks.push(ReplayCheck { attempt: i, wave, tick: t, what: CheckKind::Prep, hash: prep, result: None });
         Ok(())
     }
 
@@ -716,6 +891,7 @@ impl<'r> Checker<'r> {
             if r.end_hash != a.end_hash {
                 return Err(diverged(i, a.wave, t, "end_hash", hex(r.end_hash), hex(a.end_hash)));
             }
+            self.checks.push(ReplayCheck { attempt: i, wave: a.wave, tick: a.end_tick, what: CheckKind::End, hash: a.end_hash, result: Some(a.result) });
             self.verified += 1;
         }
         if m.attempts().len() > self.lim.max_attempts {
@@ -750,6 +926,65 @@ impl<'r> Checker<'r> {
         }
         Ok(())
     }
+
+    /// At the record's end: every recorded attempt seen, then the end state
+    /// and the outcome summary.
+    fn finish(&mut self, m: &Match) -> Result<ReplaySummary, VerifyError> {
+        self.check_finished(m)?;
+        let record = &self.rec;
+        let end = record.end.tick;
+        if let Some(r) = record.attempts.get(self.verified) {
+            return Err(diverged(self.verified, r.wave, end, "missing_attempt", format!("{} at tick {}", r.result, r.end_tick), "none".into()));
+        }
+        let n = m.attempts().len();
+        let e = &record.end;
+        if e.phase != m.phase() || e.wave != m.wave() {
+            return Err(diverged(n, m.wave(), end, "phase", format!("{} (wave {})", e.phase, e.wave), format!("{} (wave {})", m.phase(), m.wave())));
+        }
+        // The open attempt's start tick and prep hash: checked when its prep
+        // opened only if the record ends in that prep or wave; a record ending
+        // on a result screen is checked here.
+        if e.attempt_start_tick != m.attempt_start_tick() {
+            return Err(diverged(n, m.wave(), end, "start_tick", e.attempt_start_tick.to_string(), m.attempt_start_tick().to_string()));
+        }
+        if e.prep_hash != m.prep_hash() {
+            return Err(diverged(n, m.wave(), end, "prep_hash", hex(e.prep_hash), hex(m.prep_hash())));
+        }
+        let final_hash = m.state_hash();
+        if e.hash != final_hash {
+            return Err(diverged(n, m.wave(), end, "final_hash", hex(e.hash), hex(final_hash)));
+        }
+        let (waves_won, waves) = outcome_of(m);
+        let out = |what: &str, r: String, p: String| if r != p { Err(VerifyError::Outcome { what: what.into(), record: r, replay: p }) } else { Ok(()) };
+        out("waves_won", e.waves_won.to_string(), waves_won.to_string())?;
+        out("retries", e.retries.to_string(), m.retries().to_string())?;
+        out("restarts", e.restarts.to_string(), m.restarts().to_string())?;
+        if let Some((what, r, p)) = first_wave_difference(&e.waves, &waves) {
+            return Err(VerifyError::Outcome { what, record: r, replay: p });
+        }
+        let summary = ReplaySummary {
+            setup: record.setup.clone(),
+            setup_checked: self.checked.all(),
+            checked: self.checked,
+            map_source: record.map.source,
+            snapshot_hash: record.map.snapshot_hash,
+            shell_hash: self.shell_hash,
+            phase: m.phase(),
+            wave: m.wave(),
+            waves_won,
+            retries: m.retries(),
+            restarts: m.restarts(),
+            abandoned: e.abandoned,
+            end_tick: end,
+            attempts: n,
+            actions: record.actions.len(),
+            final_hash,
+            attempt_hashes: m.attempts().iter().map(|a| hex(a.end_hash)).collect(),
+            waves,
+        };
+        self.checks.push(ReplayCheck { attempt: n, wave: m.wave(), tick: end, what: CheckKind::Final, hash: final_hash, result: None });
+        Ok(summary)
+    }
 }
 
 /// Verify `record` on `map` with this config and card list. `progress` is
@@ -760,6 +995,7 @@ impl<'r> Checker<'r> {
 /// the record shell's bounds, the expected setup, the map, then while
 /// replaying refused actions, overlong waves or preps and the first
 /// diverging attempt, and finally the end state and the outcome summary.
+/// It runs a `Replayer` to the end.
 pub fn replay_with(
     record: &RunRecord,
     map: ReplayMap,
@@ -769,82 +1005,22 @@ pub fn replay_with(
     lim: &ReplayLimits,
     progress: &mut dyn FnMut(ReplayProgress) -> bool,
 ) -> Result<ReplaySummary, VerifyError> {
-    precheck(record, expected, &cfg, &cards, lim)?;
-    let shell_hash = shell_hash(match map {
-        ReplayMap::Level(level) => level,
-        ReplayMap::Chunks { shell, .. } => shell,
-    });
-    let mut m = build_match(record, map, cfg, cards)?;
-    let mut ck = Checker { rec: record, lim, verified: 0, phase_key: (m.phase(), m.wave(), 0), phase_since: 0 };
-    ck.check_prep(&m)?;
+    let (mut r, mut m) = Replayer::start(record.clone(), map, expected, cfg, cards, lim.clone())?;
     let end = record.end.tick;
-    let mut step_to = |m: &mut Match, ck: &mut Checker, t: u64| -> Result<(), VerifyError> {
-        while m.tick() < t {
-            m.step();
-            ck.check_tick(m)?;
-            if m.tick() % PROGRESS_TICKS == 0 && !progress(ReplayProgress { tick: m.tick(), end_tick: end, wave: m.wave(), attempts: m.attempts().len() }) {
-                return Err(VerifyError::Cancelled { tick: m.tick() });
+    loop {
+        match r.step(&mut m)? {
+            ReplayStep::Done => break,
+            ReplayStep::Tick => {
+                if m.tick() % PROGRESS_TICKS == 0 && !progress(ReplayProgress { tick: m.tick(), end_tick: end, wave: m.wave(), attempts: m.attempts().len() }) {
+                    return Err(VerifyError::Cancelled { tick: m.tick() });
+                }
             }
+            ReplayStep::Action(_) => {}
         }
-        Ok(())
-    };
-    for (index, la) in record.actions.iter().enumerate() {
-        step_to(&mut m, &mut ck, la.tick)?;
-        m.apply(la.action.clone()).map_err(|reason| VerifyError::IllegalAction { index, tick: la.tick, action: la.action.name().to_string(), reason })?;
-        if matches!(la.action, Action::NextWave | Action::RetryWave | Action::RestartMatch) {
-            ck.check_finished(&m)?;
-            ck.check_prep(&m)?;
-        }
-        ck.check_tick(&m)?;
     }
-    step_to(&mut m, &mut ck, end)?;
-    ck.check_finished(&m)?;
-    if let Some(r) = record.attempts.get(ck.verified) {
-        return Err(diverged(ck.verified, r.wave, end, "missing_attempt", format!("{} at tick {}", r.result, r.end_tick), "none".into()));
+    match r.outcome {
+        Some(Ok(s)) => Ok(s),
+        Some(Err(e)) => Err(e),
+        None => unreachable!("a finished replay has an outcome"),
     }
-    let n = m.attempts().len();
-    let e = &record.end;
-    if e.phase != m.phase() || e.wave != m.wave() {
-        return Err(diverged(n, m.wave(), end, "phase", format!("{} (wave {})", e.phase, e.wave), format!("{} (wave {})", m.phase(), m.wave())));
-    }
-    // The open attempt's start tick and prep hash: checked when its prep
-    // opened only if the record ends in that prep or wave; a record ending
-    // on a result screen is checked here.
-    if e.attempt_start_tick != m.attempt_start_tick() {
-        return Err(diverged(n, m.wave(), end, "start_tick", e.attempt_start_tick.to_string(), m.attempt_start_tick().to_string()));
-    }
-    if e.prep_hash != m.prep_hash() {
-        return Err(diverged(n, m.wave(), end, "prep_hash", hex(e.prep_hash), hex(m.prep_hash())));
-    }
-    let final_hash = m.state_hash();
-    if e.hash != final_hash {
-        return Err(diverged(n, m.wave(), end, "final_hash", hex(e.hash), hex(final_hash)));
-    }
-    let (waves_won, waves) = outcome_of(&m);
-    let out = |what: &str, r: String, p: String| if r != p { Err(VerifyError::Outcome { what: what.into(), record: r, replay: p }) } else { Ok(()) };
-    out("waves_won", e.waves_won.to_string(), waves_won.to_string())?;
-    out("retries", e.retries.to_string(), m.retries().to_string())?;
-    out("restarts", e.restarts.to_string(), m.restarts().to_string())?;
-    if let Some((what, r, p)) = first_wave_difference(&e.waves, &waves) {
-        return Err(VerifyError::Outcome { what, record: r, replay: p });
-    }
-    Ok(ReplaySummary {
-        setup: record.setup.clone(),
-        setup_checked: expected.is_some_and(|x| !x.is_empty()),
-        map_source: record.map.source,
-        snapshot_hash: record.map.snapshot_hash,
-        shell_hash,
-        phase: m.phase(),
-        wave: m.wave(),
-        waves_won,
-        retries: m.retries(),
-        restarts: m.restarts(),
-        abandoned: e.abandoned,
-        end_tick: end,
-        attempts: n,
-        actions: record.actions.len(),
-        final_hash,
-        attempt_hashes: m.attempts().iter().map(|a| hex(a.end_hash)).collect(),
-        waves,
-    })
 }

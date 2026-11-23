@@ -96,15 +96,25 @@ fn wasm_checks_the_issued_run() {
 }
 
 /// `setup_checked`: whether the summary's setup was compared with an
-/// issued run (WASM and native agree; `None` = not checked).
+/// issued run on **all** of seed, deck and multiplier; `checked` says which
+/// fields were (WASM and native agree; `None` = nothing checked). A partial
+/// expectation (a server that forgot a field) is not `setup_checked`.
 #[wasm_bindgen_test]
 fn wasm_summary_says_whether_the_setup_was_checked() {
     let r = sim_core::RunRecord::from_json(GOLDEN).unwrap();
-    let issued = format!(r#"{{"seed": "{}"}}"#, r.setup.seed);
-    let s: serde_json::Value = serde_json::from_str(&sim_wasm::verify_level(GOLDEN, LEVEL, Some(issued)).unwrap()).unwrap();
-    assert_eq!(s["setup_checked"], true);
-    let s: serde_json::Value = serde_json::from_str(&sim_wasm::verify_level(GOLDEN, LEVEL, None).unwrap()).unwrap();
-    assert_eq!(s["setup_checked"], false);
+    let summary = |x: Option<String>| -> serde_json::Value { serde_json::from_str(&sim_wasm::verify_level(GOLDEN, LEVEL, x).unwrap()).unwrap() };
+    let seed_only = summary(Some(format!(r#"{{"seed": "{}"}}"#, r.setup.seed)));
+    assert_eq!(seed_only["setup_checked"], false);
+    assert_eq!(seed_only["checked"], serde_json::json!({ "seed": true, "deck": false, "population_multiplier": false }));
+    let no_deck = summary(Some(format!(r#"{{"seed": "{}", "population_multiplier": {}}}"#, r.setup.seed, r.setup.population_multiplier)));
+    assert_eq!(no_deck["setup_checked"], false);
+    assert_eq!(no_deck["checked"], serde_json::json!({ "seed": true, "deck": false, "population_multiplier": true }));
+    let all = summary(Some(serde_json::json!({ "seed": r.setup.seed.to_string(), "deck": r.setup.deck, "population_multiplier": r.setup.population_multiplier }).to_string()));
+    assert_eq!(all["setup_checked"], true);
+    assert_eq!(all["checked"], serde_json::json!({ "seed": true, "deck": true, "population_multiplier": true }));
+    let none = summary(None);
+    assert_eq!(none["setup_checked"], false);
+    assert_eq!(none["checked"], serde_json::json!({ "seed": false, "deck": false, "population_multiplier": false }));
 }
 
 const CHUNKS: &str = include_str!("../../sim-core/tests/fixtures/map_chunks.json");
@@ -175,4 +185,50 @@ fn wasm_validate_deck_matches_the_cases() {
     }
     let e = sim_wasm::validate_deck("{}").unwrap_err().as_string().unwrap();
     assert!(e.contains("\"error\":\"bad_deck\""), "{e}");
+}
+
+/// The replay viewer's `WasmMatch` (replay mode): it plays the golden
+/// record to the end in slices with every check passing, stops at a wave's
+/// prep when asked, refuses actions, and reports the first divergence of a
+/// tampered record.
+#[wasm_bindgen_test]
+fn wasm_replay_mode_plays_the_golden_record() {
+    let rec = sim_core::RunRecord::from_json(GOLDEN).unwrap();
+    let mut w = sim_wasm::WasmMatch::replay_level(GOLDEN, LEVEL).unwrap();
+    assert!(w.is_replay());
+    assert!(w.apply(r#"{"type":"start_wave"}"#).is_err(), "a replay is read-only");
+    let mut checks = Vec::new();
+    let out = loop {
+        let o: serde_json::Value = serde_json::from_str(&w.replay_run(1500, u32::MAX, 0.0, 0).unwrap()).unwrap();
+        checks.extend(o["checks"].as_array().unwrap().iter().cloned());
+        if o["done"] == true {
+            break o;
+        }
+    };
+    assert!(out["error"].is_null(), "{out}");
+    assert_eq!(out["summary"]["final_hash"], format!("{:016x}", rec.end.hash));
+    assert_eq!(out["tick"], rec.end.tick);
+    let n = rec.attempts.len();
+    // A won match has no attempt open at its end.
+    assert_eq!(checks.len(), 2 * n + 1, "a prep and an end per attempt, then the final check");
+    assert_eq!(checks.last().unwrap()["what"], "final");
+    for (i, a) in rec.attempts.iter().enumerate() {
+        let end = checks.iter().find(|c| c["what"] == "end" && c["attempt"] == i).unwrap();
+        assert_eq!(end["hash"], format!("{:016x}", a.end_hash));
+    }
+    // Jump: stop as wave 3's prep opens.
+    let mut w = sim_wasm::WasmMatch::replay_level(GOLDEN, LEVEL).unwrap();
+    let o: serde_json::Value = serde_json::from_str(&w.replay_run(u32::MAX, u32::MAX, 0.0, 3).unwrap()).unwrap();
+    assert_eq!(o["stopped_at_wave"], true, "{o}");
+    assert_eq!((w.wave(), w.phase()), (3, "prep".to_string()));
+    // A tampered attempt hash: the error names it, and stays.
+    let mut bad = rec.clone();
+    bad.attempts[1].end_hash ^= 1;
+    let mut w = sim_wasm::WasmMatch::replay_level(&bad.to_json(), LEVEL).unwrap();
+    let o: serde_json::Value = serde_json::from_str(&w.replay_run(u32::MAX, u32::MAX, 0.0, 0).unwrap()).unwrap();
+    assert_eq!((o["done"].clone(), o["error"]["error"].clone(), o["error"]["attempt"].clone(), o["error"]["what"].clone()), (true.into(), "diverged".into(), 1.into(), "end_hash".into()), "{o}");
+    assert!(o["error"]["message"].as_str().unwrap().contains("attempt 1"));
+    // A normal match is not a replay.
+    let mut m = sim_wasm::WasmMatch::new(LEVEL, r#"{"seed": 1}"#).unwrap();
+    assert!(!m.is_replay() && m.replay_run(1, 1, 0.0, 0).is_err());
 }
