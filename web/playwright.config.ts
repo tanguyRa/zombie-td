@@ -6,7 +6,8 @@ import { defineConfig, devices } from "@playwright/test";
 // PW_PORT picks another port (e.g. for a second worktree running at the same
 // time). The port must be free: `--strictPort` makes a busy port fail loudly,
 // unless PW_REUSE=1 asks to reuse a server already running there (which then
-// skips `npm run wasm`, so it may serve a stale build).
+// skips `npm run wasm`, so it may serve a stale build, and is a server
+// that may still reload pages on file changes unless started with ZT_E2E=1).
 const PORT = Number(process.env.PW_PORT ?? 5199);
 
 export default defineConfig({
@@ -42,7 +43,10 @@ export default defineConfig({
     { name: "webkit", use: { ...devices["Desktop Safari"], viewport: { width: 1280, height: 800 } } },
   ],
   webServer: {
+    // ZT_E2E=1: Vite without file watching or HMR (vite.config.ts), so
+    // nothing written under web/ during a run reloads a test's page.
     command: `npm run wasm && npx vite --port ${PORT} --strictPort`,
+    env: { ZT_E2E: "1" },
     url: `http://localhost:${PORT}/`,
     reuseExistingServer: !!process.env.PW_REUSE,
     timeout: 300_000,

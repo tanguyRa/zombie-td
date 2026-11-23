@@ -83,13 +83,22 @@ declare global {
   }
 }
 
+// The hook, or a clear error when it is not there: the page was reloaded
+// or navigated away (its state is gone, so waiting would not help), or a
+// test asked before the `?test=1` page installed it (open helpers wait for it).
+const HOOK = `(() => {
+  const h = window.__zt;
+  if (!h || h.version !== 2) throw new Error("window.__zt (v2) is not installed on " + location.href + ": the page was reloaded or navigated, or is not a ?test=1 page");
+  return h;
+})()`;
+
 /** Runs `f(window.__zt)` in the page (`/?test=1`). The function is serialised,
  *  so it can only use its argument. */
 export function hook<T>(page: Page, f: (h: TestHook) => T): Promise<Awaited<T>> {
-  return page.evaluate(`(${f.toString()})(window.__zt)`) as Promise<Awaited<T>>;
+  return page.evaluate(`(${f.toString()})(${HOOK})`) as Promise<Awaited<T>>;
 }
 
 /** Like `hook`, with one serialisable argument: `f(window.__zt, arg)`. */
 export function hookWith<A, T>(page: Page, f: (h: TestHook, a: A) => T, arg: A): Promise<Awaited<T>> {
-  return page.evaluate(({ src, arg }) => new Function("h", "a", `return (${src})(h, a)`)(window.__zt, arg), { src: f.toString(), arg }) as Promise<Awaited<T>>;
+  return page.evaluate(({ src, hk, arg }) => new Function("h", "a", `return (${src})(h, a)`)(new Function(`return ${hk}`)(), arg), { src: f.toString(), hk: HOOK, arg }) as Promise<Awaited<T>>;
 }

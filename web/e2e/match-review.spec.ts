@@ -161,6 +161,20 @@ test("an unavailable building click keeps the picks", async ({ page }) => {
 test("the seed commits on Enter or New match only, asks during a wave, and stays exact above 2^53", async ({ page }) => {
   await openLevel(page, MARAIS, 1);
   const seedOf = () => hook(page, async (h) => JSON.parse(await h.record()).setup.seed as string);
+  // While a committed seed's match is being built (the old one stopped, the
+  // setup waiting for the profile) there is no match: a record rejects with
+  // "aborted" (the hook's contract). The polls below read that as "no seed
+  // yet" (null); any other error still fails the test.
+  const newSeed = () =>
+    hook(page, (h) =>
+      h.record().then(
+        (json) => JSON.parse(json).setup.seed as string,
+        (e: Error) => {
+          if (e.message === "aborted") return null;
+          throw e;
+        },
+      ),
+    );
   expect(await seedOf()).toBe("1");
   const big = "9007199254740993"; // 2^53 + 1: not a JS number
   await page.locator("#seed").fill(big);
@@ -169,7 +183,7 @@ test("the seed commits on Enter or New match only, asks during a wave, and stays
   expect(await hook(page, (h) => h.phase)).toBe("prep");
   expect(await seedOf()).toBe("1");
   await page.locator("#seed").press("Enter");
-  await expect.poll(seedOf, { timeout: 60_000 }).toBe(big);
+  await expect.poll(newSeed, { timeout: 60_000 }).toBe(big);
   await expect.poll(() => hook(page, (h) => (h.phase === "prep" ? h.hand.length : 0)), { timeout: 60_000 }).toBe(5);
   // While a wave runs, a new match asks first: dismissed, nothing happens.
   await startPaused(page);
@@ -182,7 +196,7 @@ test("the seed commits on Enter or New match only, asks during a wave, and stays
   // Accepted: the new match starts.
   page.once("dialog", (d) => void d.accept());
   await page.locator("#seed").press("Enter");
-  await expect.poll(seedOf, { timeout: 60_000 }).toBe("5");
+  await expect.poll(newSeed, { timeout: 60_000 }).toBe("5");
   await expect.poll(() => hook(page, (h) => h.phase), { timeout: 60_000 }).toBe("prep");
   // Not a u64: refused with a message, the match stays.
   await page.locator("#seed").fill("18446744073709551616");

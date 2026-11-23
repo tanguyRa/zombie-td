@@ -119,13 +119,18 @@ npx playwright test e2e/determinism.spec.ts      # one file
 ```
 
 Playwright starts its own Vite server on port 5199 (after `npm run wasm`), so
-`npm run dev` can stay up. Two environment variables change that:
+`npm run dev` can stay up. That server runs with `ZT_E2E=1`: no file
+watching and no HMR, so a write under `web/` during a run (another run's
+`npm run wasm`, an edit) never reloads a test's page. Two environment
+variables change the server:
 
 - `PW_PORT=5288 npx playwright test` uses another port, for example to run a
   second worktree's tests at the same time. If the port is busy the run fails
   at once (`--strictPort`) instead of testing whatever server is there.
 - `PW_REUSE=1` reuses a server already running on that port instead. It skips
-  `npm run wasm`, so rebuild the WASM yourself first.
+  `npm run wasm`, so rebuild the WASM yourself first, and start that server
+  with `ZT_E2E=1` (e.g. `ZT_E2E=1 npx vite --port 5288`) or a file change
+  can reload the pages under test.
 
 The tests need no network: map tiles, search and Overpass are blocked and the
 built-in levels are used (every test fails if a request leaves the machine).
