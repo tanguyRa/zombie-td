@@ -414,10 +414,12 @@ function replayLoop(gen: number) {
         // One action per slice, then a short hold: a prep's plays (applied
         // on one tick, since the browser never steps prep) can be followed.
         const r = replaySlice(ticks, 1, 0, 0);
-        // Only the ticks that ran use up the budget (a slice stops after
-        // its first action).
-        acc -= (r.ticks / speed) * TICK_MS;
-        if (r.actions > 0) holdUntil = performance.now() + REPLAY_ACTION_HOLD_MS / speed;
+        acc -= (ticks / speed) * TICK_MS;
+        // A hold drops the leftover time: no catch-up turn right after it.
+        if (r.actions > 0) {
+          holdUntil = performance.now() + REPLAY_ACTION_HOLD_MS / speed;
+          acc = 0;
+        }
       }
     }
   } else acc = 0;

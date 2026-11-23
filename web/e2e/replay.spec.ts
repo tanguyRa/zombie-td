@@ -128,7 +128,9 @@ test("a jump at Max lands on its wave: back to wave 1 at tick 0, forward and bac
   // Forward to wave 3, at Max on past it, then back to wave 2: each stops at
   // the start of that wave's first prep.
   await jump(page, 3);
-  expect((await replay(page)).tick).toBe(firstOf(3));
+  await page.waitForTimeout(500);
+  expect(await replay(page)).toMatchObject({ tick: firstOf(3), paused: true, jumping: null, speed: 0 });
+  expect(await hook(page, (h) => [h.wave, h.phase, h.perf?.paused])).toEqual([3, "prep", true]);
   await maxPast(page, firstOf(3) + 500);
   await jump(page, 2);
   await page.waitForTimeout(500);

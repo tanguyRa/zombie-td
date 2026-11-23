@@ -2420,10 +2420,11 @@ calls `matchSetup()`, `startMatch()`, the tracker's `abandon()` /
   step that many ticks per 50 ms like a played match, one action per
   slice and then a hold of 400 ms / speed (the browser never steps prep,
   so a whole prep's plays are on one tick: the hold lets them be
-  followed), and only the ticks a slice ran use up its time budget; Max
-  runs 40 ms slices back to back. The replay speed is kept apart from the
-  played speed (each carries over to the next match of its kind), so a
-  replay at Max never makes the next played match run flat out;
+  followed; the hold drops the slice's leftover time, so no catch-up
+  turn follows it); Max runs 40 ms slices back to back. The replay speed
+  is kept apart from the played speed (each carries over to the next
+  match of its kind), so a replay at Max never makes the next played
+  match run flat out;
   Step (`replay_ctl step`) is one tick plus the actions due before it,
   paused; Jump to wave n runs at Max until wave n's prep opens
   (`stop_wave`), then pauses, and a jump to the current wave or before
