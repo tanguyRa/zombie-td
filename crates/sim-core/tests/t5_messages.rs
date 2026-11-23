@@ -169,4 +169,46 @@ fn tampered_golden_diverges_in_words(check: &dyn Fn(String) -> String) {
     rec.attempts.push(last.clone());
     let (what, vals, _) = diverged(&rec);
     assert_eq!((what.as_str(), vals), ("missing_attempt", format!("{} at tick {} / none", last.result, last.end_tick)));
+
+    // The outcome summary tampered: only the first wave difference, in
+    // words, never the `WaveOutcome` Debug struct.
+    let outcome = |rec: &RunRecord| -> String {
+        let err = sim_core::replay(rec, ReplayMap::Level(&level)).unwrap_err();
+        assert!(matches!(err, VerifyError::Outcome { .. }), "expected Outcome, got {err}");
+        let msg = check(err.to_string());
+        assert!(!msg.contains("WaveOutcome") && !msg.contains("{ ") && !msg.contains('_'), "{msg:?}");
+        msg
+    };
+    assert!(golden.end.waves.iter().all(|w| w.won), "the golden record wins every wave");
+    let mut rec = golden.clone();
+    rec.end.waves[0].end_civilians += 1;
+    let n = golden.end.waves[0].end_civilians;
+    assert_eq!(outcome(&rec), format!("outcome wave 1 end civilians: record says {}, replay gives {n}", n + 1));
+    assert_eq!(n, 627);
+    let mut rec = golden.clone();
+    rec.end.waves[2].won = false;
+    assert_eq!(outcome(&rec), "outcome wave 3 result: record says lost, replay gives won");
+    let mut rec = golden.clone();
+    rec.end.waves.pop();
+    assert_eq!(outcome(&rec), format!("outcome wave count: record says {}, replay gives {}", golden.end.waves.len() - 1, golden.end.waves.len()));
+    let mut rec = golden.clone();
+    rec.end.waves[1].saved += 0.25;
+    assert_eq!(outcome(&rec), format!("outcome wave 2 share saved: record says {}, replay gives {}", golden.end.waves[1].saved + 0.25, golden.end.waves[1].saved));
+
+    // The issued deck differs: the first differing card, or the size.
+    let cfg = common::cfg();
+    let lim = sim_core::record::ReplayLimits::for_config(&cfg);
+    let issued = |deck: Vec<String>| {
+        let x = sim_core::record::ExpectedRun { seed: None, deck: Some(deck), population_multiplier: None };
+        let e = sim_core::record::replay_with(&golden, ReplayMap::Level(&level), Some(&x), cfg.clone(), sim_core::cards::CardDb::default_cards(), &lim, &mut |_| true).unwrap_err();
+        assert!(matches!(e, VerifyError::Unexpected { .. }), "expected Unexpected, got {e}");
+        assert!(!e.to_string().contains("[\"") && !e.to_string().contains("{ "), "{e}");
+        e.to_string()
+    };
+    let mut deck = golden.setup.deck.clone();
+    let j = deck.iter().position(|c| *c != deck[0]).expect("the golden deck holds two kinds of card");
+    deck.swap(0, j);
+    assert_eq!(issued(deck.clone()), format!("the record's deck card 1 is {:?}, the server issued {:?}", golden.setup.deck[0], deck[0]));
+    deck.pop();
+    assert_eq!(issued(deck), format!("the record's deck size is {}, the server issued {}", golden.setup.deck.len(), golden.setup.deck.len() - 1));
 }

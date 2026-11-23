@@ -218,6 +218,35 @@ fn outcome_of(m: &Match) -> (u32, Vec<WaveOutcome>) {
     (waves.iter().filter(|w| w.won).count() as u32, waves)
 }
 
+/// The first difference between the record's wave outcomes and the
+/// replay's, in words (`what`, record, replay): the wave count, or one
+/// field of the first wave that differs. `None` when they are equal.
+fn first_wave_difference(rec: &[WaveOutcome], rep: &[WaveOutcome]) -> Option<(String, String, String)> {
+    if rec.len() != rep.len() {
+        return Some(("wave count".into(), rec.len().to_string(), rep.len().to_string()));
+    }
+    let won = |w: bool| if w { "won" } else { "lost" }.to_string();
+    for (i, (r, p)) in rec.iter().zip(rep).enumerate() {
+        let n = r.wave;
+        if r.wave != p.wave {
+            return Some((format!("wave number at position {}", i + 1), r.wave.to_string(), p.wave.to_string()));
+        }
+        if r.won != p.won {
+            return Some((format!("wave {n} result"), won(r.won), won(p.won)));
+        }
+        if r.start_civilians != p.start_civilians {
+            return Some((format!("wave {n} start civilians"), r.start_civilians.to_string(), p.start_civilians.to_string()));
+        }
+        if r.end_civilians != p.end_civilians {
+            return Some((format!("wave {n} end civilians"), r.end_civilians.to_string(), p.end_civilians.to_string()));
+        }
+        if r.saved.to_bits() != p.saved.to_bits() {
+            return Some((format!("wave {n} share saved"), r.saved.to_string(), p.saved.to_string()));
+        }
+    }
+    None
+}
+
 impl RunRecord {
     /// The record of a match so far. The match holds everything: its log,
     /// its attempts and its map (the chunks it stored, or the whole level).
@@ -561,7 +590,12 @@ fn precheck(record: &RunRecord, expected: Option<&ExpectedRun>, cfg: &Config, ca
             return unexpected("seed", s.seed.to_string(), seed.to_string());
         }
         if let Some(deck) = x.deck.as_ref().filter(|d| **d != s.deck) {
-            return unexpected("deck", format!("{:?}", s.deck), format!("{deck:?}"));
+            // The first difference, in words: the size, or the first card.
+            if deck.len() != s.deck.len() {
+                return unexpected("deck size", s.deck.len().to_string(), deck.len().to_string());
+            }
+            let (i, (r, x)) = s.deck.iter().zip(deck).enumerate().find(|(_, (r, x))| r != x).expect("decks of one size differ in a card");
+            return unexpected(&format!("deck card {}", i + 1), format!("{r:?}"), format!("{x:?}"));
         }
         if let Some(k) = x.population_multiplier.filter(|k| k.to_bits() != s.population_multiplier.to_bits()) {
             return unexpected("population_multiplier", s.population_multiplier.to_string(), k.to_string());
@@ -791,7 +825,9 @@ pub fn replay_with(
     out("waves_won", e.waves_won.to_string(), waves_won.to_string())?;
     out("retries", e.retries.to_string(), m.retries().to_string())?;
     out("restarts", e.restarts.to_string(), m.restarts().to_string())?;
-    out("waves", format!("{:?}", e.waves), format!("{waves:?}"))?;
+    if let Some((what, r, p)) = first_wave_difference(&e.waves, &waves) {
+        return Err(VerifyError::Outcome { what, record: r, replay: p });
+    }
     Ok(ReplaySummary {
         setup: record.setup.clone(),
         setup_checked: expected.is_some_and(|x| !x.is_empty()),

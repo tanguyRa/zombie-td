@@ -365,7 +365,7 @@ impl ShellLimits {
         if let Some([x0, y0, x1, y1]) = shell.bounds {
             let inside = [x0, y0, x1, y1].iter().all(|v| v.is_finite() && v.abs() <= ext);
             if !inside || !(x0 < x1 && y0 < y1) || x1 - x0 > ext || y1 - y0 > ext {
-                return Err(format!("bounds {:?} must be finite, ordered, within {ext} m of the origin and at most {ext} m wide and high", [x0, y0, x1, y1]));
+                return Err(format!("bounds from ({x0}, {y0}) to ({x1}, {y1}) must be finite, ordered, within {ext} m of the origin and at most {ext} m wide and high"));
             }
         }
         if shell.fences.len() > self.max_fences {

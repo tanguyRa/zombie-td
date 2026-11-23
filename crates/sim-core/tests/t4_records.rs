@@ -792,7 +792,7 @@ fn the_issued_seed_deck_and_multiplier_are_enforced() {
     deck.rotate_left(1);
     assert_ne!(deck, p.setup.deck);
     let e = run(&ExpectedRun { deck: Some(deck), ..issued.clone() }).unwrap_err();
-    assert!(matches!(&e, VerifyError::Unexpected { what, .. } if what == "deck"), "{e:?}");
+    assert!(matches!(&e, VerifyError::Unexpected { what, .. } if what.starts_with("deck card ")), "{e:?}");
     let e = run(&ExpectedRun { population_multiplier: Some(p.setup.population_multiplier * 1.25), ..issued.clone() }).unwrap_err();
     assert!(matches!(&e, VerifyError::Unexpected { what, .. } if what == "population_multiplier"), "{e:?}");
     assert!(t.elapsed().as_millis() < 500, "{:?}", t.elapsed());
