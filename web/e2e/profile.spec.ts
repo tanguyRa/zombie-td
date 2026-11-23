@@ -2,8 +2,10 @@
 // no network (Nominatim answers come from fixtures): the starter deck of a
 // new profile, deck validation, one payout per match, crates and their
 // stamps, a custom deck used in a match, tier unlocks, coverage on the map,
-// match history with a record that verifies headless, and the place names
-// taken from the geocoder's admin fields only.
+// match history with a record that verifies headless, the place names
+// taken from the geocoder's admin fields only (and no street in a streamed
+// match's stored record), and a new match never claimed with the old
+// match's still-queued status.
 //
 // A full 8-wave clear is the T5 full-match test (match.spec.ts), which also
 // checks its claim, the Veteran unlock and coverage; here a clear is
@@ -17,6 +19,7 @@ import { type CardInfo, keepTactical, playPrep, zombieHotspot } from "./bot";
 import { expect, hook, hookWith, test } from "./offline";
 import { LOAD_WAIT_MS, OPEN_LEVEL_MS, pageApi, waitMapIdle } from "./ui";
 import { VERIFY_MS, verifyNative } from "./verify";
+import { loadLevel, parseBboxes, wayInBbox, waysFromLevel } from "../test/unit/fixtures";
 
 const MARAIS = "Paris — Le Marais";
 const STARTER = "deck-civil_defence_issue";
@@ -318,4 +321,149 @@ test("place names come from the geocoder's admin fields only", async ({ page, ro
   await page.mouse.click(box.x + box.width * 0.7, box.y + box.height * 0.3);
   await expect.poll(() => hook(page, (h) => h.picked?.admin ?? null)).toEqual({ city: "Barcelona", district: "Gràcia" });
   expect(asked[1]).toMatch(/\/reverse\?.*zoom=14.*addressdetails=1/);
+});
+
+/** Leave the match on screen by one of the new-match paths while the
+ *  worker's messages queue up (the main thread is busy for 300 ms during a
+ *  running wave: the old match's status and state are still queued when
+ *  the new match starts), then press ← Map as soon as the new match has an
+ *  id (before its `ready`). The ids of both matches. */
+function leaveBusy(page: Page, path: "hook" | "enter" | "button") {
+  return hookWith(
+    page,
+    async (h, path) => {
+      const before = h.profile.match!.matchId;
+      const confirm = window.confirm;
+      window.confirm = () => true; // "the current match will be lost": yes
+      try {
+        const t = performance.now();
+        while (performance.now() - t < 300) {
+          /* busy: the worker's messages queue up */
+        }
+        const seed = document.getElementById("seed") as HTMLInputElement;
+        if (path === "hook") h.newMatch(7);
+        else if (path === "enter") {
+          seed.value = "8";
+          seed.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        } else {
+          seed.value = "9";
+          (document.getElementById("new-match") as HTMLButtonElement).click();
+        }
+      } finally {
+        window.confirm = confirm;
+      }
+      while (!h.profile.match || h.profile.match.matchId === before) await new Promise((r) => setTimeout(r, 0));
+      const after = h.profile.match.matchId;
+      h.backToMap();
+      return { before, after };
+    },
+    path,
+  );
+}
+
+test("a new match (hook, new seed + Enter, New match) claims the old match only, never the new one", async ({ page }) => {
+  test.setTimeout(OPEN_LEVEL_MS * 3 + 60_000);
+  await openApp(page);
+  const want: string[] = [];
+  for (const path of ["hook", "enter", "button"] as const) {
+    await startPreset(page);
+    await waitPrep(page);
+    expect(await hook(page, (h) => h.startWave())).toBeNull();
+    await expect.poll(() => hook(page, (h) => h.phase), { timeout: LOAD_WAIT_MS }).toBe("running");
+    const { before, after } = await leaveBusy(page, path);
+    expect(after).not.toBe(before);
+    want.push(before);
+    const claims = await hook(page, async (h) => (await h.profile.settle(), h.profile.claims()));
+    // The old match, abandoned in wave 1 (a wave was started): paid once.
+    // The new one never made progress: no claim, no history, no daily event.
+    expect(
+      claims.map((c) => [c.matchId, c.reason, c.paid]),
+      path,
+    ).toEqual(want.map((id) => [id, "abandoned", true]));
+    const x = JSON.stringify(await hook(page, (h) => h.profile.exportProfile()));
+    expect(x.includes(after), `${path}: the new match is in the profile`).toBe(false);
+    expect((await state(page)).history).toBe(want.length);
+    // The claim was made in the game screen, where its panel hides itself
+    // after 10 s (it may already be gone in a slow browser): close it if up.
+    await page.evaluate(() => (document.getElementById("payout-close") as HTMLButtonElement).click());
+  }
+});
+
+test("a match on a searched address stores no street, house number or postcode", async ({ page, routeExternal }) => {
+  test.setTimeout(OPEN_LEVEL_MS + 2 * LOAD_WAIT_MS);
+  const level = loadLevel("paris-marais");
+  const ways = waysFromLevel(level);
+  const CORS = { "Access-Control-Allow-Origin": "*", "Cross-Origin-Resource-Policy": "cross-origin" };
+  // A fixture Overpass (the Marais level's ways) and a Nominatim that finds
+  // a house: the display label names the street, the number and the postcode.
+  await routeExternal(/^https:\/\/(overpass-api\.de|overpass\.private\.coffee)\//, async (route) => {
+    const boxes = parseBboxes(new URLSearchParams(route.request().postData() ?? "").get("data") ?? "");
+    const elements = ways.filter((w) => boxes.some((b) => wayInBbox(w, b)));
+    try {
+      await route.fulfill({ status: 200, contentType: "application/json", headers: CORS, body: JSON.stringify({ elements }) });
+    } catch {
+      // The page aborted the request (← Map).
+    }
+  });
+  const DISPLAY = "12, Rue des Rosiers, Le Marais, Paris 4e Arrondissement, Paris, Île-de-France, 75004, France";
+  const LABEL = "12, Rue des Rosiers, Le Marais"; // the pin's label: the first parts of the display name
+  await routeExternal(/^https:\/\/nominatim\.openstreetmap\.org\//, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: CORS,
+      body: JSON.stringify([
+        {
+          lat: String(level.center_lat),
+          lon: String(level.center_lon),
+          display_name: DISPLAY,
+          osm_type: "node",
+          osm_id: 4242,
+          addresstype: "building",
+          address: { house_number: "12", road: "Rue des Rosiers", suburb: "Le Marais", city_district: "Paris 4e Arrondissement", city: "Paris", postcode: "75004", country: "France" },
+        },
+      ]),
+    }),
+  );
+  await openApp(page);
+  await page.locator("#search-q").fill("12 rue des Rosiers");
+  await page.locator("#search-q").press("Enter");
+  await expect.poll(() => hook(page, (h) => h.picked?.name ?? null)).toBe(LABEL);
+  await page.locator("#go").click();
+  await waitPrep(page);
+  // The page's title still shows the label; the match is a streamed one.
+  await expect(page.locator("#place")).toHaveText(LABEL);
+  expect(await hook(page, (h) => h.map !== null)).toBe(true);
+  expect(await hook(page, (h) => h.profile.match)).toMatchObject({ city: "Paris", district: "Le Marais" });
+  expect(await hook(page, (h) => h.startWave())).toBeNull();
+  await expect.poll(() => hook(page, (h) => h.phase), { timeout: LOAD_WAIT_MS }).toBe("running");
+  const matchId = (await hook(page, (h) => h.profile.match!.matchId))!;
+  const bundle = await hook(page, (h) => h.mapBundle());
+  await hook(page, (h) => h.backToMap());
+  const claims = await hook(page, async (h) => (await h.profile.settle(), h.profile.claims()));
+  expect(claims.map((c) => [c.matchId, c.reason])).toEqual([[matchId, "abandoned"]]);
+
+  const m = (await hookWith(page, (h, id) => h.profile.getMatch(id), matchId))!;
+  const record = m.runRecord as { map: { source: string; shell: { name: string } } };
+  expect(record.map.source).toBe("chunks");
+  expect(record.map.shell.name).toBe("streamed");
+  const exported = JSON.stringify(await hook(page, (h) => h.profile.exportProfile()));
+  const STREET = /rosiers|\brue\b|75004|arrondissement|le-de-france|"12,/i;
+  for (const [what, text] of [
+    ["run record", JSON.stringify(m.runRecord)],
+    ["history entry", JSON.stringify(m.summary)],
+    ["profile export", exported],
+    ["map bundle", bundle],
+  ] as const) {
+    expect(STREET.test(text), `${what}: ${text.match(STREET)?.[0]}`).toBe(false);
+    expect(text.includes(LABEL), what).toBe(false);
+  }
+  expect(m.summary).toMatchObject({ city: "Paris", district: "Le Marais" });
+
+  // The history: the district and city, no street.
+  await page.locator("#payout-close").click();
+  await page.locator("#p-open-history").click();
+  const item = page.locator(`#history .hist-item[data-match="${matchId}"]`);
+  await expect(item).toContainText("Le Marais, Paris");
+  await expect(item).not.toContainText("Rosiers");
 });

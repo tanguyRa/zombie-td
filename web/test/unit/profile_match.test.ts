@@ -66,6 +66,8 @@ function ctx(over: Partial<MatchContext> = {}): MatchContext {
     claimed: false,
     firstBloodSent: false,
     waveVictories: new Set(),
+    ready: true,
+    live: true,
     ...over,
   };
 }
@@ -161,6 +163,7 @@ describe("tracker", () => {
 
     // First blood once per match; wave victories once per wave.
     const m = t.start(base);
+    t.onReady();
     t.onStatus(status({ phase: "running", stats: { ...status().stats, zombies_killed: 2 } }));
     t.onStatus(status({ phase: "running", stats: { ...status().stats, zombies_killed: 5 } }));
     const results = RINGS.map((_, i) => result(i + 1, true, 16000));
@@ -177,17 +180,60 @@ describe("tracker", () => {
 
     // A pristine match left at once: no claim, no history entry.
     t.start(base);
+    t.onReady();
+    t.onStatus(status());
     snap = { status: status(), results: [], towers: [], structures: [], rings: RINGS };
     expect(t.abandon()).toBeNull();
     expect(t.current).toBeNull();
 
     // A match abandoned in wave 2 pays once, and claiming it again pays nothing.
     const m3 = t.start(base);
+    t.onReady();
+    t.onStatus(status());
     snap = { status: status({ wave: 2, phase: "prep" }), results: [result(1, true, 8000)], towers: [], structures: [], rings: RINGS };
     await t.abandon();
     expect(claims[1]).toBe("abandoned:true:3"); // wave 2: 1, civilians 8000/4000: 2
     const again = await p.claimMatch((await p.getMatch(m3.matchId))!.summary, null);
     expect(again.paid).toBe(false);
     expect((await p.listMatches()).length).toBe(2);
+  });
+
+  it("a match never reported live (no status after its ready) is never claimed, nor reported", async () => {
+    const p = await memoryProfile({ seed: 1n });
+    // The page still shows the previous match's status (queued after its
+    // stop): a wave with kills, on the result screen.
+    const old = status({ wave: 3, phase: "wave_won", stats: { ...status().stats, zombies_killed: 9 } });
+    const snap: MatchSnapshot = { status: old, results: [result(1, true, 8000), result(2, true, 8000), result(3, true, 8000)], towers: [], structures: [], rings: RINGS };
+    const claims: string[] = [];
+    const t = new MatchTracker({
+      profile: () => p,
+      snapshot: () => snap,
+      record: async () => "{}",
+      maxRadiusM: 1950,
+      onClaim: (n) => claims.push(n.reason),
+      onDaily: () => {},
+      onError: (m) => {
+        throw new Error(m);
+      },
+    });
+    const base = { place: ctx().place, tier: "recruit" as const, deckId: "d", deck: [], populationMultiplier: 0.3, hometown: false, seed: "2", streamed: false };
+
+    // Before its ready: the old status reports nothing, leaving claims nothing.
+    t.start(base);
+    t.onStatus(old);
+    t.onPhase(old, snap.results);
+    expect(t.current!.live).toBe(false);
+    expect(t.abandon()).toBeNull();
+
+    // Ready but no status yet: still nothing.
+    t.start(base);
+    t.onReady();
+    t.onPhase(old, snap.results);
+    expect(t.abandon()).toBeNull();
+    expect(t.claim("cleared", snap)).toBeNull();
+    await t.settle();
+    expect(claims).toEqual([]);
+    expect(await p.listMatches()).toEqual([]);
+    expect(await p.listTickets()).toEqual([]);
   });
 });

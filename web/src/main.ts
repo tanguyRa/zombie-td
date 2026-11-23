@@ -10,12 +10,14 @@ import cardsJson from "../../cards.json?raw";
 import { Place, createExplore } from "./explore";
 import { MapSession } from "./mapsession";
 import { parseSeed } from "./seed";
+import { placeLabel } from "./profile/sanitize";
 import { ProfileUi } from "./ui/profileui";
 import type { MatchPlace } from "./ui/profilematch";
 import {
   Action,
   ActionError,
   FromWorker,
+  FromWorkerTagged,
   Geometry,
   H_COUNT,
   H_INTERVAL,
@@ -290,6 +292,10 @@ const profileUi = new ProfileUi({
 /** Bumped by every new match and by "← Map": a match setup still waiting
  *  for the profile is dropped. */
 let matchGen = 0;
+/** The `match` id of the init on screen (0: none, after a `stop` or "←
+ *  Map"). Worker messages tagged with another id are the old match's,
+ *  still queued: dropped (`FromWorkerTagged`). */
+let liveMatch = 0;
 
 /** Where the match on screen is, for the profile: the level's centre and
  *  the place's admin names (never its display label). */
@@ -1134,7 +1140,7 @@ function hashLayer() {
 }
 
 // ---------------------------------------------------------------- worker messages
-worker.onmessage = (ev: MessageEvent<FromWorker>) => {
+worker.onmessage = (ev: MessageEvent<FromWorkerTagged>) => {
   const m = ev.data;
   if (testTap?.(m)) return;
   // Replies resolve whatever is waiting, even after "← Map".
@@ -1158,8 +1164,12 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     return;
   }
   if (document.body.dataset.screen !== "game") return; // late messages after "← Map"
+  // The old match's messages still queued after a `stop` (a new match, a
+  // new seed, another level): never the match on screen's.
+  if (liveMatch === 0 || m.match !== liveMatch) return;
   switch (m.type) {
     case "ready": {
+      profileUi.tracker.onReady();
       level = m.level;
       shared = m.shared;
       posBufs = [new Float32Array(level.capacity * 2), new Float32Array(level.capacity * 2)];
@@ -1296,6 +1306,7 @@ async function newMatch() {
   // Stop the old match now: the setup waits for the profile, and the old
   // match must not keep posting its state meanwhile.
   send({ type: "stop" });
+  liveMatch = 0; // the old match's queued status, state… are dropped from now on
   const gen = ++matchGen;
   matchSeed = seed;
   ($("seed") as HTMLInputElement).value = seed;
@@ -1323,7 +1334,8 @@ async function newMatch() {
   }
   // A streamed map: the chunks loaded so far, then each later one as it arrives.
   const map: MatchMap = s ? s.matchMap((chunk) => session === s && send({ type: "chunk", chunk })) : { level: currentLevelJson };
-  send({ type: "init", map, setup: { seed, ...setup.setup }, test: TEST_MODE });
+  liveMatch = gen;
+  send({ type: "init", match: gen, map, setup: { seed, ...setup.setup }, test: TEST_MODE });
   profileUi.startMatch(setup, matchPlace(), seed, !!s);
 }
 
@@ -1347,6 +1359,7 @@ const placeKey = (p: Place) => p.presetUrl ?? `${p.lat.toFixed(5)},${p.lon.toFix
 async function enterGame(place: Place) {
   profileUi.tracker.abandon(); // a match still on screen is left
   matchGen++;
+  liveMatch = 0;
   document.body.dataset.screen = "game";
   explore.setActive(false);
   overlay.setProps({ layers: [] });
@@ -1391,7 +1404,7 @@ async function enterGame(place: Place) {
 async function enterStreamed(place: Place, abort: AbortController) {
   let s: MapSession | null = null;
   try {
-    s = await MapSession.open(place.name, place.lat, place.lon, TEST_MODE ? { backoffMs: TEST_BACKOFF_MS, requestTimeoutMs: TEST_TIME_LIMIT_MS, batchBudgetMs: TEST_TIME_LIMIT_MS } : {});
+    s = await MapSession.open(place.lat, place.lon, TEST_MODE ? { backoffMs: TEST_BACKOFF_MS, requestTimeoutMs: TEST_TIME_LIMIT_MS, batchBudgetMs: TEST_TIME_LIMIT_MS } : {});
     if (abort.signal.aborted) return s.abort();
     session = s;
     setGeo(s.shell.center_lat, s.shell.center_lon);
@@ -1418,6 +1431,7 @@ function backToMap() {
   session?.abort();
   session = null;
   send({ type: "stop" });
+  liveMatch = 0;
   level = null;
   status = null;
   hand = [];
@@ -1589,7 +1603,11 @@ function showResult(kind: string) {
 function saveJson(json: string, kind: string) {
   const blob = new Blob([json], { type: "application/json" });
   const a = document.createElement("a");
-  const place = (currentPlace?.name ?? "match").normalize("NFKD").replace(/[^\w]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
+  // The file name says the district and city (admin names), never the
+  // display label (a searched address names a street and a number).
+  const adm = currentPlace?.admin;
+  const label = adm && (adm.district || adm.city) ? placeLabel(adm.district, adm.city) : "match";
+  const place = label.normalize("NFKD").replace(/[^\w]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
   a.href = URL.createObjectURL(blob);
   a.download = `zombie-td-${kind}-${place}-seed${matchSeed}.json`;
   document.body.appendChild(a);

@@ -2220,12 +2220,26 @@ calls `matchSetup()`, `startMatch()`, the tracker's `abandon()` /
     and the Marais level (keyed on the name) are two city keys until a city
     lookup gives the level an id;
   - the display label (`Place.name`, from `display_name`) never reaches the
-    profile. The last place remembered in `localStorage` keeps its admin
-    names, which go through `placeFromGeocoder` again when read back.
+    profile. It is for the page's titles only (the pin, the game screen's
+    place line). The run record carries the map's shell, and the profile
+    stores the record, so a streamed shell's `name` is the constant
+    `"streamed"` (`STREAMED_SHELL_NAME`, stream.ts), not the label (it used
+    to be the label, so a searched address put its street and house number
+    into every stored record). The verifier ignores shell names
+    (`shells_equal` and `shell_hash` compare centre, radius, bounds and
+    fences only), so verification is unchanged. The map bundle carries the
+    same shell. Downloaded file names use `placeLabel(district, city)`, not
+    the label. The last place remembered in `localStorage` (the map
+    screen's pin, a UI convenience outside the profile) keeps the label for
+    its title and its admin names, which go through `placeFromGeocoder`
+    again when read back.
   Tests: Nominatim-shaped results with a road, a house number and a
   postcode give only the admin names (unit); the E2E routes the search and
   the reverse geocode to fixture answers and checks the pin's admin names
-  and the request parameters.
+  and the request parameters; a streamed match started from a searched
+  house ("12, Rue des Rosiers … 75004") stores a record whose shell is
+  `"streamed"`, and no street, house number or postcode appears in the run
+  record, the history entry, the profile export or the map bundle (E2E).
 - **Match id and daily events** (`MatchTracker`). A UUID is made when the
   match is sent to the worker (`startMatch`); retries and restarts stay in
   the same match. The first status with `zombies_killed > 0` reports
@@ -2244,7 +2258,24 @@ calls `matchSetup()`, `startMatch()`, the tracker's `abandon()` /
   worker answers a record at once, in message order). The claim is marked
   sent before the profile call, and the profile is idempotent on the match
   id, so a match is paid once whatever the UI does (a second claim pays
-  nothing and returns the first payout). Closing the tab is not a claim
+  nothing and returns the first payout).
+  **The old match's messages.** A new match sends `stop`, then waits for
+  the profile (IndexedDB) before its `init`. The old match's `status`,
+  `state` and `placements` that were already queued arrive in that window.
+  They used to put the old status back, so leaving the new match at once
+  claimed it as "abandoned, paid" with the old match's data, and daily
+  events could be credited to it. Now every `init` carries a `match` id
+  (the page's match generation). The worker tags every message it posts
+  with the id of the last `init` (0 after a `stop`), and the page drops
+  every match message whose id is not the match on screen (none between a
+  `stop` and the next `init`). Defence in depth: the tracker reports a
+  daily event, or claims a match, only once it has seen a status after
+  that match's own `ready` (`MatchContext.live`). E2E (each exit path,
+  hook `newMatch`, a new seed with Enter, New match): during a running
+  wave the main thread is kept busy for 300 ms, then the new match starts
+  and ← Map is pressed as soon as it has an id. The old match only is
+  claimed, and the new one is nowhere in the profile. Each guard alone
+  passes the test, and with both removed it fails. Closing the tab is not a claim
   (IndexedDB can't be written reliably on unload): that match is lost, as
   an issued but never submitted server run counts as abandoned.
 - **The summary** (`buildSummary`) comes from what the worker reported:

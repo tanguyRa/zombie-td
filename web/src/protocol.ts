@@ -145,8 +145,10 @@ export type QueryResult =
 export type MatchMap = { level: string } | { shell: string; chunks: BuildingChunk[] };
 
 export type ToWorker =
-  /** Build a match. `test` unlocks the test-only speeds and `pause_at`. */
-  | { type: "init"; map: MatchMap; setup: { seed: string; deck?: string[]; population_multiplier?: number }; test?: boolean }
+  /** Build a match. `test` unlocks the test-only speeds and `pause_at`.
+   *  `match`: the page's id of this match, echoed on every message the
+   *  worker posts until the next `init` or `stop` (`FromWorkerTagged`). */
+  | { type: "init"; match: number; map: MatchMap; setup: { seed: string; deck?: string[]; population_multiplier?: number }; test?: boolean }
   /** A streamed block for `add_buildings`: added at once unless a wave
    *  runs, else queued until it ends. Answered by `map`. */
   | { type: "chunk"; chunk: BuildingChunk }
@@ -224,6 +226,13 @@ export type FromWorker =
   | { type: "field"; kind: "chase" | "flee"; data: Int32Array; w: number; h: number }
   | { type: "hash"; id: number; tick: number; hash: string }
   | { type: "hash"; id: number; aborted: true };
+
+/** What the worker actually posts: every message carries the `match` of the
+ *  `init` it was posted under (0 after a `stop` and before the first init).
+ *  The page drops match messages (ready, status, state, frames, map…) whose
+ *  `match` is not the match on screen: the old match's messages still
+ *  queued when a new match starts are never read as the new match's. */
+export type FromWorkerTagged = FromWorker & { match: number };
 
 // ---- shared buffer: header, then 3 slots of (positions f32 x,y; render u8) ----
 // Triple buffering: the worker writes slot (latest + 1) % 3 while the main

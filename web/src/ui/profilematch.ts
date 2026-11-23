@@ -61,6 +61,12 @@ export interface MatchContext {
   firstBloodSent: boolean;
   /** Waves whose wave victory was reported. */
   waveVictories: Set<number>;
+  /** The worker's `ready` for this match arrived. */
+  ready: boolean;
+  /** A status arrived after this match's `ready`: only then is what the
+   *  page shows this match's (not the previous match's, still queued). No
+   *  daily event, no claim before. */
+  live: boolean;
 }
 
 /** What the worker last reported about the match on screen. */
@@ -169,9 +175,14 @@ export class MatchTracker {
   constructor(private readonly d: TrackerDeps) {}
 
   /** A new match was sent to the worker. */
-  start(ctx: Omit<MatchContext, "matchId" | "claimed" | "firstBloodSent" | "waveVictories">): MatchContext {
-    this.current = { ...ctx, matchId: newMatchId(), claimed: false, firstBloodSent: false, waveVictories: new Set() };
+  start(ctx: Omit<MatchContext, "matchId" | "claimed" | "firstBloodSent" | "waveVictories" | "ready" | "live">): MatchContext {
+    this.current = { ...ctx, matchId: newMatchId(), claimed: false, firstBloodSent: false, waveVictories: new Set(), ready: false, live: false };
     return this.current;
+  }
+
+  /** The worker built the match last `start`ed (its `ready`). */
+  onReady(): void {
+    if (this.current) this.current.ready = true;
   }
 
   /** Wait for every profile call made so far (tests, and before reading the profile). */
@@ -194,8 +205,10 @@ export class MatchTracker {
   /** First blood: the first zombie killed in this match (the profile counts it once a day). */
   onStatus(s: MatchStatus): void {
     const ctx = this.current;
+    if (!ctx?.ready) return; // a status from before this match's ready: not this match's
+    ctx.live = true;
     const p = this.d.profile();
-    if (!ctx || !p || ctx.firstBloodSent || s.stats.zombies_killed <= 0) return;
+    if (!p || ctx.firstBloodSent || s.stats.zombies_killed <= 0) return;
     ctx.firstBloodSent = true;
     void this.track(
       p.recordDailyEvent({ kind: "first_blood", matchId: ctx.matchId, wave: s.wave, city: ctx.place.city, district: ctx.place.district, tier: ctx.tier, populationSaved: 0 }).then((r) => {
@@ -209,7 +222,7 @@ export class MatchTracker {
   onPhase(s: MatchStatus, results: WaveResult[]): void {
     const ctx = this.current;
     const p = this.d.profile();
-    if (!ctx || !p) return;
+    if (!ctx?.live || !p) return;
     if ((s.phase === "wave_won" || s.phase === "match_won") && !ctx.waveVictories.has(s.wave)) {
       ctx.waveVictories.add(s.wave);
       const r = [...results].reverse().find((x) => x.wave === s.wave && x.won);
@@ -232,7 +245,7 @@ export class MatchTracker {
   abandon(): Promise<ClaimNotice | undefined> | null {
     const ctx = this.current;
     const snap = this.d.snapshot();
-    const out = ctx && !ctx.claimed && hasProgress(snap?.status) ? this.claim("abandoned") : null;
+    const out = ctx?.live && !ctx.claimed && hasProgress(snap?.status) ? this.claim("abandoned") : null;
     this.current = null;
     return out;
   }
@@ -244,7 +257,8 @@ export class MatchTracker {
     const p = this.d.profile();
     // `snapshot`: the test hook's fast-forward (a synthetic cleared match).
     const snap = snapshot ?? this.d.snapshot();
-    if (!ctx || !p || !snap || ctx.claimed) return null;
+    // Not live: the snapshot may still be the previous match's.
+    if (!ctx?.live || !p || !snap || ctx.claimed) return null;
     ctx.claimed = true;
     const summary = buildSummary(ctx, snap, this.d.maxRadiusM);
     const record = this.d.record();

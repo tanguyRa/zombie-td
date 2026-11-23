@@ -24,12 +24,19 @@ export interface ShellJson {
   fences: never[];
 }
 
+/// The name of every streamed shell. The run record carries the shell (and
+/// the profile stores the record), so the name identifies nothing: never
+/// the place's display label, which may hold a street, a house number or a
+/// postcode (that label is for the page's titles only). The verifier
+/// ignores shell names (`shells_equal`, `shell_hash`).
+export const STREAMED_SHELL_NAME = "streamed";
+
 /// The shell of a picked place: its centre (rounded to 1e-6°, ~10 cm, so
 /// records and file names stay readable), the wave-8 radius, no buildings
 /// and no fences. Throws when the centre is not a latitude / longitude.
-export function buildShell(name: string, lat: number, lon: number): ShellJson {
+export function buildShell(lat: number, lon: number): ShellJson {
   const r6 = (v: number) => Math.round(v * 1e6) / 1e6;
-  const shell: ShellJson = { name, center_lat: r6(lat), center_lon: r6(lon), radius_m: PLAY_RADIUS_M, buildings: [], fences: [] };
+  const shell: ShellJson = { name: STREAMED_SHELL_NAME, center_lat: r6(lat), center_lon: r6(lon), radius_m: PLAY_RADIUS_M, buildings: [], fences: [] };
   const bad = shellProblem(shell);
   if (bad) throw new Error(bad);
   return shell;

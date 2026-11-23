@@ -20,9 +20,9 @@ const chunk = (id: number, buildings = 0): BuildingChunk => ({
 });
 
 describe("shell", () => {
-  it("is the centre, the wave-8 radius, no buildings and no fences", () => {
-    const s = buildShell("Somewhere", 48.8580001234, 2.35799996);
-    expect(s).toEqual({ name: "Somewhere", center_lat: 48.858, center_lon: 2.358, radius_m: cfg.wave8_radius_m, buildings: [], fences: [] });
+  it("is the centre, the wave-8 radius, no buildings and no fences; a name that identifies nothing", () => {
+    const s = buildShell(48.8580001234, 2.35799996);
+    expect(s).toEqual({ name: "streamed", center_lat: 48.858, center_lon: 2.358, radius_m: cfg.wave8_radius_m, buildings: [], fences: [] });
     expect(PLAY_RADIUS_M).toBe(1300);
     // Within ShellLimits: a radius-only shell has no bounds or fences to check.
     expect(shellProblem(s)).toBeNull();
@@ -30,16 +30,16 @@ describe("shell", () => {
   });
 
   it("has the config rings (the level is as large as the wave-8 cap)", () => {
-    expect(shellRingRadii(buildShell("x", 48.8, 2.3))).toEqual(cfg.match.ring_radius_m);
+    expect(shellRingRadii(buildShell(48.8, 2.3))).toEqual(cfg.match.ring_radius_m);
   });
 
   it("refuses centres sim-core or the block grid can't take", () => {
-    expect(() => buildShell("x", NaN, 2)).toThrow(/latitude/);
-    expect(() => buildShell("x", 91, 2)).toThrow(/latitude/);
-    expect(() => buildShell("x", 10, 181)).toThrow(/latitude/);
-    expect(() => buildShell("x", 10, 179.5)).toThrow(/antimeridian/);
-    expect(() => buildShell("x", 86, 0)).toThrow(/pole/);
-    expect(shellProblem({ ...buildShell("x", 1, 1), radius_m: 0 })).toMatch(/radius/);
+    expect(() => buildShell(NaN, 2)).toThrow(/latitude/);
+    expect(() => buildShell(91, 2)).toThrow(/latitude/);
+    expect(() => buildShell(10, 181)).toThrow(/latitude/);
+    expect(() => buildShell(10, 179.5)).toThrow(/antimeridian/);
+    expect(() => buildShell(86, 0)).toThrow(/pole/);
+    expect(shellProblem({ ...buildShell(1, 1), radius_m: 0 })).toMatch(/radius/);
   });
 
   it("calls a place with fewer than 40 buildings in its first blocks too empty", () => {
@@ -131,7 +131,7 @@ function recorder() {
 
 describe("DistrictGate", () => {
   const center = { lat: level.center_lat, lon: level.center_lon };
-  const ringRadii = shellRingRadii(buildShell("x", center.lat, center.lon));
+  const ringRadii = shellRingRadii(buildShell(center.lat, center.lon));
   const make = (fake: ReturnType<typeof fakeOverpass>) =>
     new MapLoader({ center, ringRadii, cache: new MemoryBlockCache(), fetch: fake.fetch, urls: ["https://overpass.test/api"], sleep: async () => {}, maxAttempts: 2 });
 
@@ -259,7 +259,7 @@ function queryBlocks(c: FakeCall): number[] {
 
 describe("map bundle", () => {
   it("holds the shell and the record's blocks, in block id order", () => {
-    const shell = buildShell("x", 48.8, 2.3);
+    const shell = buildShell(48.8, 2.3);
     const b = mapBundle(shell, [chunk(3), chunk(1), chunk(2)], [3, 1]);
     expect(b.chunks.map((c) => c.block_id)).toEqual([1, 3]);
     const { chunks, ...rest } = b;

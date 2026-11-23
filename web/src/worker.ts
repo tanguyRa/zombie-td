@@ -21,6 +21,7 @@ import {
   Action,
   ActionError,
   FromWorker,
+  FromWorkerTagged,
   H_COUNT,
   H_INTERVAL,
   H_LATEST,
@@ -76,7 +77,11 @@ let cell = 2;
 const queue: { id: number; action: Action }[] = [];
 const chunks = new ChunkQueue();
 
-const post = (msg: FromWorker, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, transfer);
+/** The page's id of the match being built or played (the last `init`'s
+ *  `match`; 0 after a `stop`): every message is tagged with it. */
+let matchTag = 0;
+const post = (msg: FromWorker, transfer: Transferable[] = []) =>
+  (self as unknown as Worker).postMessage({ ...msg, match: matchTag } satisfies FromWorkerTagged, transfer);
 
 const ABORTED: ActionError = { error: "aborted", message: "the match was stopped" };
 /** Settle every queued action with `aborted` (stop, re-init): nothing waits forever. */
@@ -364,6 +369,7 @@ function query(q: Query): QueryResult {
 
 async function initMatch(msg: Extract<ToWorker, { type: "init" }>) {
   const myGen = ++generation;
+  matchTag = msg.match;
   if (loopTimer) clearTimeout(loopTimer);
   // Drop the old match now: `chunk` messages that arrive while the WASM
   // loads belong to the new match and must wait for it.
@@ -423,6 +429,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
   if (msg.type === "init") return initMatch(msg);
   if (msg.type === "stop") {
     generation++;
+    matchTag = 0;
     if (loopTimer) clearTimeout(loopTimer);
     m?.free();
     m = null;

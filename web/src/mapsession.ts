@@ -87,8 +87,10 @@ export class MapSession {
     this.loader.on("error", ({ blocks, error }) => console.warn(`map loader: ${blocks.length} blocks failed`, error));
   }
 
-  static async open(name: string, lat: number, lon: number, opts: MapSessionOptions = {}): Promise<MapSession> {
-    return new MapSession(buildShell(name, lat, lon), await blockCache(), opts);
+  /** No name: the shell's is a constant (`STREAMED_SHELL_NAME`), never the
+   *  place's display label (the record, and so the profile, carries it). */
+  static async open(lat: number, lon: number, opts: MapSessionOptions = {}): Promise<MapSession> {
+    return new MapSession(buildShell(lat, lon), await blockCache(), opts);
   }
 
   /** Load waves 1–2 (cache, then Overpass), reporting progress. Throws when

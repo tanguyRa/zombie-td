@@ -77,7 +77,7 @@ export interface ProfileHook {
   readonly persistent: boolean | null;
   readonly error: string | null;
   /** The match on screen: its id, tier and deck (null when none). */
-  readonly match: { matchId: string; tier: Tier; deckId: string; deck: string[]; populationMultiplier: number; hometown: boolean; city: string; district: string; claimed: boolean } | null;
+  readonly match: { matchId: string; tier: Tier; deckId: string; deck: string[]; populationMultiplier: number; hometown: boolean; city: string; district: string; claimed: boolean; live: boolean } | null;
   /** Coverage cells drawn on the map screen by the last refresh (0 when the toggle is off). */
   readonly coverageDrawn: number;
   /** The open screen, or null. */
@@ -908,7 +908,7 @@ export class ProfileUi {
       },
       get match() {
         const c = ui.tracker.current;
-        return c ? { matchId: c.matchId, tier: c.tier, deckId: c.deckId, deck: [...c.deck], populationMultiplier: c.populationMultiplier, hometown: c.hometown, city: c.place.city, district: c.place.district, claimed: c.claimed } : null;
+        return c ? { matchId: c.matchId, tier: c.tier, deckId: c.deckId, deck: [...c.deck], populationMultiplier: c.populationMultiplier, hometown: c.hometown, city: c.place.city, district: c.place.district, claimed: c.claimed, live: c.live } : null;
       },
       get coverageDrawn() {
         return ui.coverageOn ? ui.coverageCount : 0;
