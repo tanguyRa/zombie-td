@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# One-shot: build WASM, run the tests (native, WASM, browsers), write the report, start the dev server.
+# One-shot: build WASM, run every test suite (native, native with debug
+# assertions, WASM under Node, typecheck and web unit tests, Playwright in
+# Chromium, Firefox and WebKit), write the headless report, start the dev
+# server. Extra arguments go to the report (e.g. `./run-all.sh --quick`).
 #
 # On the host this re-runs itself inside the Docker dev container (the only
 # prerequisite is Docker). Inside the container it runs the steps directly.
@@ -30,13 +33,16 @@ CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo test --release --workspace
 step "Running tests (WASM under Node: native = WASM hash)"
 wasm-pack test --node --release crates/sim-wasm
 
-step "Running web unit tests (Vitest: map blocks, cache, loader)"
+step "Typechecking the web app and its tests (tsc)"
+(cd web && npm run typecheck)
+
+step "Running web unit tests (Vitest: map blocks, cache, loader, profile, replay inputs)"
 (cd web && npm run test:unit)
 
-step "Running browser tests (Playwright: Chromium, Firefox, WebKit)"
+step "Running browser tests (Playwright: Chromium, Firefox, WebKit; the first-session test plays 8 streamed waves)"
 (cd web && npx playwright test)
 
-step "Writing the headless report (scenarios + benchmarks, several minutes)"
+step "Writing the headless report (tests, scenarios, benchmarks, the 8-wave match and its replay, the wave-8 scale bench)"
 cargo run --release -p sim-headless -- report "$@"
 
 step "Starting the dev server on http://localhost:5173"

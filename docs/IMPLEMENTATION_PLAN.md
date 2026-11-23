@@ -53,9 +53,60 @@ added, but don't build them.
   `levels/` and fixture Overpass responses served through Playwright request
   routing.
 
+## Status: done (hand-back)
+
+All nine tasks (T0–T8) are done on `gameplay-v1`, each reviewed with its
+fixes (T6 and T7 were split into a and b). The game is ready for live
+browser testing: `./run-all.sh`, or the steps in the README on the host.
+The task specs below are kept as they were written; DECISIONS.md has every
+choice made while doing them.
+
+### What shipped
+
+- **sim-core**: the 8-wave `Match` (rings, newcomers, outbreaks, fatigue,
+  retries and restarts), cards, deck rules and supply (`cards.json`), run
+  records with the replay verifier (`Replayer`, the step-by-step form the
+  browser's viewer uses, and `replay_with`), the map snapshot hash, wave-8
+  scale work (bounding-box flow fields and the rest of T1).
+- **Determinism**: golden fixtures and the golden run record, native =
+  WASM under Node, native = Chromium, Firefox and WebKit, and every E2E
+  record verified by the native `sim-headless verify`.
+- **Browser**: the match UI (HUD, hand and targeting, fog, result panels,
+  pause and speeds), streamed maps from Overpass in 250 m blocks with an
+  IndexedDB cache and the "Loading the next district…" gate, the local
+  profile (collection with stamped cards, decks and the deck builder,
+  payouts, daily caps, crates and the Hometown crate, tiers, coverage,
+  achievements, history), and the replay viewer (history or dropped
+  files, pause, step, 1×/4×/max, jump to a wave, live per-attempt hash
+  checks).
+- **Tooling**: `sim-headless match / verify / bench --scale / report`,
+  `tools/verify-run.mjs`, `./run-all.sh`, the Docker image, Playwright in
+  three browsers with a test hook and fixtures, and the first-session E2E.
+
+### Known limits
+
+- **Public Overpass is slow** and sometimes overloaded: a picked place's
+  first load took 267 s once (T6b manual check); later visits come from
+  the cache. A self-hosted or server-side map source would fix it.
+- **Firefox runs the WASM sim several times slower** than Chromium and
+  WebKit in Playwright's build, so its E2E runs take minutes where the
+  others take seconds (DECISIONS, "Streaming map (T6b)" and "Replay viewer
+  and first session (T8)").
+- **`outbreak_scale` and `fatigue_scale` are not wired**: the difficulty
+  tiers change the population only; wiring them changes what a record
+  replays, so it needs a `SIM_RULES_VERSION` bump (DECISIONS, "Profile UI
+  (T7b)").
+- **City areas are a placeholder**: a city's defended share is
+  *provisional* until its real area comes from OSM.
+- **The MVP card is approximate**: armaments whose garrisons are still on
+  the map, by kills; tactical cards and pulled-down garrisons don't count.
+- **No server**: the profile is local (IndexedDB) and rewards are not
+  verified before they are paid; the verifier, `ExpectedRun` and the
+  `ProfileService` interface are ready for one.
+
 ## Tasks
 
-### T0. Browser test harness
+### T0. Browser test harness (done)
 
 - Add Playwright (pinned version) to `web/` with projects for Chromium,
   Firefox and WebKit. Add `npm run e2e`. Vite serves the app for tests
@@ -79,7 +130,7 @@ added, but don't build them.
 - Done when: `npx playwright test` is green in all three browsers on the
   host, and the README says how to run it.
 
-### T1. Scale spike (wave-8 size)
+### T1. Scale spike (wave-8 size) (done)
 
 - Wave 8 covers a radius of about 1.1–1.6 km (GAMEPLAY.md, "The match"). On
   the 2 m grid that is ~1.5–2.5M cells (~360k today), possibly over 100k
@@ -100,7 +151,7 @@ added, but don't build them.
 - Done when: the chosen caps are in `config.default.json`, documented in
   DECISIONS.md with the measurements, and all tests are green.
 
-### T2. The match loop in sim-core
+### T2. The match loop in sim-core (done)
 
 New `Match` type (in `sim-core/src/match_.rs` or similar) that owns the sim
 and runs **8 waves**. All changes to it go through one entry point,
@@ -150,7 +201,7 @@ enum is serde-serialisable (it becomes the input log in T4).
   same actions ⇒ same hashes; `sim-headless match --level paris-marais --seed
   N` runs 8 waves with a simple scripted defence and prints a per-wave table.
 
-### T3. Cards, deck and supply in sim-core
+### T3. Cards, deck and supply in sim-core (done)
 
 - `cards.json` (data file, embedded like the config): id, name, rarity,
   kind (`fortification` | `armament` | `tactical`), supply cost, parameters.
@@ -181,7 +232,7 @@ enum is serde-serialisable (it becomes the input log in T4).
   minimum range, stockade hp, paratrooper delay and shooting); repair and
   pull-down refunds; a headless scripted match with the starter deck.
 
-### T4. Run records, replay verifier, determinism
+### T4. Run records, replay verifier, determinism (done)
 
 - `RunRecord` (serde JSON): sim version (crate version + git hash at build
   if available), **config hash and cards hash**, **map snapshot hash**
@@ -203,7 +254,7 @@ enum is serde-serialisable (it becomes the input log in T4).
   - commit a golden run record fixture whose hashes must never change
     without a deliberate version bump.
 
-### T5. Browser: match flow and cards
+### T5. Browser: match flow and cards (done)
 
 - WASM bindings and worker protocol for `Match`: actions, per-wave phase,
   hand, supply, deck/discard counts, wave number, ring radius, fatigue,
@@ -228,7 +279,7 @@ enum is serde-serialisable (it becomes the input log in T4).
   record from the page and check it **verifies headless** (the test calls
   the native verifier or a Node WASM verifier) with equal per-wave hashes.
 
-### T6. Streaming map loading and block cache
+### T6. Streaming map loading and block cache (done)
 
 - Split the area around the address into fixed **city grid blocks** (e.g.
   250 m tiles in a projection anchored on a global grid, so different
@@ -252,7 +303,7 @@ enum is serde-serialisable (it becomes the input log in T4).
   served from the cache with zero requests, a slow block delays the wave
   start correctly.
 
-### T7. Meta layer (local profile)
+### T7. Meta layer (local profile) (done)
 
 - `ProfileService` interface in `web/src/profile/` with a local
   implementation (IndexedDB). Everything the future server will own goes
@@ -284,7 +335,7 @@ enum is serde-serialisable (it becomes the input log in T4).
   stamped card in the collection, build a valid deck and use it in a match,
   invalid deck refused, tier unlock, coverage shown on the map.
 
-### T8. Replay viewer, polish, hand-back
+### T8. Replay viewer, polish, hand-back (done)
 
 - Replay viewer: open a run from match history (or a dropped JSON file) and
   play it back at any speed, with the per-wave hashes checked live.

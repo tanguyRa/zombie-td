@@ -7,13 +7,15 @@ as WASM in the browser.
 
 ![The browser match: Paris Le Marais, wave 6 of 8 in progress, with the wave HUD, the hand and the fogged next ring](docs/screenshot.jpg)
 
-*Paris Le Marais, wave 6 of 8, 27 s into the outbreak: about 2,900
-civilians (blue), a few zombies (red), the garrisons placed over six preps
-(green, with their ranges) and corpses (violet). The darker band at the edge
-of the disc is the fogged next ring. Right: the wave HUD (saved share
-against the 15% line, stamina, supply, deck and discard); bottom: the hand
-(tactical cards playable now, prep cards greyed). The "Render fps 2" comes
-from the hidden preview pane it was taken in, not from the app.*
+*Paris Le Marais, wave 6 of 8, 19 s into the outbreak: about 3,600
+civilians (blue), the zombies of the outbreak (red), the garrisons placed
+over six preps (green, with their ranges). The disc is the revealed area,
+the lighter band around it the fogged next ring, everything past it
+darker. Right: the wave HUD (saved share against the 15% line, stamina,
+supply, deck and discard); bottom: the hand (the two tactical cards kept
+for this wave are playable now, the fortifications wait for the next
+prep). The "Render fps 1" comes from the preview pane it was taken in,
+which throttles a page in the background, not from the app.*
 
 ## Prerequisites
 
@@ -43,14 +45,15 @@ wasm-pack and Node 22 on the host, the commands below also work without the
 
 | What | Command | Output |
 |---|---|---|
-| Everything | `./run-all.sh` | Builds WASM, runs all tests (native, WASM, browsers), writes the report, serves http://localhost:5173 |
+| Everything | `./run-all.sh` | Builds WASM, runs every suite (native, native with debug assertions, WASM under Node, typecheck, web unit tests, Playwright in three browsers), writes the report, serves http://localhost:5173. `./run-all.sh --quick` passes `--quick` to the report |
 | Headless test suite | `./dev.sh cargo test --release` | All tests green |
 | Headless test suite with debug assertions | `./dev.sh env CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo test --release --workspace` | All tests green with `debug_assert!`s on (release speed, own build cache) |
 | Native = WASM hash test | `./dev.sh wasm-pack test --node --release crates/sim-wasm` | WASM reproduces the native hashes and verifies the golden 8-wave run record |
 | Verify a run record | `./dev.sh cargo run --release -p sim-headless -- verify run.json --level paris-marais --expect-seed 1` | `verified: …` and the replay summary (exit 0), or `rejected: …` naming the first diverging wave attempt (exit 1) |
 | Headless report | `./dev.sh cargo run --release -p sim-headless -- report` | `reports/headless-report.md` and `.html` (charts), raw `reports/*.json` and `*.csv` |
-| Web unit tests (Node, Vitest) | `./dev.sh bash -c "cd web && npm ci && npm run test:unit"` | Map blocks, projection, snapshot hash, block cache and loader tests pass (no network, no browser); `cargo test --release -p sim-core --test t6_chunks` checks their Rust fixture. The local profile tests (`web/src/profile/`: collection, decks, payouts, daily caps, crates, tiers, coverage, storage) run in the same suite |
-| Browser tests (Chromium, Firefox, WebKit) | `./dev.sh bash -c "cd web && npm ci && npm run e2e"` | A full 8-wave match through the UI (its run record verified headless), the match UI tests and the native = browser hash test pass in all three browsers |
+| Typecheck (app, E2E and unit tests) | `./dev.sh bash -c "cd web && npm ci && npm run wasm && npm run typecheck"` | No TypeScript error |
+| Web unit tests (Node, Vitest) | `./dev.sh bash -c "cd web && npm ci && npm run test:unit"` | Map blocks, projection, snapshot hash, block cache and loader tests pass (no network, no browser); `cargo test --release -p sim-core --test t6_chunks` checks their Rust fixture. The local profile tests (`web/src/profile/`: collection, decks, payouts, daily caps, crates, tiers, coverage, storage) and the replay viewer's inputs (`replay.test.ts`) run in the same suite |
+| Browser tests (Chromium, Firefox, WebKit) | `./dev.sh bash -c "cd web && npm ci && npm run e2e"` | The first session (new profile to replay), a full 8-wave match through the UI (its run record verified headless), the match UI, streaming, profile and replay tests and the native = browser hash test pass in all three browsers |
 | Browser prototype | `./dev.sh bash -c "cd web && npm install && npm run dev"` | Playable page at http://localhost:5173 |
 
 Useful extras:
@@ -158,6 +161,26 @@ tests too.
   Veteran unlock, coverage and history.
 - `determinism.spec.ts`: runs the native/WASM fixture in each browser and
   compares its hash to `crates/sim-core/tests/fixtures/native_hash.json`.
+- `first-session.spec.ts`: the whole loop on a new profile: a place found
+  by the search (fixture Nominatim) and marked as hometown, the streamed
+  match on fixture Overpass blocks (a village: the Marais buildings within
+  150 m of the pin, on the full 1.3 km streamed map), all 8 waves cleared
+  (one armament played with real clicks, the test bot for the rest), the payout, the Hometown crate,
+  then the match's replay opened from the history with its map bundle and
+  run to the end at max speed with every hash check green, and the record
+  and bundle verified with `sim-headless verify --chunks`. See
+  DECISIONS.md, "Replay viewer and first session (T8)", for its run times.
+- `replay.spec.ts`: the replay viewer on the golden run record (a picked
+  file, a built-in level, offline): jump to a wave (forward and back),
+  step, max speed, every check green, actions refused, the profile
+  untouched; a tampered record shows which attempt diverged and both
+  hashes; a streamed run without its map asks for the bundle, then
+  replays on it.
+- `stream.spec.ts`: a picked place's streamed map (first blocks, background
+  rings, a slow and then failing block, Retry loading, no re-fetch, the
+  cache on a second visit) and its record verified headless.
+- `match-review.spec.ts`: the T5 review fixes (pause toggles, selections,
+  phase buttons, the inspect panel).
 
 Opening the app with `?test=1` (for example http://localhost:5173/?test=1)
 installs the test hook `window.__zt` (version 2: match state snapshots, the
@@ -169,6 +192,17 @@ The generated report is committed in [`reports/`](reports/headless-report.md),
 so you can read the results without running anything.
 
 ## Playing
+
+The loop in one paragraph: on the map screen pick a place (search, a pin,
+or a built-in level), then under **Match setup** a deck and a difficulty
+(and whether it is your hometown), and **Start here**. Each of the 8 waves
+starts with a prep: you draw 5 cards and spend supply on fences and
+garrisons, then start the outbreak, play tactical cards while it runs, and
+win when no zombie or infected is left (lose under 15% of the wave's
+civilians: retry it). Clearing wave 8, or leaving after some progress,
+pays resupply tickets once; tickets open crates of stamped cards for the
+deck builder, the match goes to the history, and the history replays it
+with its hash checks. Step by step:
 
 1. **Map.** Browse the street map, search an address (press Enter) or click
    to drop a pin, then **Start here**. The dashed circle is the play area:
@@ -253,7 +287,8 @@ so you can read the results without running anything.
      date); starter cards are account-bound.
    - **Crates**: one ticket opens a crate of three cards, with its lore
      (where and how it was recovered).
-   - **Match history**: every claimed match, with **Download run record**.
+   - **Match history**: every claimed match, with **Replay** and
+     **Download run record**.
    - **Progress**: the tiers, the cities you defended (marked
      *provisional* while the city's real area is unknown) and the
      achievements.
@@ -261,6 +296,22 @@ so you can read the results without running anything.
    coloured by the highest tier (Recruit green, Veteran blue, Elite purple,
    Nightmare red). Stamps and the history name a district and a city only,
    from the place search's administrative fields, never a street.
+
+8. **Replay.** **Replay** in the match history, or **Open a replay…** on
+   the map screen (drop or pick a run record, plus its map bundle for a
+   streamed map), plays a run back in the game view: the worker rebuilds
+   the match from the record's seed, deck and multiplier and applies its
+   actions on their ticks. The panel on the left has Pause / Play,
+   **Step** (one tick), 1×, 4× and **Max**, and **Jump to wave n** (back in
+   time rebuilds from the start). Below it, every wave attempt has two
+   checks, its prep and its end: grey until reached, green when the state
+   hash equals the record's, red with the attempt, the tick and both
+   values when it doesn't; the last row checks the end of the record. A
+   run on a built-in level replays offline. A streamed run needs its
+   blocks: the map bundle ("Download map" in the match panel), or this
+   browser's map cache when it still has them all; without either the
+   viewer says it needs the bundle. A replay is read-only: no card, no
+   claim, no daily reward, nothing written to the profile.
 
 Pan by dragging the map (except while drawing a fence), zoom with the wheel
 or the +/− buttons, **Frame level** to re-centre. The debug panel shows the
@@ -277,38 +328,33 @@ Speeds: civilians wander at 1.2 m/s and flee at 4.4 m/s; zombies run at
 
 ## Results
 
-From the committed [headless report](reports/headless-report.md), generated
-on the Apple M1 Pro inside the Docker dev container (Linux VM, one thread).
+From the committed [headless report](reports/headless-report.md), regenerated
+in T8 with `report --quick` (2 seeds per scenario, no S5, 600-tick
+benchmarks, the wave-8 scale bench at 1.3 km only; the full report's scale
+bench takes about an hour) on the host, an Apple M1 Pro, one thread.
 
 | Check | Target | Measured | Result |
 |---|---|---|---|
-| Native p95 tick, 100k agents | ≤ 15 ms | 21.16 ms | **FAIL** |
-| Native max tick, 100k agents | ≤ 30 ms | 29.95 ms | PASS |
-| WASM (Node) p95 tick, 100k agents | ≤ 25 ms | 26.48 ms | **FAIL** |
-| WASM (Node) max tick, 100k agents | ≤ 45 ms | 38.93 ms | PASS |
-| Tests (24, incl. native = WASM hash) | all pass | 24/24 | PASS |
+| Native p95 tick, 100k agents | ≤ 15 ms | 7.50 ms | PASS |
+| Native max tick, 100k agents | ≤ 30 ms | 8.34 ms | PASS |
+| WASM (Node) p95 tick, 100k agents | ≤ 25 ms | 9.02 ms | PASS |
+| WASM (Node) max tick, 100k agents | ≤ 45 ms | 9.54 ms | PASS |
+| Tests (`cargo test --release --workspace`, `wasm-pack test --node`) | all pass | 143/143 | PASS |
 
-**The p95 targets fail since the speed change** (civilians 2×, zombies 3×).
-Before it, native p95 was 13.21 ms and WASM 16.63 ms. Faster zombies convert
-nearly everyone within the 150 s benchmark and then run in dense columns, so
-separation (pushing overlapping agents apart) now takes 59% of the tick:
-about 8 ms at 100k, against about 4 ms before. Lowering the scan cap from 48
-to 24 only brings native p95 to 17.9 ms, so meeting the target needs a
-reworked separation pass (for example a finer grid sized to the 0.6 m
-radius).
+(The quick benchmark runs 600 ticks, 30 s of game time, before the
+outbreak has spread; the full report's 3,000-tick runs are the stricter
+figure, see "Scale (T1, wave-8 size)" in DECISIONS.md.)
 
-**Browser, measured before the speed change (Apple M1 Pro, Chrome-based
-preview):** at 100k agents the sim kept real time at 9.7 ms last /
-18.6–19.3 ms p95 per tick (target: under 50 ms), with no fallback mode.
-
-**Render fps:** the owner checked the HUD's "Render fps" at 100k agents in a
-normal browser window and found it smooth. No exact number was recorded.
-
-Scenario highlights (5 seeds each, new speeds): every scenario now ends in a
-loss. Without defense, Paris loses half its civilians after about 91 s (S1)
-and 90% after about 136 s. Eight central garrisons kill about 183 zombies but
-don't change the outcome (S2). The fence ring in S3 is first breached after
-10 s. The suburb falls faster than Paris (S4, half lost at 59 s).
+- **8-wave match** (`sim-headless match --level paris-marais --seed 1`,
+  the starter deck and the scripted defence): all 8 waves won at the first
+  try, 9,120 ticks, 5,587 civilians alive at the end; played in 3.9 s
+  native; its run record replays in 3.9 s native and 5.2 s in WASM under
+  Node.
+- **Wave-8 scale** (1.3 km synthetic city, 100k agents): p95 12.9 ms
+  native and 16.7 ms WASM per tick, within the browser's 50 ms.
+- **Browser**: the first-session E2E clears a streamed 1.3 km match and
+  replays it in 1.2–1.5 min in Chromium and WebKit, 5.9 min in Firefox
+  (DECISIONS.md, "Replay viewer and first session (T8)").
 
 ## How it works
 
@@ -346,6 +392,12 @@ don't change the outcome (S2). The fence ring in S3 is first breached after
   deck.gl as an overlay on the MapLibre street map (`@deck.gl/mapbox`).
   Layer data stays in sim meters; a model matrix turns it into lng/lat
   offsets from the level centre, the exact inverse of the level projection.
+- **`web/src/replay.ts`, `web/src/ui/replayui.ts`**: the replay viewer:
+  the record and its map (built-in level, map bundle or block cache), the
+  picker and the panel. The replay itself runs in the worker on
+  `WasmMatch.replay_level` / `replay_chunks`, which drive sim-core's
+  `Replayer` (the step-by-step form of the verifier: `replay_with` runs
+  the same thing to the end).
 - **`web/src/explore.ts`**: the map screen (MapLibre GL with OpenFreeMap
   tiles, Nominatim search).
 - **`web/src/map/`, `web/src/stream.ts`, `web/src/mapsession.ts`**: the

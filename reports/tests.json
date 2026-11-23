@@ -1,7 +1,17 @@
 [
   {
     "group": "sim-core unit",
+    "name": "mapsnap::tests::duplicate_block_is_refused",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
     "name": "rng::tests::reference_stream",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "mapsnap::tests::fnv1a64_known_vectors",
     "ok": true
   },
   {
@@ -17,6 +27,11 @@
   {
     "group": "sim-core unit",
     "name": "match_::tests::state_hash_covers_what_the_rest_of_a_wave_depends_on",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "grid::tests::nearest_walk_matches_the_full_square_search",
     "ok": true
   },
   {
@@ -176,7 +191,7 @@
   },
   {
     "group": "sim-core unit",
-    "name": "config_is_valid_and_rings_fit_the_level",
+    "name": "a_half_applied_building_owns_only_its_new_cells",
     "ok": true
   },
   {
@@ -191,7 +206,27 @@
   },
   {
     "group": "sim-core unit",
+    "name": "config_is_valid_and_rings_fit_the_level",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_level_fence_in_a_walled_ring_never_opens_it",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
     "name": "a_population_capped_match_plays",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_level_fence_never_reopens_a_walled_pocket",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_block_beyond_the_old_grid_edge_is_awaited",
     "ok": true
   },
   {
@@ -206,12 +241,12 @@
   },
   {
     "group": "sim-core unit",
-    "name": "placements_persist_and_broken_fences_stay_broken",
+    "name": "newcomers_come_from_the_new_ring_and_survivors_stay_put",
     "ok": true
   },
   {
     "group": "sim-core unit",
-    "name": "newcomers_come_from_the_new_ring_and_survivors_stay_put",
+    "name": "placements_persist_and_broken_fences_stay_broken",
     "ok": true
   },
   {
@@ -231,7 +266,7 @@
   },
   {
     "group": "sim-core unit",
-    "name": "retry_restores_the_prep_state_exactly",
+    "name": "chunks_give_the_same_match_whatever_their_arrival_order",
     "ok": true
   },
   {
@@ -241,7 +276,7 @@
   },
   {
     "group": "sim-core unit",
-    "name": "chunks_give_the_same_match_whatever_their_arrival_order",
+    "name": "retry_restores_the_prep_state_exactly",
     "ok": true
   },
   {
@@ -256,12 +291,12 @@
   },
   {
     "group": "sim-core unit",
-    "name": "tiny_levels_play_through",
+    "name": "match_hash_fixture",
     "ok": true
   },
   {
     "group": "sim-core unit",
-    "name": "match_hash_fixture",
+    "name": "tiny_levels_play_through",
     "ok": true
   },
   {
@@ -286,11 +321,6 @@
   },
   {
     "group": "sim-core unit",
-    "name": "same_seed_and_actions_give_the_same_hashes",
-    "ok": true
-  },
-  {
-    "group": "sim-core unit",
     "name": "ring_ready_and_area_revealed_agree",
     "ok": true
   },
@@ -302,6 +332,11 @@
   {
     "group": "sim-core unit",
     "name": "match_hash_ignores_field_budgets_and_eager_jobs",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "same_seed_and_actions_give_the_same_hashes",
     "ok": true
   },
   {
@@ -336,12 +371,12 @@
   },
   {
     "group": "sim-core unit",
-    "name": "a_cell_taken_over_twice_goes_back_whatever_the_pull_down_order",
+    "name": "airstrike_and_convoy",
     "ok": true
   },
   {
     "group": "sim-core unit",
-    "name": "a_mulligan_drops_an_earlier_keep_choice",
+    "name": "a_cell_taken_over_twice_goes_back_whatever_the_pull_down_order",
     "ok": true
   },
   {
@@ -351,7 +386,7 @@
   },
   {
     "group": "sim-core unit",
-    "name": "airstrike_and_convoy",
+    "name": "a_mulligan_drops_an_earlier_keep_choice",
     "ok": true
   },
   {
@@ -366,17 +401,17 @@
   },
   {
     "group": "sim-core unit",
+    "name": "repair_and_pull_down",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
     "name": "pulling_down_a_fence_gives_taken_over_cells_back",
     "ok": true
   },
   {
     "group": "sim-core unit",
     "name": "mulligan_and_keep_rules",
-    "ok": true
-  },
-  {
-    "group": "sim-core unit",
-    "name": "repair_and_pull_down",
     "ok": true
   },
   {
@@ -421,6 +456,156 @@
   },
   {
     "group": "sim-core unit",
+    "name": "oversized_shells_and_fences_are_refused_quickly",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_forged_chunk_shell_is_refused",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "streamed_records_do_not_depend_on_chunk_order",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "scripted_match_covers_the_actions",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "record_json_layout",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "golden_run_record",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "huge_logs_and_endless_records_are_refused_quickly",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_card_not_in_hand",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_future_tick",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_map",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_reordered_actions",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_seed_and_deck",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_versions_config_cards",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "endless_waves_and_preps_stop_at_the_limit",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_changed_tick",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_changed_action",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "the_population_multiplier_is_range_checked",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "the_progress_callback_can_cancel",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_not_enough_supply",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "unknown_record_fields_are_refused",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_edited_wave_hash",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "tamper_wrong_phase",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "a_truncated_record_verifies_as_abandoned",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "the_replayer_steps_to_the_same_summary_with_every_check",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "scripted_record_replays_three_times",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "the_issued_seed_deck_and_multiplier_are_enforced",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "the_end_prep_hash_and_start_tick_are_checked_on_a_result_screen",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "phase_and_kind_names_read_as_words",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "no_debug_names_or_hidden_indices",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "verifier_deck_and_setup_messages_read_as_words",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
     "name": "fnv1a64_known_vectors",
     "ok": true
   },
@@ -441,7 +626,52 @@
   },
   {
     "group": "sim-core unit",
+    "name": "verify::tests::numbers_are_digits_or_a_plain_decimal",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "streamed_run_verifies_with_a_shell_file",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "verify_run_mjs_rejects_bad_arguments",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "both_verifiers_share_one_number_grammar",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
     "name": "scripted_starter_deck_match_clears_the_marais",
+    "ok": true
+  },
+  {
+    "group": "sim-core unit",
+    "name": "recorded_match_verifies_and_tampering_is_rejected",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_verifies_the_golden_run_record",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_verifies_streamed_runs_on_the_servers_shell",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_validate_deck_matches_the_cases",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_summary_says_whether_the_setup_was_checked",
     "ok": true
   },
   {
@@ -451,7 +681,22 @@
   },
   {
     "group": "Native = WASM",
+    "name": "wasm_replay_mode_plays_the_golden_record",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_rejects_a_tampered_record",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
     "name": "wasm_match_hash_matches_native_fixture",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_match_binding_follows_the_golden_log",
     "ok": true
   },
   {
@@ -462,6 +707,11 @@
   {
     "group": "Native = WASM",
     "name": "wasm_fence_break_hash_matches_native_fixture",
+    "ok": true
+  },
+  {
+    "group": "Native = WASM",
+    "name": "wasm_checks_the_issued_run",
     "ok": true
   }
 ]

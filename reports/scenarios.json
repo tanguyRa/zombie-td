@@ -13,7 +13,7 @@
     "survivors": 0,
     "t50": 110.85,
     "t90": 173.7,
-    "wall_seconds": 18.991870333,
+    "wall_seconds": 18.205165709,
     "zombies_killed": 0
   },
   {
@@ -30,7 +30,7 @@
     "survivors": 0,
     "t50": 116.35,
     "t90": 168.9,
-    "wall_seconds": 19.934064958,
+    "wall_seconds": 19.0956085,
     "zombies_killed": 0
   },
   {
@@ -47,7 +47,7 @@
     "survivors": 0,
     "t50": 111.6,
     "t90": 176.2,
-    "wall_seconds": 21.778933875,
+    "wall_seconds": 20.849597834,
     "zombies_killed": 209
   },
   {
@@ -64,7 +64,7 @@
     "survivors": 0,
     "t50": 117.85,
     "t90": 170.55,
-    "wall_seconds": 15.05060725,
+    "wall_seconds": 14.301682,
     "zombies_killed": 155
   },
   {
@@ -81,7 +81,7 @@
     "survivors": 0,
     "t50": 20.0,
     "t90": 22.15,
-    "wall_seconds": 0.110131916,
+    "wall_seconds": 0.097674792,
     "zombies_killed": 0
   },
   {
@@ -98,7 +98,7 @@
     "survivors": 0,
     "t50": 19.85,
     "t90": 21.85,
-    "wall_seconds": 0.093615667,
+    "wall_seconds": 0.099953458,
     "zombies_killed": 0
   },
   {
@@ -115,7 +115,7 @@
     "survivors": 0,
     "t50": 83.7,
     "t90": 127.0,
-    "wall_seconds": 10.316799,
+    "wall_seconds": 9.732698167,
     "zombies_killed": 0
   },
   {
@@ -132,7 +132,7 @@
     "survivors": 0,
     "t50": 68.55,
     "t90": 109.2,
-    "wall_seconds": 12.117280875,
+    "wall_seconds": 11.4912065,
     "zombies_killed": 0
   }
 ]

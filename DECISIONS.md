@@ -1439,8 +1439,10 @@ yet: that comes after T5).
   backoff starts (a backoff under way is cut short), but the request in
   flight is never cut by the budget, only by its own limit, and its answer
   is used if it comes. Otherwise the batch has failed for good ("Overpass
-  could not load these blocks within 150 s (last error: …). Try again in a
-  minute."), so the first load fails or the banner shows the error and
+  could not load these blocks in time (last error: …). Try again in a
+  minute."; T8: the message used to say "within 150 s", which a batch whose
+  last request started near the budget overshoots by up to 90 s, so it now
+  names no duration), so the first load fails or the banner shows the error and
   Retry loading. Bound: budget + one request limit, 240 s (a request
   started just before 150 s runs to 240 s); servers that never answer fail
   at 180 s (both endpoints once), servers that answer 504 at once after the
@@ -1675,15 +1677,26 @@ yet: that comes after T5).
     own `end`.
   `ExpectedRun` fields left `None` are not checked (`replay` passes no
   expectation at all: tests and tools); a server passes all three.
-  `ReplaySummary.setup_checked` says whether an expectation with at least
-  one field ran (`false` for `None` or an empty `ExpectedRun`), so a
-  caller can tell a checked run from an unchecked one; a server refuses
-  to pay out on `false`. In WASM (`verify_level` / `verify_chunks`) only
+  `ReplaySummary.setup_checked` is `true` only when the seed, the deck
+  **and** the multiplier were all checked (T8 fix: it used to be `true`
+  for an expectation with at least one field, so a server bug that
+  dropped the seed would still read as checked), and
+  `ReplaySummary.checked {seed, deck, population_multiplier}` says which
+  fields were; a server refuses to pay out on `false`. The CLI and
+  `tools/verify-run.mjs` name the fields not checked in their verdict
+  line ("(deck, multiplier not checked against an issued run: --expect-*)"). In WASM (`verify_level` / `verify_chunks`) only
   `undefined` means "no expectation": `""`, `"null"` and `{}` are refused
   as `bad_expected`, so a caller's bug can't switch every check off. The
   CLI (`sim-headless verify`) and `tools/verify-run.mjs` refuse an
   unknown flag, a flag given twice or a stray argument (exit 2), so a
-  typo'd `--expect-*` can't be skipped silently.
+  typo'd `--expect-*` can't be skipped silently. **One number grammar in
+  both (T8):** a seed (and `--max-ticks`) is `^\d+$` up to 2^64 - 1, a
+  multiplier a plain decimal `^\d+(\.\d+)?$`; a sign, spaces, `0x`, an
+  exponent, `inf` or `nan` is a usage error (exit 2) naming the flag,
+  before any file is read. Before, Rust's `parse` took `+3` and `inf`
+  and JS's `Number` took `0x1`, ` 3 ` and `1e3`. `parse_integer` /
+  `parse_decimal` (sim-headless `verify.rs`) have unit tests, and the CLI
+  test runs the same refused and accepted values through both tools.
 - **Shell bounds** (`ShellLimits::for_config`, checked by
   `Match::new_streaming` itself as `MatchError::BadShell` before the grid
   is allocated, and by the verifier on the record's shell as `bad_shell`
@@ -2380,3 +2393,140 @@ calls `matchSetup()`, `startMatch()`, the tracker's `abandon()` /
   tests in 13.6–16.6 min, green twice. One run had a WebKit failure in
   T5's "phase buttons" test (the Pause click did not register, in a 17 s
   run of a 4 s test under load); it passed 6 of 6 when rerun alone.
+
+## Replay viewer and first session (T8)
+
+- **The replay is sim-core's verifier, stepped.** `record::Replayer` is
+  `replay_with` cut into steps: `Replayer::start(record, map, expected,
+  cfg, cards, limits)` makes every check that needs no simulation and the
+  map's, and builds the match from the record's setup on the given map;
+  each `step(&mut match)` applies the action due on this tick, else steps
+  one tick, else (at `end.tick`) makes the final checks, with the same
+  checks in the same order as before. `replay_with` is now a loop over
+  it (every T4 test, the golden record and the tamper tests unchanged).
+  Every check that passes is kept as a `ReplayCheck {attempt, wave, tick,
+  what: prep|end|final, hash, result}`; the first failure ends the replay
+  and every later step returns it. The replayer doesn't own the match, so
+  the viewer renders it between steps; `check_start` makes the opening
+  check (attempt 0's prep) without stepping, so a record that diverges at
+  tick 0 still shows its map.
+- **In the browser** the worker runs it: `init` with `replay {record}` (and
+  the map: the level, or the shell and every block of the record) builds
+  `WasmMatch.replay_level` / `replay_chunks` (marshalling only: a
+  `WasmMatch` holding a `Replayer`). `replay_run(max_ticks, max_actions,
+  max_ms, stop_wave)` steps it within those budgets and returns the new
+  checks, the position and the outcome (summary or `VerifyError` JSON).
+  The worker's replay loop: 1×/2×/4× step that many ticks per 50 ms like a
+  played match, one action per slice and then a hold of 400 ms / speed
+  (the browser never steps prep, so a whole prep's plays are on one tick:
+  the hold lets them be followed); Max runs 40 ms slices back to back;
+  Step (`replay_ctl step`) is one tick plus the actions due before it,
+  paused; Jump to wave n runs at Max until wave n's prep opens
+  (`stop_wave`), then pauses, and a jump to the current wave or before
+  rebuilds the match from the record first (the replay only goes
+  forward). Pause works in any phase. The worker posts the usual
+  `status` / `state` / `placements` / `geometry`, so the game view draws
+  the replay as it draws a match, plus a `replay` progress message.
+- **Read-only, and never the profile.** In replay mode `WasmMatch.apply`
+  and `add_buildings` are refused (`read_only`), the worker answers every
+  `action` with that error and ignores `chunk`, and the page hides the
+  match controls (seed, start, retry, restart, speed buttons, mulligan,
+  the tools panel and the result panel), renders the hand without click
+  handlers, and never calls the match tracker (no claim, no daily event:
+  `ready`, `status` and phase changes skip it). The history's Replay
+  button only reads the stored record (`getMatch`). The E2E tests compare
+  the whole profile state before and after a replay.
+- **The checks on screen.** One row per recorded attempt (plus the
+  attempt open at the end of a record that stops in a prep or a wave)
+  with a prep and an end dot, and a last row for the end of the record:
+  grey until reached, green when the replay made that check, red at the
+  `diverged` error's attempt and check (`what`: wave, start tick or prep
+  hash is the prep dot; end tick, result, end hash, extra or missing
+  attempt the end dot; phase and final hash the end row). The verdict
+  line says "Diverged at attempt k (wave w), tick t: the end hash is X in
+  the replay, Y in the record." (attempts numbered from 1 for people,
+  the hook keeps the 0-based index), or the rejection's message for the
+  other errors (illegal action, map hash...), or "Verified".
+- **Where the map comes from** (`web/src/replay.ts`). A level run: the
+  built-in level whose centre and radius are the record shell's (the
+  verifier then compares them bit for bit and hashes the buildings), or a
+  level file given with the record: offline. A streamed run: a map bundle
+  given with the record ("Download map"), else **the browser's block
+  cache** when it still holds every block of the record (projected on the
+  record's centre, exactly as the loader did, on a shell rebuilt with
+  `buildShell` for that centre), else the picker says it needs the bundle
+  and how many blocks are missing. The cache is a convenience for one's
+  own recent runs: a block refreshed since (new OSM data) changes the
+  snapshot hash and the replay says `map_hash`; the bundle is the sure
+  way. The files are told apart by content (a record, a bundle with
+  `chunks`, a level with buildings), so they can be dropped together or
+  one after the other.
+- **The history has no map** (T7b): Replay on a streamed match tries the
+  cache, then asks for the bundle in the picker, the record already
+  loaded. The first-session test empties the cache first (the test hook's
+  `clearMapCache`, map data only) so it goes through the bundle.
+- **The first-session E2E** (`web/e2e/first-session.spec.ts`, all three
+  browsers, offline): a new profile; the place search answered by a
+  fixture Nominatim (the Marais centre, admin names Le Marais / Paris),
+  picked and marked as hometown; "Start here" on the streamed 1.3 km
+  shell with the fixture Overpass of stream.spec.ts (now shared in
+  `e2e/streamfixture.ts`); 8 waves cleared on seed 1 by the test bot
+  (`playPrep` through the hook), the first armament of wave 1 played with
+  real clicks on the buildings the bot would have picked (so the plays
+  are the bot's, and the Node check below predicts the browser run tick
+  for tick); the claim (cleared, paid, Veteran unlocked, the no-retry
+  bonus); the Hometown crate (5 cards stamped Le Marais, Paris, wave 8);
+  the run record and the map bundle downloaded from the match panel and
+  equal to the history's record; then the block cache emptied (test hook
+  `clearMapCache`), Replay in the history, the picker asking for the
+  bundle, the bundle given, the replay run at Max to the end with all 17
+  checks green (8 attempts × prep and end, and the end of the record),
+  the profile unchanged by it; and `sim-headless verify --chunks` on the
+  downloaded files with the browser's attempt and final hashes.
+- **Its map is a village**, the Marais buildings within 150 m of the
+  centre (109 buildings, `villageLevel` in `test/unit/fixtures.ts`), on
+  the full 1.3 km streamed map (109 blocks, all fetched). The test bot
+  can't clear 8 streamed waves on the whole Marais fixture: under Node
+  (the WASM build, the same bot), seeds 1–20 with the simple bot or with
+  tactical cards (`zombieHotspot` every 40 ticks, as the T5 scenario)
+  mostly lose the dense wave 2 or 3, and the best (seed 1) wins waves
+  1–7 and then loses wave 8 in 43 ticks: about 200 civilians are left by
+  then (nothing lives past 400 m, so the outer rings bring no
+  newcomers), and wave 8's inner outbreaks take the wave under 15% at
+  once. Filling the outer rings with sparse copies of the Marais (one
+  building in 4 to 64, over the whole disc, only in the outer rings, or
+  thinning the core too) made it worse: the bot can't protect those
+  newcomers, so the waves that reveal them fall under 15%. On the
+  village every civilian and every garrison is in wave 1's ring and the
+  outer outbreaks have to come to them: seed 1 clears all 8 waves at the
+  first try (5,106 ticks); with tactical cards seed 3 clears it too (one
+  lost attempt), and a 120 m village clears seeds 1 and 2. It keeps
+  what the test is about (a streamed place, the loader, the 1.3 km grid
+  and its flow fields, the full loop) without needing a better bot.
+- **Run times** (M1 Pro, one browser at a time or two in parallel; the
+  sim is identical, 5,106 ticks in each): Chromium 1.5 min (8 waves
+  33 s, replay at Max 26 s), WebKit 1.2 min (32 s, 24 s), Firefox
+  5.9 min (8 waves 173 s, replay 163 s: Firefox's WASM is several times
+  slower in Playwright's build, as in the stream test). No shortened
+  Firefox variant was needed. Replaying the golden record (17,577 ticks,
+  the Marais level) at Max takes 12 s in Chromium and WebKit and 72 s in
+  Firefox (`replay.spec.ts`).
+- **Whole suite after T8:** 90 tests (30 per browser) in 9.1 min on three
+  workers, green twice in a row; in it the first session takes 93 s in
+  Chromium, 74 s in WebKit and 371 s in Firefox. The report was
+  regenerated with `report --quick` (6.8 min; the full one's scale bench
+  takes about an hour) and has a new **8-wave match** section: the
+  per-wave table of `sim-headless match --level paris-marais --seed 1`,
+  the time to play it (3.9 s native) and to replay its record (3.9 s
+  native, 5.2 s WASM under Node with `tools/verify-run.mjs`).
+- **Manual check (T8, the dev server in the desktop preview, Chromium):**
+  a Marais match played with clicks only (rifles, a mortar and a fence
+  placed by building clicks and a drag; wave 1 lost twice, retried, won;
+  wave 2 won), ← Map with its payout panel, the deck builder, a crate
+  opened (three stamped cards), the history's Replay run at 4× then Max
+  to the end with every check green. A golden-record replay dropped in
+  the picker, a jump back to wave 3 and a tampered record (attempt 3 in
+  red with both hashes) were checked the same way. Nothing needed fixing.
+  Seen and left as is: a wave's result panel covers the toolbar, so ← Map
+  needs Close first (T5 behaviour); the abandoned match's payout says
+  "Furthest wave 3" after two waves won (T7a's rule: the wave reached).
